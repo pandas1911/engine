@@ -43,7 +43,7 @@ class SpawnTool(Tool):
     """Tool for spawning child agents asynchronously."""
 
     name = "spawn"
-    description = "创建一个子Agent来异步执行任务"
+    description = "创建一个子代理来异步执行任务，任务执行完毕后子代理将自动唤醒主代理并汇报任务结果"
     parameters = {
         "type": "object",
         "properties": {
@@ -128,7 +128,11 @@ You are a **subagent** spawned by the {parent_label} for a specific task.
             self._run_child_agent(child_session, task_desc, task_id, config)
         )
 
-        return f"[Spawned] {task_id} ({label})"
+        return f"""━━━━ Spawned Task ━━━━
+Task ID: {task_id}
+Agent: {label}
+
+Sub-agent is now executing in the background. Upon completion, you will be automatically re-activated and receive a full result report. You may proceed with other independent tasks or simply end your current turn."""
 
     async def _run_child_agent(
         self, child_session: Session, task_desc: str, task_id: str, config: Config
