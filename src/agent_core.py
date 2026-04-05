@@ -270,7 +270,7 @@ class Agent:
                 "子代理目前已经全部完成并返回结果，基于以下子代理结果给出综合回复:\n"
             )
             for task_id, result in child_results.items():
-                findings_prompt += f"\n[{task_id}]\n{result}\n"
+                findings_prompt += f"\n[{task_id}] {result}\n"
 
             self.session.add_message("system", findings_prompt)
 
