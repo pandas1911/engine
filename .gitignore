@@ -2,6 +2,9 @@
 .env
 .env.*
 
+# Project specific files
+AGENTS.md
+
 # Node modules
 node_modules/
 
