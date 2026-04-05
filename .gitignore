@@ -1,0 +1,43 @@
+# Environment variables
+.env
+.env.*
+
+# Node modules
+node_modules/
+
+# Logs
+*.log
+logs/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python virtual environment
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+ENV/
+
+# Project specific
+.sisyphus/
+.pytest_cache/
+.ruff_cache/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
