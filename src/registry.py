@@ -51,6 +51,8 @@ class SubagentRegistry:
         Raises:
             ValueError: If registering would create a cycle in the task hierarchy
         """
+        print(f"[{task_id} 完成注册]")
+
         # Check for cycles before registering
         if parent_task_id and self._would_create_cycle(task_id, parent_task_id):
             raise ValueError(

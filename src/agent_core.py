@@ -191,12 +191,12 @@ class Agent:
         """
         print(f"{self.display_id} ← Subagent complete: {child_task_id}")
 
-        self.session.add_message(
-            "user",
-            f"[子代理完成 {child_task_id}] : {result}",
-            is_subagent_result=True,
-            child_task_id=child_task_id,
-        )
+        # self.session.add_message(
+        #     "user",
+        #     f"[子代理完成 {child_task_id}] : {result}",
+        #     is_subagent_result=True,
+        #     child_task_id=child_task_id,
+        # )
 
         pending_children = self.registry.count_pending_for_parent(self.task_id)
 
@@ -251,10 +251,14 @@ class Agent:
                 f"{self.display_id} ← Collected {len(child_results)} descendant results"
             )
             findings_prompt = (
-                "子代理目前已经全部完成并返回结果，基于以下子代理结果给出综合回复:\n"
+                "以下是你派出的所有子代理的执行报告，每个子代理都独立完成了自己的任务。\n"
             )
             for task_id, result in child_results.items():
-                findings_prompt += f"\n[{task_id}] {result}\n"
+                task = self.registry.get_task(task_id)
+                task_desc = task.task_description if task else "未知任务"
+                findings_prompt += (
+                    f"【{task_id}】\n任务: {task_desc}\n结果: {result}\n\n"
+                )
         else:
             print(f"{self.display_id} ← No descendant results collected")
             findings_prompt = "子代理目前已经全部完成任务，但是并未获得任何结果。"

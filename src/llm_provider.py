@@ -114,8 +114,8 @@ class MiniMaxProvider(LLMProvider):
                         f"{display_id} ← Tool: {tc.name}(task='{task_preview}', label='{label}')"
                     )
             elif content.strip():
-                preview = content[:120].replace("\n", " ")
-                if len(content) > 120:
+                preview = content[:300].replace("\n", " ")
+                if len(content) > 300:
                     preview += "..."
                 print(f"{display_id} ← Response: {preview}")
 
