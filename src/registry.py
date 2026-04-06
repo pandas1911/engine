@@ -105,6 +105,17 @@ class SubagentRegistry:
 
         return ancestors
 
+    async def set_agent(self, task_id: str, agent: "Agent"):
+        """Set the agent reference for a task.
+
+        Args:
+            task_id: The task ID
+            agent: The corresponding Agent instance
+        """
+        async with self._lock:
+            if task_id in self._tasks:
+                self._tasks[task_id].agent = agent
+
     def _would_create_cycle(self, new_agent_id: str, parent_task_id: str) -> bool:
         """Check if registering would create a cycle in the task hierarchy.
 
@@ -225,7 +236,7 @@ class SubagentRegistry:
             parent_task.status = "running"
             parent_task.wake_on_descendants_settle = False
 
-        parent = parent_task.parent_agent
+        parent = parent_task.agent
         if parent:
             print(f"[Registry] Wake: {parent_task_id}")
             await parent._on_descendant_wake(child_task_id, child_result)

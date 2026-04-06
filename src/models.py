@@ -94,6 +94,7 @@ class SubagentTask:
     completed_event: asyncio.Event = field(default_factory=asyncio.Event)
     wake_on_descendants_settle: bool = False
     ended_at: Optional[float] = None
+    agent: Optional[Any] = None  # Reference to the agent instance for this task
 
 
 __all__ = [
