@@ -12,6 +12,7 @@ from src.models import AgentState, LLMResponse, Session, ToolCall
 from src.config import Config
 from src.registry import SubagentRegistry
 from src.tools import SpawnTool
+from src.llm_provider import MockLLMProvider
 
 if TYPE_CHECKING:
     from src.llm_provider import LLMProvider
@@ -192,7 +193,7 @@ class Agent:
 
         self.session.add_message(
             "user",
-            f"[子代理{child_task_id}完成] : {result}",
+            f"[子代理完成 {child_task_id}] : {result}",
             is_subagent_result=True,
             child_task_id=child_task_id,
         )
@@ -309,70 +310,6 @@ class Agent:
         ]
 
 
-class MockLLMProvider:
-    """Mock LLM provider for testing."""
-
-    def __init__(self):
-        self.call_count = 0
-
-    async def chat(
-        self, messages: List[Dict], tools: List[Dict], **kwargs
-    ) -> LLMResponse:
-        self.call_count += 1
-
-        last_content = messages[-1].get("content", "") if messages else ""
-        has_spawn_tool = any(
-            t.get("function", {}).get("name") == "spawn" for t in tools
-        )
-        has_subagent_result = (
-            "[子代理完成]" in last_content or "[子代理结果汇总]" in last_content
-        )
-        has_wake_notification = "[唤醒通知]" in last_content
-
-        if self.call_count == 1 and has_spawn_tool:
-            return LLMResponse(
-                tool_calls=[
-                    ToolCall(
-                        name="spawn",
-                        arguments={"task": "分析代码结构", "label": "analyzer"},
-                        call_id="call_1",
-                    )
-                ]
-            )
-
-        if has_subagent_result or has_wake_notification:
-            return LLMResponse(
-                content="综合所有子代理的结果分析：代码结构清晰，建议增加单元测试。具体发现包括：1）模块划分合理 2）依赖关系清晰 3）命名规范统一。"
-            )
-
-        if self._is_subagent(messages):
-            depth = self._get_depth(messages)
-            return LLMResponse(
-                content=f"[子Agent完成-深度{depth}] 分析完成：发现3个主要模块，依赖关系清晰。"
-            )
-
-        return LLMResponse(content="处理完成")
-
-    def _is_subagent(self, messages: List[Dict]) -> bool:
-        for msg in messages:
-            if msg.get("role") == "system" and "Subagent Context" in msg.get(
-                "content", ""
-            ):
-                return True
-        return False
-
-    def _get_depth(self, messages: List[Dict]) -> int:
-        for msg in messages:
-            if msg.get("role") == "system":
-                content = msg.get("content", "")
-                if "Depth:" in content:
-                    try:
-                        return int(content.split("Depth:")[1].split("/")[0].strip())
-                    except (ValueError, IndexError):
-                        pass
-        return 0
-
-
 async def run_agent(task: str, config: Optional[Config] = None) -> tuple[str, Session]:
     """Run root Agent."""
     from src.config import Config as ConfigCls
@@ -390,6 +327,5 @@ async def run_agent(task: str, config: Optional[Config] = None) -> tuple[str, Se
 
 __all__ = [
     "Agent",
-    "MockLLMProvider",
     "run_agent",
 ]
