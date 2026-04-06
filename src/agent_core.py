@@ -38,10 +38,13 @@ class Agent:
         self.tools = tools or []
         self.task_id = task_id or f"task_{uuid.uuid4().hex[:8]}"
         self.parent_task_id = parent_task_id
-        self.label = label or ("Root" if session.depth == 0 else f"Sub:{session.depth}")
+        self.label = label or (
+            "Root" if session.depth == 0 else f"Sub Depth:{session.depth}"
+        )
         self.state = AgentState.IDLE
         self._final_result: Optional[str] = None
         self._completion_event = asyncio.Event()
+        self.display_id = f"[{self.label}|{self.task_id}]"
 
         if session.depth < config.max_depth:
             self.tools.append(
@@ -185,8 +188,7 @@ class Agent:
             child_task_id: The completed child task ID
             result: The child's result
         """
-        display_id = f"[{self.label}|{self.task_id}]"
-        print(f"{display_id} ← Subagent complete: {child_task_id}")
+        print(f"{self.display_id} ← Subagent complete: {child_task_id}")
 
         self.session.add_message(
             "user",
@@ -198,15 +200,14 @@ class Agent:
         pending_children = self.registry.count_pending_for_parent(self.task_id)
 
         if pending_children > 0:
-            print(f"{display_id} → Waiting {pending_children} more subagents")
+            print(f"{self.display_id} → Waiting {pending_children} more subagents")
             return
 
-        print(f"{display_id} → All subagents done, continuing")
+        print(f"{self.display_id} → All subagents done, continuing")
         await self._continue_processing()
 
     async def _on_subagent_error(self, child_task_id: str, error_message: str):
-        display_id = f"[{self.label}|{self.task_id}]"
-        print(f"{display_id} ✗ Subagent error: {child_task_id}: {error_message}")
+        print(f"{self.display_id} ✗ Subagent error: {child_task_id}: {error_message}")
 
         self.session.add_message(
             "user", f"[子代理错误] {child_task_id}: {error_message}"
@@ -216,47 +217,26 @@ class Agent:
 
         if pending_children > 0:
             print(
-                f"{display_id} → Waiting {pending_children} more subagents (after error)"
+                f"{self.display_id} → Waiting {pending_children} more subagents (after error)"
             )
             return
 
-        print(f"{display_id} → All subagents done (with errors), continuing")
+        print(f"{self.display_id} → All subagents done (with errors), continuing")
         await self._continue_processing()
 
     async def _on_descendant_wake(self, descendant_task_id: str, result: str):
-        display_id = f"[{self.label}|{self.task_id}]"
-        print(f"{display_id} ← Woken by descendant: {descendant_task_id}")
+        print(f"{self.display_id} ← Woken by descendant: {descendant_task_id}")
 
         self.state = AgentState.RUNNING
-
-        await self._check_all_descendants_complete()
-
-    async def _check_all_descendants_complete(self):
-        display_id = f"[{self.label}|{self.task_id}]"
         pending_children = self.registry.count_pending_for_parent(self.task_id)
 
         if pending_children > 0:
             print(
-                f"{display_id} → Woken but {pending_children} subagents still pending"
+                f"{self.display_id} → Woken but {pending_children} subagents still pending"
             )
             return
 
-        child_results = self.registry.collect_child_results(self.task_id)
-
-        if not child_results:
-            await self._finish_and_notify()
-            return
-
-        print(f"{display_id} ← Collected {len(child_results)} child results")
-
-        findings_prompt = (
-            "子代理目前已经全部完成并返回结果，基于以下子代理结果给出综合回复:\n"
-        )
-        for task_id, result in child_results.items():
-            findings_prompt += f"\n[{task_id}]\n{result}\n"
-
-        self.session.add_message("system", findings_prompt)
-
+        print(f"{self.display_id} ← All descendants complete, continuing")
         await self._continue_processing()
 
     async def _continue_processing(self):
@@ -266,13 +246,19 @@ class Agent:
         child_results = self.registry.collect_child_results(self.task_id)
 
         if child_results:
+            print(
+                f"{self.display_id} ← Collected {len(child_results)} descendant results"
+            )
             findings_prompt = (
                 "子代理目前已经全部完成并返回结果，基于以下子代理结果给出综合回复:\n"
             )
             for task_id, result in child_results.items():
                 findings_prompt += f"\n[{task_id}] {result}\n"
+        else:
+            print(f"{self.display_id} ← No descendant results collected")
+            findings_prompt = "子代理目前已经全部完成任务，但是并未获得任何结果。"
 
-            self.session.add_message("system", findings_prompt)
+        self.session.add_message("system", findings_prompt)
 
         if self.llm:
             final_response = await self.llm.chat(
@@ -289,13 +275,12 @@ class Agent:
         await self._finish_and_notify()
 
     async def _finish_and_notify(self):
-        display_id = f"[{self.label}|{self.task_id}]"
         result_preview = (
             (self._final_result[:100] + "...")
             if self._final_result and len(self._final_result) > 100
             else (self._final_result or "None")
         )
-        print(f"{display_id} ✓ Done: {result_preview}")
+        print(f"{self.display_id} ✓ Done: {result_preview}")
 
         self.state = AgentState.COMPLETED
         self._completion_event.set()
