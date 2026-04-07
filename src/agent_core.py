@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 class Agent:
     """Core Agent class with multi-level nesting support."""
 
+    MAX_TOOL_ITERATIONS = 20
+
     def __init__(
         self,
         session: Session,
@@ -110,8 +112,11 @@ class Agent:
             True if any child agents were spawned
         """
         spawned = False
+        iteration = 0
 
-        while True:
+        while iteration < self.MAX_TOOL_ITERATIONS:
+            iteration += 1
+
             if self.llm is None:
                 break
 
@@ -152,6 +157,12 @@ class Agent:
 
                 if tool_call.name == "spawn":
                     spawned = True
+
+        if iteration >= self.MAX_TOOL_ITERATIONS:
+            print(
+                f"{self.display_id} ⚠ Tool call limit reached ({self.MAX_TOOL_ITERATIONS} iterations)"
+            )
+            self._final_result = self._final_result or "[达到工具调用上限]"
 
         return spawned
 
