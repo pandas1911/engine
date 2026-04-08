@@ -11,7 +11,8 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from src.models import AgentState, LLMResponse, Session, ToolCall
 from src.config import Config
 from src.registry import SubagentRegistry
-from src.tools import SpawnTool
+from src.tools.base import ToolRegistry
+from src.tools.builtin.spawn import SpawnTool
 from src.llm_provider import MockLLMProvider
 
 if TYPE_CHECKING:
@@ -30,6 +31,7 @@ class Agent:
         registry: Optional[SubagentRegistry] = None,
         llm_provider: Optional["LLMProvider"] = None,
         tools: Optional[List[Any]] = None,
+        tool_registry: Optional[ToolRegistry] = None,
         task_id: Optional[str] = None,
         parent_task_id: Optional[str] = None,
         label: Optional[str] = None,
@@ -38,7 +40,6 @@ class Agent:
         self.config = config
         self.registry = registry or SubagentRegistry()
         self.llm = llm_provider or MockLLMProvider()
-        self.tools = tools or []
         self.task_id = task_id or f"task_{uuid.uuid4().hex[:8]}"
         self.parent_task_id = parent_task_id
         self.label = label or (
@@ -49,8 +50,17 @@ class Agent:
         self._completion_event = asyncio.Event()
         self.display_id = f"[{self.label}|{self.task_id}]"
 
+        # Use provided registry or create new one
+        self._tool_registry = tool_registry or ToolRegistry()
+
+        # Backward compat: register any tools passed as list
+        if tools:
+            for tool in tools:
+                self._tool_registry.register(tool)
+
+        # SpawnTool conditional injection
         if session.depth < config.max_depth:
-            self.tools.append(
+            self._tool_registry.register(
                 SpawnTool(
                     self._create_child_agent, self.registry, self.task_id, self.label
                 )
@@ -175,7 +185,7 @@ class Agent:
         Returns:
             Tool execution result
         """
-        tool = next((t for t in self.tools if t.name == tool_call.name), None)
+        tool = self._tool_registry.get(tool_call.name)
 
         if not tool:
             return f"[错误] 未知工具: {tool_call.name}"
@@ -307,22 +317,7 @@ class Agent:
             )
 
     def _get_tool_schemas(self) -> List[Dict]:
-        """Get tool schemas for LLM.
-
-        Returns:
-            List of tool schema dictionaries
-        """
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.parameters,
-                },
-            }
-            for tool in self.tools
-        ]
+        return self._tool_registry.get_schemas()
 
 
 async def run_agent(task: str, config: Optional[Config] = None) -> tuple[str, Session]:
