@@ -60,7 +60,7 @@ class Agent:
 
         # SpawnTool conditional injection
         if session.depth < config.max_depth:
-            self._tool_registry.register(
+            self._tool_registry.register_spawn(
                 SpawnTool(
                     self._create_child_agent, self.registry, self.task_id, self.label
                 )
@@ -91,7 +91,7 @@ class Agent:
             config,
             registry,
             self.llm,
-            [],
+            tool_registry=self._tool_registry.clone(),
             task_id=task_id,
             parent_task_id=parent_task_id,
         )
