@@ -283,7 +283,7 @@ class Agent:
             print(f"{self.display_id} ← No descendant results collected")
             findings_prompt = "子代理目前已经全部完成任务，但是并未获得任何结果。"
 
-        self.session.add_message("system", findings_prompt)
+        self.session.add_message("user", findings_prompt)
 
         spawned_any = await self._process_tool_calls()
 
