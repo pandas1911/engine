@@ -230,9 +230,9 @@ class Agent:
     async def _on_subagent_error(self, child_task_id: str, error_message: str):
         print(f"{self.display_id} ✗ Subagent error: {child_task_id}: {error_message}")
 
-        self.session.add_message(
-            "user", f"[子代理错误] {child_task_id}: {error_message}"
-        )
+        # self.session.add_message(
+        #     "user", f"[子代理错误] {child_task_id}: {error_message}"
+        # )
 
         pending_children = self.registry.count_pending_for_parent(self.task_id)
 

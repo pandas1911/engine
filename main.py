@@ -5,15 +5,17 @@ import uuid
 
 from src.agent_core import Agent
 from src.config import ConfigLoader
-from src.llm_provider import MiniMaxProvider
+from src.llm_provider import LLMProvider
 from src.models import AgentState, Session
 from src.registry import SubagentRegistry
 
+from src.tools.custom.mock import MockTool
+
 
 DEFAULT_PROMPT = """ 
-    现在要对你创建子代理的能力进行测试，请你严格根据以下要求来执行：
-    - 请你构建两个子代理，并要求每一个子代理生成一个随机数
-    - 你要对所有子代理的随机数进行汇总然后报告
+    现在测试一下你构建子代理的能力，请严格根据以下要求来执行：
+    - 现在有两个天气查询的任务，一个是要查询北京的，一个要查询上海的天气，你构建一个子代理，让他完成这两个查询任务
+    - 最后请你汇总所有查询结果并汇报，并且告诉我根据汇报的上海天气帮我决定一下近期适合的穿搭
   """
 
 
@@ -25,15 +27,15 @@ async def run_agent_system(prompt: str) -> str:
     print("[1/4] Loading configuration...")
     try:
         config = ConfigLoader.load_from_env()
-        print(f"      Model: {config.openai_model}")
+        print(f"      Model: {config.model}")
         print(f"      Max Depth: {config.max_depth}")
     except ValueError as e:
         print(f"[Error] Configuration error: {e}")
         sys.exit(1)
 
     print("[2/4] Initializing LLM provider...")
-    llm_provider = MiniMaxProvider(config)
-    print(f"      Provider: MiniMax")
+    llm_provider = LLMProvider(config)
+    print(f"      Provider: {config.model}")
 
     print("[3/4] Creating subagent registry...")
     registry = SubagentRegistry()
@@ -55,7 +57,7 @@ async def run_agent_system(prompt: str) -> str:
         config=config,
         registry=registry,
         llm_provider=llm_provider,
-        tools=[],
+        tools=[MockTool()],
     )
     print(f"      Agent: [{agent.label}|{agent.task_id}]")
 

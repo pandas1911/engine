@@ -1,15 +1,16 @@
 from dataclasses import dataclass
 from dotenv import load_dotenv
 import os
+from typing import Optional
 
 
 @dataclass
 class Config:
-    openai_api_key: str
-    openai_base_url: str
-    openai_model: str
+    api_key: str
+    base_url: str
+    model: str
+    strip_thinking: bool = True
     max_depth: int = 3
-    default_model: str = "MiniMax-M2.7"
     spawn_timeout: float = 60.0
     enable_wake_on_descendants: bool = True
     max_concurrent_agents: int = 10
@@ -19,7 +20,7 @@ class Config:
 
 
 class ConfigLoader:
-    REQUIRED_KEYS = ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL"]
+    REQUIRED_KEYS = ["LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"]
 
     @staticmethod
     def load_from_env() -> Config:
@@ -28,12 +29,18 @@ class ConfigLoader:
         missing_keys = []
         config_values = {}
 
+        mapping = {
+            "LLM_API_KEY": "api_key",
+            "LLM_BASE_URL": "base_url",
+            "LLM_MODEL": "model",
+        }
+
         for key in ConfigLoader.REQUIRED_KEYS:
             value = os.getenv(key)
             if value is None or value.strip() == "":
                 missing_keys.append(key)
             else:
-                config_values[key.lower()] = value
+                config_values[mapping[key]] = value
 
         if missing_keys:
             raise ValueError(
@@ -42,13 +49,13 @@ class ConfigLoader:
             )
 
         return Config(
-            openai_api_key=config_values["openai_api_key"],
-            openai_base_url=config_values["openai_base_url"],
-            openai_model=config_values["openai_model"],
+            api_key=config_values["api_key"],
+            base_url=config_values["base_url"],
+            model=config_values["model"],
         )
 
 
-_config: Config | None = None
+_config: Optional[Config] = None
 
 
 def get_config() -> Config:
