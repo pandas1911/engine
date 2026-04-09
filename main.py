@@ -60,13 +60,13 @@ async def run_agent_system(prompt: str) -> str:
     print(f"      Agent: [{agent.label}|{agent.task_id}]")
 
     try:
-        initial_result = await agent.run(prompt)
+        await agent.run(prompt)
 
         if agent.state != AgentState.COMPLETED:
             print("[System] Waiting for subagents to complete...")
             _ = await agent._completion_event.wait()
 
-        final_result = agent._final_result or initial_result
+        final_result = agent._final_result or "[Agent 执行完毕但未生成回复]"
 
         print("=" * 60)
         print("Final Result")

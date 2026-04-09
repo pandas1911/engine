@@ -140,8 +140,7 @@ class Agent:
             if not response.has_tool_calls():
                 if response.content:
                     self.session.add_message("assistant", response.content)
-                    if not spawned:
-                        self._final_result = response.content
+                    self._final_result = response.content
                 break
 
             tool_calls_for_msg = [
@@ -286,19 +285,14 @@ class Agent:
 
         self.session.add_message("system", findings_prompt)
 
-        if self.llm:
-            final_response = await self.llm.chat(
-                messages=self.session.get_messages(),
-                tools=[],
-                agent_label=self.label,
-                task_id=self.task_id,
-            )
+        spawned_any = await self._process_tool_calls()
 
-            if final_response.content:
-                self.session.add_message("assistant", final_response.content)
-                self._final_result = final_response.content
-
-        await self._finish_and_notify()
+        if spawned_any:
+            print(f"{self.display_id} → Re-waiting for new subagents")
+            self.state = AgentState.CALLBACK_PENDING
+            await self.registry.mark_ended_with_pending_descendants(self.task_id)
+        else:
+            await self._finish_and_notify()
 
     async def _finish_and_notify(self):
         result_preview = (
