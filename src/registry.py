@@ -31,7 +31,8 @@ class SubagentRegistry:
         task_id: str,
         session_id: str,
         description: str,
-        parent_agent: "Agent",
+        parent_agent: "Agent",  # deprecated
+        agent: Optional["Agent"] = None,
         parent_task_id: Optional[str] = None,
         depth: int = 0,
     ) -> SubagentTask:
@@ -41,7 +42,8 @@ class SubagentRegistry:
             task_id: Unique identifier for this task
             session_id: Session identifier
             description: Task description
-            parent_agent: The parent agent that spawned this subagent
+            parent_agent: Which agent spawned this task (deprecated, kept for backward compat)
+            agent: Self-reference of the agent running this task (used by complete() to push events)
             parent_task_id: Optional parent task ID for nested subagents
             depth: Nesting depth level
 
@@ -64,6 +66,7 @@ class SubagentRegistry:
             session_id=session_id,
             task_description=description,
             parent_agent=parent_agent,
+            agent=agent,
             parent_task_id=parent_task_id,
             depth=depth,
         )
@@ -135,18 +138,7 @@ class SubagentRegistry:
         return new_agent_id in ancestors
 
     async def complete(self, task_id: str, result: str, error: bool = False):
-        """Called when a subagent completes - Corresponds to OpenClaw's complete flow.
-
-        Key logic:
-        1. Mark self as completed
-        2. Check if there are still pending descendants
-        3. If not, notify parent agent
-
-        Args:
-            task_id: The task ID that completed
-            result: The result string from the task
-            error: Whether the task completed with an error
-        """
+        """Called when a subagent completes."""
         async with self._lock:
             if task_id not in self._tasks:
                 return
@@ -157,36 +149,42 @@ class SubagentRegistry:
             task.completed_event.set()
             self._pending.discard(task_id)
 
-            parent: Agent = task.parent_agent
             parent_task_id = task.parent_task_id
             pending_descendants = self._count_pending_descendants_locked(task_id)
+            pending_siblings = self.count_pending_for_parent(parent_task_id) if parent_task_id else 0
 
+        # [Gate 1] Still have pending descendants → return
         if pending_descendants > 0:
-            print(
-                f"[Registry] {task_id} done, {pending_descendants} descendants pending"
-            )
+            print(f"[Registry] {task_id} done, {pending_descendants} descendants pending")
             return
 
-        if parent_task_id and parent_task_id in self._tasks:
-            parent_task = self._tasks[parent_task_id]
-            if (
-                parent_task.status in ["completed", "ended_with_pending_descendants"]
-                and parent_task.wake_on_descendants_settle
-            ):
-                print(f"[Registry] {parent_task_id} needs wake")
-                asyncio.create_task(
-                    self._wake_parent_agent(parent_task_id, task_id, result)
-                )
-                return
+        # [Gate 2] Parent doesn't exist or not registered → return
+        if not (parent_task_id and parent_task_id in self._tasks):
+            return
 
-        if parent and parent_task_id:
-            if error:
-                print(f"[Registry] {task_id} error → {parent_task_id}")
-                asyncio.create_task(parent._on_subagent_error(task_id, result))
-            else:
-                result_preview = result[:80] + "..." if len(result) > 80 else result
-                print(f"[Registry] {task_id} done → {parent_task_id}: {result_preview}")
-                asyncio.create_task(parent._on_subagent_complete(task_id, result))
+        # [Gate 3] Still have pending siblings → return
+        if pending_siblings > 0:
+            return
+
+        # All gates passed → notify parent
+        parent_task = self._tasks[parent_task_id]
+
+        # [Branch A] Parent ended waiting for descendants → wake
+        if (parent_task.status in ["completed", "ended_with_pending_descendants"]
+                and parent_task.wake_on_descendants_settle):
+            parent_agent = parent_task.agent
+            if parent_agent is not None:
+                parent_task.status = "running"
+                parent_task.wake_on_descendants_settle = False
+                asyncio.create_task(parent_agent._resume_from_children())
+            return
+
+        # [Branch B] Parent is running → push to event queue
+        parent_agent = parent_task.agent
+        if parent_agent is not None:
+            from src.models import QueueEvent
+            event = QueueEvent(child_task_id=task_id, result=result, error=error)
+            parent_agent._event_queue.append(event)
 
     def _count_pending_descendants_locked(self, task_id: str) -> int:
         """Count pending descendants of a task - Corresponds to OpenClaw's countPendingDescendantRuns.
@@ -221,27 +219,7 @@ class SubagentRegistry:
 
         return count
 
-    async def _wake_parent_agent(
-        self, parent_task_id: str, child_task_id: str, child_result: str
-    ):
-        """Wake parent agent - Corresponds to OpenClaw's wakeSubagentRunAfterDescendants.
 
-        Args:
-            parent_task_id: The parent task ID to wake
-            child_task_id: The child task ID that triggered the wake
-            child_result: The result from the child task
-        """
-        async with self._lock:
-            if parent_task_id not in self._tasks:
-                return
-            parent_task = self._tasks[parent_task_id]
-            parent_task.status = "running"
-            parent_task.wake_on_descendants_settle = False
-
-        parent = parent_task.agent
-        if parent:
-            print(f"[Registry] Wake: {parent_task_id}")
-            await parent._on_descendant_wake(child_task_id, child_result)
 
     def has_pending(self) -> bool:
         """Check if there are any pending tasks.
