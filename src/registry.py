@@ -157,7 +157,7 @@ class SubagentRegistry:
             task.completed_event.set()
             self._pending.discard(task_id)
 
-            parent = task.parent_agent
+            parent: Agent = task.parent_agent
             parent_task_id = task.parent_task_id
             pending_descendants = self._count_pending_descendants_locked(task_id)
 

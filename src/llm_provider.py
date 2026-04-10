@@ -4,7 +4,7 @@ This module provides abstract and concrete LLM provider implementations.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from openai import AsyncOpenAI
 
@@ -12,40 +12,70 @@ from src.config import Config
 from src.models import LLMResponse, ToolCall
 
 
-class LLMProvider(ABC):
+class BaseLLMProvider(ABC):
     """Abstract base class for LLM providers."""
 
     @abstractmethod
     async def chat(
-        self, messages: List[Dict], tools: List[Dict], **kwargs
+        self,
+        messages: List[Dict],
+        tools: List[Dict],
+        agent_label: str = "Root",
+        task_id: str = "unknown",
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> LLMResponse:
         """Send a chat request to the LLM.
 
         Args:
             messages: List of message dictionaries with 'role' and 'content'
             tools: List of tool definitions available to the LLM
-            **kwargs: Additional parameters (e.g., temperature, max_tokens)
+            agent_label: Label for the agent making the request
+            task_id: ID of the task being executed
+            temperature: Optional temperature parameter for the LLM
+            max_tokens: Optional max_tokens parameter for the LLM
 
         Returns:
             LLMResponse with content or tool_calls
         """
         pass
 
+    @abstractmethod
+    async def stream_chat(
+        self,
+        messages: List[Dict],
+        tools: List[Dict],
+        agent_label: str = "Root",
+        task_id: str = "unknown",
+    ) -> None:
+        """Stream a chat request to the LLM.
 
-class MiniMaxProvider(LLMProvider):
-    """MiniMax LLM provider using OpenAI-compatible API."""
+        Args:
+            messages: List of message dictionaries with 'role' and 'content'
+            tools: List of tool definitions available to the LLM
+            agent_label: Label for the agent making the request
+            task_id: ID of the task being executed
+
+        Raises:
+            NotImplementedError: Streaming is not yet implemented
+        """
+        pass
+
+
+class LLMProvider(BaseLLMProvider):
+    """Universal LLM provider using OpenAI-compatible API."""
 
     def __init__(self, config: Config):
-        """Initialize MiniMax provider.
+        """Initialize LLM provider.
 
         Args:
             config: Configuration containing API credentials
         """
-        self.config = config
         self.client = AsyncOpenAI(
-            api_key=config.openai_api_key, base_url=config.openai_base_url
+            api_key=config.api_key, base_url=config.base_url
         )
-        self.model = config.openai_model
+        self.model = config.model
+        self.strip_thinking = config.strip_thinking
 
     async def chat(
         self,
@@ -53,20 +83,36 @@ class MiniMaxProvider(LLMProvider):
         tools: List[Dict],
         agent_label: str = "Root",
         task_id: str = "unknown",
-        **kwargs,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> LLMResponse:
+        """Send a chat request to the LLM.
+
+        Args:
+            messages: List of message dictionaries with 'role' and 'content'
+            tools: List of tool definitions available to the LLM
+            agent_label: Label for the agent making the request
+            task_id: ID of the task being executed
+            temperature: Optional temperature parameter for the LLM
+            max_tokens: Optional max_tokens parameter for the LLM
+
+        Returns:
+            LLMResponse with content or tool_calls
+        """
         try:
-            converted_messages = self._convert_system_messages_for_minimax(messages)
             params: Dict[str, Any] = {
                 "model": self.model,
-                "messages": converted_messages,
+                "messages": messages,
             }
             if tools:
                 params["tools"] = tools
-            params.update(kwargs)
+            if temperature is not None:
+                params["temperature"] = temperature
+            if max_tokens is not None:
+                params["max_tokens"] = max_tokens
 
             last_user_msg = ""
-            for msg in reversed(converted_messages):
+            for msg in reversed(messages):
                 if msg.get("role") == "user":
                     content = msg.get("content", "")
                     if (
@@ -78,7 +124,11 @@ class MiniMaxProvider(LLMProvider):
                         )
                         break
 
-            print(f"[{agent_label}|{task_id}] → LLM ({len(converted_messages)} msgs)")
+            print(
+                "[{agent_label}|{task_id}] → LLM ({msg_count} msgs)".format(
+                    agent_label=agent_label, task_id=task_id, msg_count=len(messages)
+                )
+            )
 
             response = await self.client.chat.completions.create(**params)
             choice = response.choices[0]
@@ -86,9 +136,9 @@ class MiniMaxProvider(LLMProvider):
 
             tool_calls = []
             if message.tool_calls:
-                for tc in message.tool_calls:
-                    import json
+                import json
 
+                for tc in message.tool_calls:
                     args = tc.function.arguments
                     if isinstance(args, str):
                         args = json.loads(args)
@@ -103,7 +153,9 @@ class MiniMaxProvider(LLMProvider):
             content = message.content or ""
             content = self._strip_thinking(content)
 
-            display_id = f"[{agent_label}|{task_id}]"
+            display_id = "[{agent_label}|{task_id}]".format(
+                agent_label=agent_label, task_id=task_id
+            )
 
             if tool_calls:
                 for tc in tool_calls:
@@ -111,90 +163,103 @@ class MiniMaxProvider(LLMProvider):
                     label = tc.arguments.get("label", "sub")
                     task_preview = task[:50] + "..." if len(task) > 50 else task
                     print(
-                        f"{display_id} ← Tool: {tc.name}(task='{task_preview}', label='{label}')"
+                        "{display_id} ← Tool: {tool_name}(task='{task_preview}', label='{label}')".format(
+                            display_id=display_id,
+                            tool_name=tc.name,
+                            task_preview=task_preview,
+                            label=label,
+                        )
                     )
             elif content.strip():
                 preview = content[:300].replace("\n", " ")
                 if len(content) > 300:
                     preview += "..."
-                print(f"{display_id} ← Response: {preview}")
+                print("{display_id} ← Response: {preview}".format(
+                    display_id=display_id, preview=preview
+                ))
 
             return LLMResponse(content=content, tool_calls=tool_calls)
 
         except Exception as e:
-            print(f"[{agent_label}|{task_id}] Error: {type(e).__name__}: {e}")
+            print(
+                "[{agent_label}|{task_id}] Error: {error_type}: {error}".format(
+                    agent_label=agent_label,
+                    task_id=task_id,
+                    error_type=type(e).__name__,
+                    error=e,
+                )
+            )
             raise
 
-    def _strip_thinking(self, content: str) -> str:
+    def _strip_thinking(self, content: Optional[str]) -> str:
+        """Remove thinking tags from content.
+
+        Args:
+            content: Content string that may contain thinking tags
+
+        Returns:
+            Content with thinking tags removed
+        """
         if not content:
             return ""
+        if not self.strip_thinking:
+            return content
         import re
 
         content = re.sub(
-            r"<think[^>]*>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE
+            r"<think[^>]*>.*?</think\s*>", "", content, flags=re.DOTALL | re.IGNORECASE
         )
+        return content.strip()
 
-        lines = content.split("\n")
-        filtered_lines = []
-        skip_patterns = [
-            "the user is asking",
-            "i should",
-            "let me",
-            "i need to",
-            "i will",
-            "i can",
-        ]
+    async def stream_chat(
+        self,
+        messages: List[Dict],
+        tools: List[Dict],
+        agent_label: str = "Root",
+        task_id: str = "unknown",
+    ) -> None:
+        """Stream a chat request to the LLM.
 
-        for line in lines:
-            stripped = line.strip().lower()
-            if any(stripped.startswith(p) for p in skip_patterns):
-                continue
-            if stripped and not stripped.startswith("`"):
-                filtered_lines.append(line)
+        Args:
+            messages: List of message dictionaries with 'role' and 'content'
+            tools: List of tool definitions available to the LLM
+            agent_label: Label for the agent making the request
+            task_id: ID of the task being executed
 
-        return "\n".join(filtered_lines).strip()
-
-    def _convert_system_messages_for_minimax(self, messages: List[Dict]) -> List[Dict]:
-        """MiniMax API rejects 'system' role messages.
-
-        Convert system messages by prepending their content to the first user
-        message, or adding as a user message if no user messages exist.
+        Raises:
+            NotImplementedError: Streaming is not yet implemented
         """
-        non_system_messages = []
-        system_instructions = []
-
-        for msg in messages:
-            if msg.get("role") == "system":
-                system_instructions.append(msg.get("content", ""))
-            else:
-                non_system_messages.append(msg)
-
-        if not system_instructions:
-            return non_system_messages
-
-        combined_system = "\n\n".join(system_instructions)
-
-        if non_system_messages and non_system_messages[0].get("role") == "user":
-            first_user_msg = non_system_messages[0]
-            non_system_messages[0] = {
-                **first_user_msg,
-                "content": f"[System Instructions]\n{combined_system}\n\n[User Message]\n{first_user_msg.get('content', '')}",
-            }
-        else:
-            non_system_messages.insert(0, {"role": "user", "content": combined_system})
-
-        return non_system_messages
+        raise NotImplementedError("Streaming not yet implemented")
 
 
-class MockLLMProvider(LLMProvider):
+class MockLLMProvider(BaseLLMProvider):
     """Mock LLM provider for testing."""
 
     def __init__(self):
         self.call_count = 0
 
     async def chat(
-        self, messages: List[Dict], tools: List[Dict], **kwargs
+        self,
+        messages: List[Dict],
+        tools: List[Dict],
+        agent_label: str = "Root",
+        task_id: str = "unknown",
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> LLMResponse:
+        """Send a chat request (mock implementation).
+
+        Args:
+            messages: List of message dictionaries with 'role' and 'content'
+            tools: List of tool definitions available to the LLM
+            agent_label: Label for the agent making the request
+            task_id: ID of the task being executed
+            temperature: Optional temperature parameter for the LLM
+            max_tokens: Optional max_tokens parameter for the LLM
+
+        Returns:
+            LLMResponse with content or tool_calls
+        """
         self.call_count += 1
 
         last_content = messages[-1].get("content", "") if messages else ""
@@ -225,12 +290,15 @@ class MockLLMProvider(LLMProvider):
         if self._is_subagent(messages):
             depth = self._get_depth(messages)
             return LLMResponse(
-                content=f"[子Agent完成-深度{depth}] 分析完成：发现3个主要模块，依赖关系清晰。"
+                content="[子Agent完成-深度{depth}] 分析完成：发现3个主要模块，依赖关系清晰。".format(
+                    depth=depth
+                )
             )
 
         return LLMResponse(content="处理完成")
 
     def _is_subagent(self, messages: List[Dict]) -> bool:
+        """Check if messages indicate subagent context."""
         for msg in messages:
             if msg.get("role") == "system" and "Subagent Context" in msg.get(
                 "content", ""
@@ -239,6 +307,7 @@ class MockLLMProvider(LLMProvider):
         return False
 
     def _get_depth(self, messages: List[Dict]) -> int:
+        """Extract depth from system message."""
         for msg in messages:
             if msg.get("role") == "system":
                 content = msg.get("content", "")
@@ -249,5 +318,25 @@ class MockLLMProvider(LLMProvider):
                         pass
         return 0
 
+    async def stream_chat(
+        self,
+        messages: List[Dict],
+        tools: List[Dict],
+        agent_label: str = "Root",
+        task_id: str = "unknown",
+    ) -> None:
+        """Stream a chat request (mock implementation).
 
-__all__ = ["LLMProvider", "MiniMaxProvider", "MockLLMProvider"]
+        Args:
+            messages: List of message dictionaries with 'role' and 'content'
+            tools: List of tool definitions available to the LLM
+            agent_label: Label for the agent making the request
+            task_id: ID of the task being executed
+
+        Raises:
+            NotImplementedError: Streaming is not yet implemented
+        """
+        raise NotImplementedError("Streaming not yet implemented")
+
+
+__all__ = ["BaseLLMProvider", "LLMProvider", "MockLLMProvider"]

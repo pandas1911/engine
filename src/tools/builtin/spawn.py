@@ -1,42 +1,15 @@
-"""Tool system for the Agent.
-
-This module contains the Tool base class and SpawnTool implementation.
-"""
+"""Spawn tool for creating child agents."""
 
 import asyncio
 import uuid
-from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, TYPE_CHECKING
 
 from src.config import Config
 from src.models import Session
+from src.tools.base import Tool
 
 if TYPE_CHECKING:
     from src.registry import SubagentRegistry
-
-
-class Tool(ABC):
-    """Base class for all tools.
-
-    Tools are callable functions that agents can use to perform actions.
-    """
-
-    name: str = ""
-    description: str = ""
-    parameters: Dict[str, Any] = {}
-
-    @abstractmethod
-    async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> str:
-        """Execute the tool with given arguments.
-
-        Args:
-            arguments: Tool arguments from LLM
-            context: Execution context (session, config, parent_agent, etc.)
-
-        Returns:
-            Result string to be passed back to the LLM
-        """
-        pass
 
 
 class SpawnTool(Tool):
@@ -158,6 +131,3 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
         except Exception as e:
             print(f"[Subagent|{task_id}] ✗ Failed: {e}")
             await self.registry.complete(task_id, f"[Error] {e}", error=True)
-
-
-__all__ = ["Tool", "SpawnTool"]

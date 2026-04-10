@@ -11,7 +11,8 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from src.models import AgentState, LLMResponse, Session, ToolCall
 from src.config import Config
 from src.registry import SubagentRegistry
-from src.tools import SpawnTool
+from src.tools.base import ToolRegistry
+from src.tools.builtin.spawn import SpawnTool
 from src.llm_provider import MockLLMProvider
 
 if TYPE_CHECKING:
@@ -30,6 +31,7 @@ class Agent:
         registry: Optional[SubagentRegistry] = None,
         llm_provider: Optional["LLMProvider"] = None,
         tools: Optional[List[Any]] = None,
+        tool_registry: Optional[ToolRegistry] = None,
         task_id: Optional[str] = None,
         parent_task_id: Optional[str] = None,
         label: Optional[str] = None,
@@ -38,7 +40,6 @@ class Agent:
         self.config = config
         self.registry = registry or SubagentRegistry()
         self.llm = llm_provider or MockLLMProvider()
-        self.tools = tools or []
         self.task_id = task_id or f"task_{uuid.uuid4().hex[:8]}"
         self.parent_task_id = parent_task_id
         self.label = label or (
@@ -48,9 +49,20 @@ class Agent:
         self._final_result: Optional[str] = None
         self._completion_event = asyncio.Event()
         self.display_id = f"[{self.label}|{self.task_id}]"
+        self._event_queue: list = []      # Deferred event queue (native list, Swift Array equivalent)
+        self._in_tool_loop: bool = False  # Flag: are we inside _process_tool_calls()?
 
+        # Use provided registry or create new one
+        self._tool_registry = tool_registry or ToolRegistry()
+
+        # Backward compat: register any tools passed as list
+        if tools:
+            for tool in tools:
+                self._tool_registry.register(tool)
+
+        # SpawnTool conditional injection
         if session.depth < config.max_depth:
-            self.tools.append(
+            self._tool_registry.register_spawn(
                 SpawnTool(
                     self._create_child_agent, self.registry, self.task_id, self.label
                 )
@@ -81,7 +93,7 @@ class Agent:
             config,
             registry,
             self.llm,
-            [],
+            tool_registry=self._tool_registry.clone(),
             task_id=task_id,
             parent_task_id=parent_task_id,
         )
@@ -94,7 +106,14 @@ class Agent:
         print(f"[{self.label}|{self.task_id}] → Processing")
 
         spawned_any = await self._process_tool_calls()
-        if spawned_any:
+
+        # Drain deferred events before branching decision
+        await self._drain_events()
+
+        if self.state == AgentState.COMPLETED:
+            # Drain already triggered full completion chain
+            pass
+        elif spawned_any:
             print(f"[{self.label}|{self.task_id}] → Waiting for subagents")
             self.state = AgentState.CALLBACK_PENDING
             await self.registry.mark_ended_with_pending_descendants(self.task_id)
@@ -111,60 +130,63 @@ class Agent:
         Returns:
             True if any child agents were spawned
         """
-        spawned = False
-        iteration = 0
+        self._in_tool_loop = True
+        try:
+            spawned = False
+            iteration = 0
 
-        while iteration < self.MAX_TOOL_ITERATIONS:
-            iteration += 1
+            while iteration < self.MAX_TOOL_ITERATIONS:
+                iteration += 1
 
-            if self.llm is None:
-                break
+                if self.llm is None:
+                    break
 
-            response = await self.llm.chat(
-                messages=self.session.get_messages(),
-                tools=self._get_tool_schemas(),
-                agent_label=self.label,
-                task_id=self.task_id,
-            )
+                response = await self.llm.chat(
+                    messages=self.session.get_messages(),
+                    tools=self._get_tool_schemas(),
+                    agent_label=self.label,
+                    task_id=self.task_id,
+                )
 
-            if not response.has_tool_calls():
-                if response.content:
-                    self.session.add_message("assistant", response.content)
-                    if not spawned:
+                if not response.has_tool_calls():
+                    if response.content:
+                        self.session.add_message("assistant", response.content)
                         self._final_result = response.content
-                break
+                    break
 
-            tool_calls_for_msg = [
-                {
-                    "id": tc.call_id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": json.dumps(tc.arguments)
-                        if isinstance(tc.arguments, dict)
-                        else tc.arguments,
-                    },
-                }
-                for tc in response.tool_calls
-            ]
-            self.session.add_message(
-                "assistant", response.content or "", tool_calls=tool_calls_for_msg
-            )
+                tool_calls_for_msg = [
+                    {
+                        "id": tc.call_id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments)
+                            if isinstance(tc.arguments, dict)
+                            else tc.arguments,
+                        },
+                    }
+                    for tc in response.tool_calls
+                ]
+                self.session.add_message(
+                    "assistant", response.content or "", tool_calls=tool_calls_for_msg
+                )
 
-            for tool_call in response.tool_calls:
-                result = await self._execute_tool(tool_call)
-                self.session.add_message("tool", result, tool_call_id=tool_call.call_id)
+                for tool_call in response.tool_calls:
+                    result = await self._execute_tool(tool_call)
+                    self.session.add_message("tool", result, tool_call_id=tool_call.call_id)
 
-                if tool_call.name == "spawn":
-                    spawned = True
+                    if tool_call.name == "spawn":
+                        spawned = True
 
-        if iteration >= self.MAX_TOOL_ITERATIONS:
-            print(
-                f"{self.display_id} ⚠ Tool call limit reached ({self.MAX_TOOL_ITERATIONS} iterations)"
-            )
-            self._final_result = self._final_result or "[达到工具调用上限]"
+            if iteration >= self.MAX_TOOL_ITERATIONS:
+                print(
+                    f"{self.display_id} ⚠ Tool call limit reached ({self.MAX_TOOL_ITERATIONS} iterations)"
+                )
+                self._final_result = self._final_result or "[达到工具调用上限]"
 
-        return spawned
+            return spawned
+        finally:
+            self._in_tool_loop = False
 
     async def _execute_tool(self, tool_call: ToolCall) -> str:
         """Execute a single tool call.
@@ -175,7 +197,7 @@ class Agent:
         Returns:
             Tool execution result
         """
-        tool = next((t for t in self.tools if t.name == tool_call.name), None)
+        tool = self._tool_registry.get(tool_call.name)
 
         if not tool:
             return f"[错误] 未知工具: {tool_call.name}"
@@ -194,12 +216,11 @@ class Agent:
             return f"[工具错误] {str(e)}"
 
     async def _on_subagent_complete(self, child_task_id: str, result: str):
-        """Callback when a child agent completes successfully.
-
-        Args:
-            child_task_id: The completed child task ID
-            result: The child's result
-        """
+        """Callback when a child agent completes successfully."""
+        if self._in_tool_loop:
+            self._event_queue.append(("complete", child_task_id, result))
+            print(f"{self.display_id} ← Queued complete (in tool loop): {child_task_id[:8]}")
+            return
         print(f"{self.display_id} ← Subagent complete: {child_task_id}")
 
         # self.session.add_message(
@@ -219,11 +240,15 @@ class Agent:
         await self._continue_processing()
 
     async def _on_subagent_error(self, child_task_id: str, error_message: str):
+        if self._in_tool_loop:
+            self._event_queue.append(("error", child_task_id, error_message))
+            print(f"{self.display_id} ← Queued error (in tool loop): {child_task_id[:8]}")
+            return
         print(f"{self.display_id} ✗ Subagent error: {child_task_id}: {error_message}")
 
-        self.session.add_message(
-            "user", f"[子代理错误] {child_task_id}: {error_message}"
-        )
+        # self.session.add_message(
+        #     "user", f"[子代理错误] {child_task_id}: {error_message}"
+        # )
 
         pending_children = self.registry.count_pending_for_parent(self.task_id)
 
@@ -237,9 +262,13 @@ class Agent:
         await self._continue_processing()
 
     async def _on_descendant_wake(self, descendant_task_id: str, result: str):
+        if self._in_tool_loop:
+            self._event_queue.append(("wake", descendant_task_id, result))
+            print(f"{self.display_id} ← Queued wake (in tool loop): {descendant_task_id[:8]}")
+            return
         print(f"{self.display_id} ← Woken by descendant: {descendant_task_id}")
 
-        self.state = AgentState.RUNNING
+        # self.state = AgentState.RUNNING
         pending_children = self.registry.count_pending_for_parent(self.task_id)
 
         if pending_children > 0:
@@ -274,21 +303,45 @@ class Agent:
             print(f"{self.display_id} ← No descendant results collected")
             findings_prompt = "子代理目前已经全部完成任务，但是并未获得任何结果。"
 
-        self.session.add_message("system", findings_prompt)
+        self.session.add_message("user", findings_prompt)
 
-        if self.llm:
-            final_response = await self.llm.chat(
-                messages=self.session.get_messages(),
-                tools=[],
-                agent_label=self.label,
-                task_id=self.task_id,
-            )
+        spawned_any = await self._process_tool_calls()
 
-            if final_response.content:
-                self.session.add_message("assistant", final_response.content)
-                self._final_result = final_response.content
+        # Drain deferred events
+        await self._drain_events()
 
-        await self._finish_and_notify()
+        if self.state == AgentState.COMPLETED:
+            return
+
+        if spawned_any:
+            print(f"{self.display_id} → Re-waiting for new subagents")
+            self.state = AgentState.CALLBACK_PENDING
+            await self.registry.mark_ended_with_pending_descendants(self.task_id)
+        else:
+            await self._finish_and_notify()
+
+    async def _drain_events(self):
+        """Process deferred events after tool loop completes.
+        
+        Events in the queue are just notifications — registry is the source of truth.
+        We only need to check: are all children done now?
+        
+        Swift equivalent: func drainEvents() async { ... } using Array
+        """
+        if self.state == AgentState.COMPLETED:
+            return
+        
+        if not self._event_queue:
+            return
+        
+        # Clear queue (events are just notifications, registry is source of truth)
+        self._event_queue.clear()
+        
+        # Check directly: are all subagents done?
+        pending = self.registry.count_pending_for_parent(self.task_id)
+        if pending == 0:
+            print(f"{self.display_id} ← All subagents done (from deferred events)")
+            await self._continue_processing()
 
     async def _finish_and_notify(self):
         result_preview = (
@@ -307,22 +360,7 @@ class Agent:
             )
 
     def _get_tool_schemas(self) -> List[Dict]:
-        """Get tool schemas for LLM.
-
-        Returns:
-            List of tool schema dictionaries
-        """
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.parameters,
-                },
-            }
-            for tool in self.tools
-        ]
+        return self._tool_registry.get_schemas()
 
 
 async def run_agent(task: str, config: Optional[Config] = None) -> tuple[str, Session]:

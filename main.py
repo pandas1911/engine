@@ -5,17 +5,13 @@ import uuid
 
 from src.agent_core import Agent
 from src.config import ConfigLoader
-from src.llm_provider import MiniMaxProvider
+from src.llm_provider import LLMProvider
 from src.models import AgentState, Session
 from src.registry import SubagentRegistry
 
 
 DEFAULT_PROMPT = """ 
-    现在测试一下你构建子代理的能力，请你根据以下要求运行：
-    - 生成两个子代理
-    - 让其中一个子代理再构建两个子代理（对于你来说是孙代理），并让每个孙代理随机生成无理数
-    - 让另一个子代理再构建两个子代理（对于你来说是孙代理），并让每个孙代理随机生成大于100的数
-    - 你对所有生成的数字进行汇总然后报告
+    请帮我查询一下天津和上海的天气，并比较一下哪个城市更适合出行。如果遇到服务器问题可以多重试几次。
   """
 
 
@@ -27,15 +23,15 @@ async def run_agent_system(prompt: str) -> str:
     print("[1/4] Loading configuration...")
     try:
         config = ConfigLoader.load_from_env()
-        print(f"      Model: {config.openai_model}")
+        print(f"      Model: {config.model}")
         print(f"      Max Depth: {config.max_depth}")
     except ValueError as e:
         print(f"[Error] Configuration error: {e}")
         sys.exit(1)
 
     print("[2/4] Initializing LLM provider...")
-    llm_provider = MiniMaxProvider(config)
-    print(f"      Provider: MiniMax")
+    llm_provider = LLMProvider(config)
+    print(f"      Provider: {config.model}")
 
     print("[3/4] Creating subagent registry...")
     registry = SubagentRegistry()
@@ -43,7 +39,7 @@ async def run_agent_system(prompt: str) -> str:
     print("[4/4] Creating agent session...")
     session_id = f"root_{uuid.uuid4().hex[:8]}"
     session = Session(id=session_id, depth=0)
-    session.add_message("system", "你是主Agent，可以派生子Agent并行处理任务。")
+    session.add_message("system", "你是主Agent，尽可能构建子代理去处理任务，这样既可以并行处理任务，也可以减少不必要的信息污染上下文，干扰你的决策。")
     print(f"      Session ID: {session_id}")
 
     print("=" * 60)
@@ -57,18 +53,18 @@ async def run_agent_system(prompt: str) -> str:
         config=config,
         registry=registry,
         llm_provider=llm_provider,
-        tools=[],
+        tools=[MockTool()],
     )
     print(f"      Agent: [{agent.label}|{agent.task_id}]")
 
     try:
-        initial_result = await agent.run(prompt)
+        await agent.run(prompt)
 
         if agent.state != AgentState.COMPLETED:
             print("[System] Waiting for subagents to complete...")
             _ = await agent._completion_event.wait()
 
-        final_result = agent._final_result or initial_result
+        final_result = agent._final_result or "[Agent 执行完毕但未生成回复]"
 
         print("=" * 60)
         print("Final Result")
