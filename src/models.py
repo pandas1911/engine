@@ -97,6 +97,13 @@ class SubagentTask:
     agent: Optional[Any] = None  # Reference to the agent instance for this task
 
 
+@dataclass
+class QueueEvent:
+    child_task_id: str
+    result: str
+    error: bool
+
+
 __all__ = [
     "AgentState",
     "Message",
@@ -104,4 +111,5 @@ __all__ = [
     "ToolCall",
     "LLMResponse",
     "SubagentTask",
+    "QueueEvent",
 ]
