@@ -167,12 +167,12 @@ class SubagentRegistry:
             return
 
         # All gates passed → notify parent
-        parent_task = self._tasks[parent_task_id]
+        parent_task: SubagentTask = self._tasks[parent_task_id]
 
         # [Branch A] Parent ended waiting for descendants → wake
         if (parent_task.status in ["completed", "ended_with_pending_descendants"]
                 and parent_task.wake_on_descendants_settle):
-            parent_agent = parent_task.agent
+            parent_agent: Agent = parent_task.agent
             if parent_agent is not None:
                 parent_task.status = "running"
                 parent_task.wake_on_descendants_settle = False
