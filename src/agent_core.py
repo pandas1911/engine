@@ -50,8 +50,6 @@ class Agent:
         self._completion_event = asyncio.Event()
         self.display_id = f"[{self.label}|{self.task_id}]"
         self._event_queue: List[QueueEvent] = []      # Deferred event queue (native list, Swift Array equivalent)
-        self._in_tool_loop: bool = False  # Flag: are we inside _process_tool_calls()?
-
         # Use provided registry or create new one
         self._tool_registry = tool_registry or ToolRegistry()
 
@@ -130,63 +128,59 @@ class Agent:
         Returns:
             True if any child agents were spawned
         """
-        self._in_tool_loop = True
-        try:
-            spawned = False
-            iteration = 0
+        spawned = False
+        iteration = 0
 
-            while iteration < self.MAX_TOOL_ITERATIONS:
-                iteration += 1
+        while iteration < self.MAX_TOOL_ITERATIONS:
+            iteration += 1
 
-                if self.llm is None:
-                    break
+            if self.llm is None:
+                break
 
-                response = await self.llm.chat(
-                    messages=self.session.get_messages(),
-                    tools=self._get_tool_schemas(),
-                    agent_label=self.label,
-                    task_id=self.task_id,
-                )
+            response = await self.llm.chat(
+                messages=self.session.get_messages(),
+                tools=self._get_tool_schemas(),
+                agent_label=self.label,
+                task_id=self.task_id,
+            )
 
-                if not response.has_tool_calls():
-                    if response.content:
-                        self.session.add_message("assistant", response.content)
-                        self._final_result = response.content
-                    break
+            if not response.has_tool_calls():
+                if response.content:
+                    self.session.add_message("assistant", response.content)
+                    self._final_result = response.content
+                break
 
-                tool_calls_for_msg = [
-                    {
-                        "id": tc.call_id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments)
-                            if isinstance(tc.arguments, dict)
-                            else tc.arguments,
-                        },
-                    }
-                    for tc in response.tool_calls
-                ]
-                self.session.add_message(
-                    "assistant", response.content or "", tool_calls=tool_calls_for_msg
-                )
+            tool_calls_for_msg = [
+                {
+                    "id": tc.call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": json.dumps(tc.arguments)
+                        if isinstance(tc.arguments, dict)
+                        else tc.arguments,
+                    },
+                }
+                for tc in response.tool_calls
+            ]
+            self.session.add_message(
+                "assistant", response.content or "", tool_calls=tool_calls_for_msg
+            )
 
-                for tool_call in response.tool_calls:
-                    result = await self._execute_tool(tool_call)
-                    self.session.add_message("tool", result, tool_call_id=tool_call.call_id)
+            for tool_call in response.tool_calls:
+                result = await self._execute_tool(tool_call)
+                self.session.add_message("tool", result, tool_call_id=tool_call.call_id)
 
-                    if tool_call.name == "spawn":
-                        spawned = True
+                if tool_call.name == "spawn":
+                    spawned = True
 
-            if iteration >= self.MAX_TOOL_ITERATIONS:
-                print(
-                    f"{self.display_id} ⚠ Tool call limit reached ({self.MAX_TOOL_ITERATIONS} iterations)"
-                )
-                self._final_result = self._final_result or "[达到工具调用上限]"
+        if iteration >= self.MAX_TOOL_ITERATIONS:
+            print(
+                f"{self.display_id} ⚠ Tool call limit reached ({self.MAX_TOOL_ITERATIONS} iterations)"
+            )
+            self._final_result = self._final_result or "[达到工具调用上限]"
 
-            return spawned
-        finally:
-            self._in_tool_loop = False
+        return spawned
 
     async def _execute_tool(self, tool_call: ToolCall) -> str:
         """Execute a single tool call.
