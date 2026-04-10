@@ -19,7 +19,7 @@ async def test_concurrent_grandchildren():
     print("Testing: Concurrent Grandchildren Completion")
     print("=" * 60)
 
-    config = Config(max_depth=3)
+    config = Config(api_key="test", base_url="http://test", model="test", max_depth=3)
     registry = SubagentRegistry()
 
     root_session = Session(id="root_test", depth=0)
@@ -45,7 +45,15 @@ async def test_concurrent_grandchildren():
         parent_task_id=root.task_id,
         task_id="task_b",
     )
-    await registry.set_agent("task_b", b)
+    await registry.register(
+        task_id="task_b",
+        session_id="sess_b",
+        description="Child",
+        parent_agent=None,
+        agent=b,
+        parent_task_id=root.task_id,
+        depth=1,
+    )
 
     print(f"\nB registered: {b.task_id}")
     print(f"Pending tasks: {registry.get_pending_count()}")
@@ -59,7 +67,15 @@ async def test_concurrent_grandchildren():
         parent_task_id=b.task_id,
         task_id="task_c",
     )
-    await registry.set_agent("task_c", c)
+    await registry.register(
+        task_id="task_c",
+        session_id="sess_c",
+        description="Grandchild",
+        parent_agent=None,
+        agent=c,
+        parent_task_id=b.task_id,
+        depth=2,
+    )
 
     print(f"C registered: {c.task_id}")
     print(f"Pending tasks: {registry.get_pending_count()}")

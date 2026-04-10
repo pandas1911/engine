@@ -13,30 +13,19 @@ class MockAgent:
         self.task_id = task_id
         self.name = name
         self.registry = registry
-        self.results_received = []
+        self._event_queue = []
         self.status = "running"
+        self.resumed = False
 
-    async def _on_subagent_complete(self, child_task_id, result):
-        self.results_received.append(("complete", child_task_id, result))
-        print(f"  [{self.name}] ← Complete from {child_task_id[:8]}")
-
-        pending = self.registry.count_pending_for_parent(self.task_id)
-        print(f"  [{self.name}] Pending children: {pending}")
-
-        if pending == 0:
-            print(f"  [{self.name}] ✗ ALL CHILDREN DONE - WOULD REPORT TO PARENT NOW!")
-            print(f"  [{self.name}] ✗ But maybe some grandchildren are still running?!")
-            self.status = "completed"
-
-    async def _on_descendant_wake(self, descendant_task_id, result):
-        self.results_received.append(("wake", descendant_task_id, result))
-        print(f"  [{self.name}] ← Woken by {descendant_task_id[:8]}")
+    async def _resume_from_children(self):
+        self.resumed = True
+        print(f"  [{self.name}] ← Resumed from children")
 
         pending = self.registry.count_pending_for_parent(self.task_id)
         print(f"  [{self.name}] Pending children: {pending}")
 
         if pending == 0:
-            print(f"  [{self.name}] ✗ ALL CHILDREN DONE - WOULD REPORT TO PARENT NOW!")
+            print(f"  [{self.name}] All children done - would report to parent now")
             self.status = "completed"
 
 
@@ -55,14 +44,35 @@ async def test_child_spawns_slowly():
     mock_b = MockAgent("task_b", "B", registry)
     mock_c = MockAgent("task_c", "C", registry)
 
-    await registry.register("task_a", "sess_a", "Root", None, None, 0)
-    await registry.set_agent("task_a", mock_a)
+    await registry.register(
+        task_id="task_a",
+        session_id="sess_a",
+        description="Root",
+        parent_agent=None,
+        agent=mock_a,
+        parent_task_id=None,
+        depth=0,
+    )
 
-    await registry.register("task_b", "sess_b", "Child", mock_a, "task_a", 1)
-    await registry.set_agent("task_b", mock_b)
+    await registry.register(
+        task_id="task_b",
+        session_id="sess_b",
+        description="Child",
+        parent_agent=None,
+        agent=mock_b,
+        parent_task_id="task_a",
+        depth=1,
+    )
 
-    await registry.register("task_c", "sess_c", "Grandchild", mock_b, "task_b", 2)
-    await registry.set_agent("task_c", mock_c)
+    await registry.register(
+        task_id="task_c",
+        session_id="sess_c",
+        description="Grandchild",
+        parent_agent=None,
+        agent=mock_c,
+        parent_task_id="task_b",
+        depth=2,
+    )
 
     print("\n[Step 1] C enters 'ended_with_pending_descendants':")
     await registry.mark_ended_with_pending_descendants("task_c")
@@ -71,9 +81,14 @@ async def test_child_spawns_slowly():
 
     print("\n[Step 2] C1 registers and completes IMMEDIATELY:")
     await registry.register(
-        "task_c1", "sess_c1", "GreatGrandchild1", mock_c, "task_c", 3
+        task_id="task_c1",
+        session_id="sess_c1",
+        description="GreatGrandchild1",
+        parent_agent=None,
+        agent=MockAgent("task_c1", "C1", registry),
+        parent_task_id="task_c",
+        depth=3,
     )
-    await registry.set_agent("task_c1", MockAgent("task_c1", "C1", registry))
     print(f"  C1 registered")
     print(f"  Pending: {[t[:8] for t in registry._pending]}")
 
@@ -82,15 +97,27 @@ async def test_child_spawns_slowly():
 
     print(f"\n  C's pending children: {registry.count_pending_for_parent('task_c')}")
     print(f"  C status: {registry.get_task('task_c').status}")
-    print(f"  C received: {mock_c.results_received}")
-    print(f"  C mock status: {mock_c.status}")
+    print(f"  C event queue: {mock_c._event_queue}")
+    print(f"  C resumed: {mock_c.resumed}")
 
     print("\n[Step 3] Now C2 and C3 register (TOO LATE!):")
     await registry.register(
-        "task_c2", "sess_c2", "GreatGrandchild2", mock_c, "task_c", 3
+        task_id="task_c2",
+        session_id="sess_c2",
+        description="GreatGrandchild2",
+        parent_agent=None,
+        agent=MockAgent("task_c2", "C2", registry),
+        parent_task_id="task_c",
+        depth=3,
     )
     await registry.register(
-        "task_c3", "sess_c3", "GreatGrandchild3", mock_c, "task_c", 3
+        task_id="task_c3",
+        session_id="sess_c3",
+        description="GreatGrandchild3",
+        parent_agent=None,
+        agent=MockAgent("task_c3", "C3", registry),
+        parent_task_id="task_c",
+        depth=3,
     )
     print(f"  C2 and C3 registered")
     print(f"  Pending: {[t[:8] for t in registry._pending]}")
@@ -100,14 +127,14 @@ async def test_child_spawns_slowly():
     print("CRITICAL ANALYSIS:")
     print("=" * 60)
 
-    if mock_c.status == "completed":
+    if mock_c.resumed:
         print("✗ BUG DETECTED:")
-        print("  C reported to B BEFORE C2 and C3 completed!")
-        print("  This is the '提前汇报' bug you mentioned!")
+        print("  C was resumed/woken BEFORE C2 and C3 completed!")
+        print("  This is the '提前汇报' race condition!")
         print(
             f"  C's pending children when C1 completed: {registry.count_pending_for_parent('task_c')}"
         )
-        print("  But C2 and C3 were registered AFTER C reported!")
+        print("  But C2 and C3 were registered AFTER C was woken!")
     else:
         print("✓ No bug detected in this scenario")
 
