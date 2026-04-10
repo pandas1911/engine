@@ -8,7 +8,7 @@ import json
 import uuid
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from src.models import AgentState, LLMResponse, Session, ToolCall
+from src.models import AgentState, LLMResponse, QueueEvent, Session, ToolCall
 from src.config import Config
 from src.registry import SubagentRegistry
 from src.tools.base import ToolRegistry
@@ -49,7 +49,7 @@ class Agent:
         self._final_result: Optional[str] = None
         self._completion_event = asyncio.Event()
         self.display_id = f"[{self.label}|{self.task_id}]"
-        self._event_queue: list = []      # Deferred event queue (native list, Swift Array equivalent)
+        self._event_queue: List[QueueEvent] = []      # Deferred event queue (native list, Swift Array equivalent)
         self._in_tool_loop: bool = False  # Flag: are we inside _process_tool_calls()?
 
         # Use provided registry or create new one
@@ -215,72 +215,7 @@ class Agent:
         except Exception as e:
             return f"[工具错误] {str(e)}"
 
-    async def _on_subagent_complete(self, child_task_id: str, result: str):
-        """Callback when a child agent completes successfully."""
-        if self._in_tool_loop:
-            self._event_queue.append(("complete", child_task_id, result))
-            print(f"{self.display_id} ← Queued complete (in tool loop): {child_task_id[:8]}")
-            return
-        print(f"{self.display_id} ← Subagent complete: {child_task_id}")
-
-        # self.session.add_message(
-        #     "user",
-        #     f"[子代理完成 {child_task_id}] : {result}",
-        #     is_subagent_result=True,
-        #     child_task_id=child_task_id,
-        # )
-
-        pending_children = self.registry.count_pending_for_parent(self.task_id)
-
-        if pending_children > 0:
-            print(f"{self.display_id} → Waiting {pending_children} more subagents")
-            return
-
-        print(f"{self.display_id} → All subagents done, continuing")
-        await self._continue_processing()
-
-    async def _on_subagent_error(self, child_task_id: str, error_message: str):
-        if self._in_tool_loop:
-            self._event_queue.append(("error", child_task_id, error_message))
-            print(f"{self.display_id} ← Queued error (in tool loop): {child_task_id[:8]}")
-            return
-        print(f"{self.display_id} ✗ Subagent error: {child_task_id}: {error_message}")
-
-        # self.session.add_message(
-        #     "user", f"[子代理错误] {child_task_id}: {error_message}"
-        # )
-
-        pending_children = self.registry.count_pending_for_parent(self.task_id)
-
-        if pending_children > 0:
-            print(
-                f"{self.display_id} → Waiting {pending_children} more subagents (after error)"
-            )
-            return
-
-        print(f"{self.display_id} → All subagents done (with errors), continuing")
-        await self._continue_processing()
-
-    async def _on_descendant_wake(self, descendant_task_id: str, result: str):
-        if self._in_tool_loop:
-            self._event_queue.append(("wake", descendant_task_id, result))
-            print(f"{self.display_id} ← Queued wake (in tool loop): {descendant_task_id[:8]}")
-            return
-        print(f"{self.display_id} ← Woken by descendant: {descendant_task_id}")
-
-        # self.state = AgentState.RUNNING
-        pending_children = self.registry.count_pending_for_parent(self.task_id)
-
-        if pending_children > 0:
-            print(
-                f"{self.display_id} → Woken but {pending_children} subagents still pending"
-            )
-            return
-
-        print(f"{self.display_id} ← All descendants complete, continuing")
-        await self._continue_processing()
-
-    async def _continue_processing(self):
+    async def _resume_from_children(self):
         """Continue processing after all children complete."""
         self.state = AgentState.RUNNING
 
@@ -321,27 +256,21 @@ class Agent:
             await self._finish_and_notify()
 
     async def _drain_events(self):
-        """Process deferred events after tool loop completes.
-        
-        Events in the queue are just notifications — registry is the source of truth.
-        We only need to check: are all children done now?
-        
+        """Process queued events after tool loop completes.
+
         Swift equivalent: func drainEvents() async { ... } using Array
         """
         if self.state == AgentState.COMPLETED:
             return
-        
+
         if not self._event_queue:
             return
-        
-        # Clear queue (events are just notifications, registry is source of truth)
+
+        # Clear queue — complete() Gate 3 guarantees all siblings done
         self._event_queue.clear()
-        
-        # Check directly: are all subagents done?
-        pending = self.registry.count_pending_for_parent(self.task_id)
-        if pending == 0:
-            print(f"{self.display_id} ← All subagents done (from deferred events)")
-            await self._continue_processing()
+
+        # All siblings done → resume processing
+        await self._resume_from_children()
 
     async def _finish_and_notify(self):
         result_preview = (
