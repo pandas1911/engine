@@ -9,9 +9,14 @@ from src.llm_provider import LLMProvider
 from src.models import AgentState, Session
 from src.registry import SubagentRegistry
 
+from src.tools.custom.mock import MockTool
+
 
 DEFAULT_PROMPT = """ 
-    请帮我查询一下天津和上海的天气，并比较一下哪个城市更适合出行。如果遇到服务器问题可以多重试几次。
+    现在对你的构建子代理的能力进行测试，请严格根据以下要求执行：
+    - 请你构建两个子代理
+    - 要求每一个子代理随机生成一个数字给你
+    - 你进行最终汇总汇报给用户
   """
 
 
@@ -56,6 +61,17 @@ async def run_agent_system(prompt: str) -> str:
         tools=[MockTool()],
     )
     print(f"      Agent: [{agent.label}|{agent.task_id}]")
+
+    # Register root agent in SubagentRegistry
+    await registry.register(
+        task_id=agent.task_id,
+        session_id=session.id,
+        description="root task",
+        parent_agent=None,
+        parent_task_id=None,
+        agent=agent,
+        depth=0,
+    )
 
     try:
         await agent.run(prompt)
