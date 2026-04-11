@@ -2,10 +2,12 @@
 import asyncio
 import sys
 import os
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.registry import SubagentRegistry
+from src.models import AgentState
 
 
 class MockAgent:
@@ -29,6 +31,7 @@ class MockAgent:
             self.status = "completed"
 
 
+@pytest.mark.asyncio
 async def test_child_spawns_slowly():
     print("=" * 60)
     print("SCENARIO: Race Condition in Child Registration")
@@ -76,7 +79,7 @@ async def test_child_spawns_slowly():
 
     print("\n[Step 1] C enters 'ended_with_pending_descendants':")
     await registry.mark_ended_with_pending_descendants("task_c")
-    print(f"  C status: {registry.get_task('task_c').status}")
+    print(f"  C status: {registry.get_task('task_c').state_machine.current_state}")
     print(f"  C in pending: {'task_c' in registry._pending}")
 
     print("\n[Step 2] C1 registers and completes IMMEDIATELY:")
@@ -96,7 +99,7 @@ async def test_child_spawns_slowly():
     await asyncio.sleep(0.1)
 
     print(f"\n  C's pending children: {registry.count_pending_for_parent('task_c')}")
-    print(f"  C status: {registry.get_task('task_c').status}")
+    print(f"  C status: {registry.get_task('task_c').state_machine.current_state}")
     print(f"  C event queue: {mock_c._event_queue}")
     print(f"  C resumed: {mock_c.resumed}")
 

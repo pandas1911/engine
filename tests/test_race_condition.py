@@ -4,6 +4,7 @@
 import asyncio
 import sys
 import os
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -14,6 +15,7 @@ from src.registry import SubagentRegistry
 from src.llm_provider import MockLLMProvider
 
 
+@pytest.mark.asyncio
 async def test_concurrent_grandchildren():
     print("=" * 60)
     print("Testing: Concurrent Grandchildren Completion")
@@ -82,7 +84,7 @@ async def test_concurrent_grandchildren():
 
     await registry.mark_ended_with_pending_descendants("task_b")
     print(f"\nB marked as ended_with_pending_descendants")
-    print(f"B status: {registry.get_task('task_b').status}")
+    print(f"B status: {registry.get_task('task_b').state_machine.current_state}")
     print(
         f"B wake_on_descendants_settle: {registry.get_task('task_b').wake_on_descendants_settle}"
     )
@@ -91,13 +93,13 @@ async def test_concurrent_grandchildren():
 
     await registry.complete("task_c", "C result")
     print(f"\nC completed")
-    print(f"C status: {registry.get_task('task_c').status}")
+    print(f"C status: {registry.get_task('task_c').state_machine.current_state}")
     print(f"Pending tasks: {registry.get_pending_count()}")
     print(f"Is C in pending? {'task_c' in registry._pending}")
 
     b_task = registry.get_task("task_b")
     print(f"\nAfter C completed:")
-    print(f"B status: {b_task.status}")
+    print(f"B status: {b_task.state_machine.current_state}")
     print(f"B wake_on_descendants_settle: {b_task.wake_on_descendants_settle}")
 
     pending_b_children = registry.count_pending_for_parent("task_b")
@@ -117,10 +119,10 @@ async def test_concurrent_grandchildren():
     else:
         print("✓ B is correctly removed from _pending")
 
-    if b_task.status == "running":
+    if b_task.state_machine.current_state == AgentState.RUNNING:
         print("✓ B was correctly woken to 'running' state")
     else:
-        print(f"✗ B status is {b_task.status}, expected 'running'")
+        print(f"✗ B status is {b_task.state_machine.current_state}, expected 'running'")
 
 
 if __name__ == "__main__":

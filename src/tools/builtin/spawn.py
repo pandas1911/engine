@@ -103,7 +103,7 @@ You are a **subagent** spawned by the {parent_label} for a specific task.
 
         return f"""━━━━ Spawned Task ━━━━
 Task ID: {task_id}
-Agent: {label}
+Agent Label: {label}
 
 Sub-agent is now executing in the background. Upon completion, you will be automatically re-activated and receive a full result report. You may proceed with other independent tasks or simply end your current turn."""
 

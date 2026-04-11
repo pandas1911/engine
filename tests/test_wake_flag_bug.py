@@ -2,10 +2,12 @@
 import asyncio
 import sys
 import os
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.registry import SubagentRegistry
+from src.models import AgentState
 
 
 class MockAgent:
@@ -24,6 +26,7 @@ class MockAgent:
         print(f"  [{self.name}] ERROR: I'm already completed! Should not be woken!")
 
 
+@pytest.mark.asyncio
 async def test_parent_completed_but_wake_flag_still_true():
     print("=" * 60)
     print("POTENTIAL BUG SCENARIO:")
@@ -64,14 +67,18 @@ async def test_parent_completed_but_wake_flag_still_true():
     await registry.mark_ended_with_pending_descendants("task_b")
 
     b_task = registry.get_task("task_b")
-    print(f"  B status: {b_task.status}")
+    print(f"  B status: {b_task.state_machine.current_state}")
     print(f"  B wake_flag: {b_task.wake_on_descendants_settle}")
 
     print("\n[Step 2] C completes:")
+    c_task = registry.get_task("task_c")
+    c_task.state_machine.trigger("children_settled")
     await registry.complete("task_c", "C result")
     await asyncio.sleep(0.1)
 
-    print(f"  B status after C complete: {registry.get_task('task_b').status}")
+    print(
+        f"  B status after C complete: {registry.get_task('task_b').state_machine.current_state}"
+    )
     print(
         f"  B wake_flag after C complete: {registry.get_task('task_b').wake_on_descendants_settle}"
     )
@@ -80,10 +87,11 @@ async def test_parent_completed_but_wake_flag_still_true():
     print("\n[Step 3] Simulate B completing (without clearing wake_flag):")
     b_task = registry.get_task("task_b")
     async with registry._lock:
-        b_task.status = "completed"
+        b_task.state_machine.trigger("children_settled")
+        b_task.state_machine.trigger("finish")
         registry._pending.discard("task_b")
 
-    print(f"  B status: {b_task.status}")
+    print(f"  B status: {b_task.state_machine.current_state}")
     print(f"  B wake_flag: {b_task.wake_on_descendants_settle}")
     print(f"  B in pending? {'task_b' in registry._pending}")
 
@@ -91,7 +99,9 @@ async def test_parent_completed_but_wake_flag_still_true():
     await registry.complete("task_d", "D result")
     await asyncio.sleep(0.1)
 
-    print(f"  B status after D complete: {registry.get_task('task_b').status}")
+    print(
+        f"  B status after D complete: {registry.get_task('task_b').state_machine.current_state}"
+    )
     print(
         f"  B wake_flag after D complete: {registry.get_task('task_b').wake_on_descendants_settle}"
     )

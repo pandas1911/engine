@@ -2,11 +2,12 @@
 import asyncio
 import sys
 import os
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.registry import SubagentRegistry
-from src.models import SubagentTask
+from src.models import SubagentTask, AgentState
 
 
 class MockAgent:
@@ -33,7 +34,22 @@ class MockAgent:
                 f"  [{self.task_id}] All children done, would call _continue_processing()"
             )
 
+    async def _resume_from_children(self):
+        self.wake_count += 1
+        print(f"  [{self.task_id}] ← Resumed from children")
+        print(f"  [{self.task_id}] Checking pending children...")
+        pending = 0
+        for tid, task in registry._tasks.items():
+            if task.parent_task_id == self.task_id and tid in registry._pending:
+                pending += 1
+        print(f"  [{self.task_id}] Pending children count: {pending}")
+        if pending == 0:
+            print(
+                f"  [{self.task_id}] All children done, would call _continue_processing()"
+            )
 
+
+@pytest.mark.asyncio
 async def test_scenario():
     print("=" * 60)
     print("SCENARIO: A → B → C")
@@ -82,7 +98,7 @@ async def test_scenario():
 
     print("\n[Step 2] B enters 'ended_with_pending_descendants':")
     await registry.mark_ended_with_pending_descendants("task_b")
-    print(f"  B status: {registry.get_task('task_b').status}")
+    print(f"  B status: {registry.get_task('task_b').state_machine.current_state}")
     print(f"  B in pending? {'task_b' in registry._pending}")
     print(f"  Pending: {registry._pending}")
 
@@ -90,9 +106,9 @@ async def test_scenario():
     await registry.complete("task_c", "C done")
     await asyncio.sleep(0.1)
 
-    print(f"  C status: {registry.get_task('task_c').status}")
+    print(f"  C status: {registry.get_task('task_c').state_machine.current_state}")
     print(f"  C in pending? {'task_c' in registry._pending}")
-    print(f"  B status: {registry.get_task('task_b').status}")
+    print(f"  B status: {registry.get_task('task_b').state_machine.current_state}")
     print(
         f"  B wake_on_descendants_settle: {registry.get_task('task_b').wake_on_descendants_settle}"
     )
@@ -101,7 +117,9 @@ async def test_scenario():
     print(f"  B in pending? {'task_b' in registry._pending}")
 
     print(f"\n[Step 4] Check if B was removed from pending after wake:")
-    print(f"  B status should be 'running': {registry.get_task('task_b').status}")
+    print(
+        f"  B status should be 'running': {registry.get_task('task_b').state_machine.current_state}"
+    )
     print(f"  B should NOT be in pending: {'task_b' not in registry._pending}")
 
     print("\n" + "=" * 60)

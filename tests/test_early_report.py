@@ -2,10 +2,12 @@
 import asyncio
 import sys
 import os
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.registry import SubagentRegistry
+from src.models import AgentState
 
 
 class MockAgent:
@@ -23,6 +25,7 @@ class MockAgent:
         print(f"  [{self.name}] ← Woken by {descendant_task_id[:8]}")
 
 
+@pytest.mark.asyncio
 async def test_b_has_multiple_children():
     print("=" * 60)
     print("SCENARIO: A → B → [C, D]")
@@ -58,7 +61,7 @@ async def test_b_has_multiple_children():
 
     print("\n[Step 2] B enters 'ended_with_pending_descendants':")
     await registry.mark_ended_with_pending_descendants("task_b")
-    print(f"  B status: {registry.get_task('task_b').status}")
+    print(f"  B status: {registry.get_task('task_b').state_machine.current_state}")
     print(f"  B in pending? {'task_b' in registry._pending}")
 
     print("\n[Step 3] C completes:")
@@ -66,7 +69,7 @@ async def test_b_has_multiple_children():
     await asyncio.sleep(0.1)
 
     print(f"  B's pending children: {registry.count_pending_for_parent('task_b')}")
-    print(f"  B status: {registry.get_task('task_b').status}")
+    print(f"  B status: {registry.get_task('task_b').state_machine.current_state}")
     print(f"  B in pending? {'task_b' in registry._pending}")
     print(f"  B received: {mock_b.results_received}")
 
@@ -75,7 +78,7 @@ async def test_b_has_multiple_children():
     await asyncio.sleep(0.1)
 
     print(f"  B's pending children: {registry.count_pending_for_parent('task_b')}")
-    print(f"  B status: {registry.get_task('task_b').status}")
+    print(f"  B status: {registry.get_task('task_b').state_machine.current_state}")
     print(f"  B in pending? {'task_b' in registry._pending}")
     print(f"  B received: {mock_b.results_received}")
     print(f"  A received: {mock_a.results_received}")
@@ -92,6 +95,7 @@ async def test_b_has_multiple_children():
     print(f"A received {len(mock_a.results_received)} callbacks from B")
 
 
+@pytest.mark.asyncio
 async def test_b_has_grandchild():
     print("\n" + "=" * 60)
     print("SCENARIO: A → B → C → D")
@@ -135,12 +139,12 @@ async def test_b_has_grandchild():
     await asyncio.sleep(0.1)
 
     print(f"  C's pending children: {registry.count_pending_for_parent('task_c')}")
-    print(f"  C status: {registry.get_task('task_c').status}")
+    print(f"  C status: {registry.get_task('task_c').state_machine.current_state}")
     print(f"  C in pending? {'task_c' in registry._pending}")
     print(f"  C received: {mock_c.results_received}")
 
     print(f"\n  B's pending children: {registry.count_pending_for_parent('task_b')}")
-    print(f"  B status: {registry.get_task('task_b').status}")
+    print(f"  B status: {registry.get_task('task_b').state_machine.current_state}")
     print(f"  B in pending? {'task_b' in registry._pending}")
     print(f"  B received: {mock_b.results_received}")
 
