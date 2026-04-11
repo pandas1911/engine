@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from src.models import AgentState, LLMResponse, QueueEvent, Session, ToolCall
 from src.config import Config
 from src.registry import SubagentRegistry
+from src.state_machine import AgentStateMachine
 from src.tools.base import ToolRegistry
 from src.tools.builtin.spawn import SpawnTool
 from src.llm_provider import MockLLMProvider
@@ -45,11 +46,13 @@ class Agent:
         self.label = label or (
             "Root" if session.depth == 0 else f"Sub Depth:{session.depth}"
         )
-        self.state = AgentState.IDLE
+        self._state_machine = AgentStateMachine(AgentState.IDLE)
         self._final_result: Optional[str] = None
         self._completion_event = asyncio.Event()
         self.display_id = f"[{self.label}|{self.task_id}]"
-        self._event_queue: List[QueueEvent] = []      # Deferred event queue (native list, Swift Array equivalent)
+        self._event_queue: List[
+            QueueEvent
+        ] = []  # Deferred event queue (native list, Swift Array equivalent)
         # Use provided registry or create new one
         self._tool_registry = tool_registry or ToolRegistry()
 
@@ -65,6 +68,10 @@ class Agent:
                     self._create_child_agent, self.registry, self.task_id, self.label
                 )
             )
+
+    @property
+    def state(self) -> AgentState:
+        return self._state_machine.current_state
 
     def _create_child_agent(
         self,
@@ -100,7 +107,7 @@ class Agent:
         if message:
             self.session.add_message("user", message)
 
-        self.state = AgentState.RUNNING
+        self._state_machine.trigger("start")
         print(f"[{self.label}|{self.task_id}] → Processing")
 
         spawned_any = await self._process_tool_calls()
@@ -108,12 +115,12 @@ class Agent:
         # Drain deferred events before branching decision
         await self._drain_events()
 
-        if self.state == AgentState.COMPLETED:
+        if self._state_machine.current_state == AgentState.COMPLETED:
             # Drain already triggered full completion chain
             pass
         elif spawned_any:
             print(f"[{self.label}|{self.task_id}] → Waiting for subagents")
-            self.state = AgentState.CALLBACK_PENDING
+            self._state_machine.trigger("spawn_children")
             await self.registry.mark_ended_with_pending_descendants(self.task_id)
             return "[等待子代理回调...]"
         else:
@@ -211,7 +218,8 @@ class Agent:
 
     async def _resume_from_children(self):
         """Continue processing after all children complete."""
-        self.state = AgentState.RUNNING
+        if self._state_machine.current_state == AgentState.WAITING_FOR_CHILDREN:
+            self._state_machine.trigger("children_settled")
 
         child_results = self.registry.collect_child_results(self.task_id)
 
@@ -219,9 +227,7 @@ class Agent:
             print(
                 f"{self.display_id} ← Collected {len(child_results)} descendant results"
             )
-            findings_prompt = (
-                "以下是你派出的所有子代理的执行报告，每个子代理都独立完成了自己的任务。\n"
-            )
+            findings_prompt = "以下是你派出的所有子代理的执行报告，每个子代理都独立完成了自己的任务。\n"
             for task_id, result in child_results.items():
                 task = self.registry.get_task(task_id)
                 task_desc = task.task_description if task else "未知任务"
@@ -239,12 +245,12 @@ class Agent:
         # Drain deferred events
         await self._drain_events()
 
-        if self.state == AgentState.COMPLETED:
+        if self._state_machine.current_state == AgentState.COMPLETED:
             return
 
         if spawned_any:
             print(f"{self.display_id} → Re-waiting for new subagents")
-            self.state = AgentState.CALLBACK_PENDING
+            self._state_machine.trigger("spawn_children")
             await self.registry.mark_ended_with_pending_descendants(self.task_id)
         else:
             await self._finish_and_notify()
@@ -254,7 +260,7 @@ class Agent:
 
         Swift equivalent: func drainEvents() async { ... } using Array
         """
-        if self.state == AgentState.COMPLETED:
+        if self._state_machine.current_state == AgentState.COMPLETED:
             return
 
         if not self._event_queue:
@@ -274,7 +280,7 @@ class Agent:
         )
         print(f"{self.display_id} ✓ Done: {result_preview}")
 
-        self.state = AgentState.COMPLETED
+        self._state_machine.trigger("finish")
         self._completion_event.set()
 
         if self.parent_task_id:
