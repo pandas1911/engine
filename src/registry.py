@@ -8,7 +8,8 @@ import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING, Dict, Optional, Set
 
-from src.models import SubagentTask
+from src.models import AgentState, SubagentTask
+from src.state_machine import AgentStateMachine
 
 if TYPE_CHECKING:
     from src.agent_core import Agent
@@ -70,6 +71,7 @@ class SubagentRegistry:
             parent_task_id=parent_task_id,
             depth=depth,
         )
+        task.state_machine = AgentStateMachine(AgentState.RUNNING)
 
         async with self._lock:
             self._tasks[task_id] = task
@@ -144,18 +146,22 @@ class SubagentRegistry:
                 return
 
             task = self._tasks[task_id]
-            task.status = "error" if error else "completed"
+            task.state_machine.trigger("error" if error else "finish")
             task.result = result
             task.completed_event.set()
             self._pending.discard(task_id)
 
             parent_task_id = task.parent_task_id
             pending_descendants = self._count_pending_descendants_locked(task_id)
-            pending_siblings = self.count_pending_for_parent(parent_task_id) if parent_task_id else 0
+            pending_siblings = (
+                self.count_pending_for_parent(parent_task_id) if parent_task_id else 0
+            )
 
         # [Gate 1] Still have pending descendants → return
         if pending_descendants > 0:
-            print(f"[Registry] {task_id} done, {pending_descendants} descendants pending")
+            print(
+                f"[Registry] {task_id} done, {pending_descendants} descendants pending"
+            )
             return
 
         # [Gate 2] Parent doesn't exist or not registered → return
@@ -170,11 +176,14 @@ class SubagentRegistry:
         parent_task: SubagentTask = self._tasks[parent_task_id]
 
         # [Branch A] Parent ended waiting for descendants → wake
-        if (parent_task.status in ["completed", "ended_with_pending_descendants"]
-                and parent_task.wake_on_descendants_settle):
+        if (
+            parent_task.state_machine.current_state
+            in [AgentState.COMPLETED, AgentState.WAITING_FOR_CHILDREN]
+            and parent_task.wake_on_descendants_settle
+        ):
             parent_agent: Agent = parent_task.agent
             if parent_agent is not None:
-                parent_task.status = "running"
+                parent_task.state_machine.trigger("children_settled")
                 parent_task.wake_on_descendants_settle = False
                 asyncio.create_task(parent_agent._resume_from_children())
             return
@@ -183,6 +192,7 @@ class SubagentRegistry:
         parent_agent = parent_task.agent
         if parent_agent is not None:
             from src.models import QueueEvent
+
             event = QueueEvent(child_task_id=task_id, result=result, error=error)
             parent_agent._event_queue.append(event)
 
@@ -218,8 +228,6 @@ class SubagentRegistry:
                 queue.extend(child_task.child_task_ids)
 
         return count
-
-
 
     def has_pending(self) -> bool:
         """Check if there are any pending tasks.
@@ -287,7 +295,7 @@ class SubagentRegistry:
         async with self._lock:
             if task_id in self._tasks:
                 task = self._tasks[task_id]
-                task.status = "ended_with_pending_descendants"
+                task.state_machine.trigger("spawn_children")
                 task.wake_on_descendants_settle = True
                 task.ended_at = datetime.now().timestamp()
 
