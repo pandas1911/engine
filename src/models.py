@@ -15,9 +15,9 @@ class AgentState(Enum):
 
     IDLE = "idle"
     RUNNING = "running"
-    CALLBACK_PENDING = "callback_pending"
-    ENDED_WITH_PENDING_DESCENDANTS = "ended_with_pending_descendants"
+    WAITING_FOR_CHILDREN = "waiting_for_children"
     COMPLETED = "completed"
+    ERROR = "error"
 
 
 @dataclass
@@ -87,7 +87,7 @@ class SubagentTask:
     task_description: str
     parent_agent: Any  # Forward reference to Agent
     parent_task_id: Optional[str] = None
-    status: str = "running"
+    state_machine: Optional[Any] = None  # AgentStateMachine, set during registration
     result: Optional[str] = None
     depth: int = 0
     child_task_ids: Set[str] = field(default_factory=set)
