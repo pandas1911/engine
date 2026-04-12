@@ -99,8 +99,8 @@ class SubagentTask:
 
 @dataclass
 class QueueEvent:
-    child_task_id: str
-    result: str
+    trigger_task_id: str  # Trigger child task_id (debug/log)
+    child_results: Dict[str, str]  # All child task_id → result aggregation
     error: bool
 
 

@@ -8,7 +8,7 @@ import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING, Dict, Optional, Set
 
-from src.models import AgentState, SubagentTask
+from src.models import AgentState, QueueEvent, SubagentTask
 from src.state_machine import AgentStateMachine
 
 if TYPE_CHECKING:
@@ -175,6 +175,9 @@ class SubagentRegistry:
         # All gates passed → notify parent
         parent_task: SubagentTask = self._tasks[parent_task_id]
 
+        # Collect aggregated child results
+        child_results = self.collect_child_results(parent_task_id)
+
         # [Branch A] Parent ended waiting for descendants → wake
         if (
             parent_task.state_machine.current_state
@@ -185,15 +188,15 @@ class SubagentRegistry:
             if parent_agent is not None:
                 parent_task.state_machine.trigger("children_settled")
                 parent_task.wake_on_descendants_settle = False
-                asyncio.create_task(parent_agent._resume_from_children())
+                asyncio.create_task(parent_agent._resume_from_children(child_results))
             return
 
         # [Branch B] Parent is running → push to event queue
         parent_agent = parent_task.agent
         if parent_agent is not None:
-            from src.models import QueueEvent
-
-            event = QueueEvent(child_task_id=task_id, result=result, error=error)
+            event = QueueEvent(
+                trigger_task_id=task_id, child_results=child_results, error=error
+            )
             parent_agent._event_queue.append(event)
 
     def _count_pending_descendants_locked(self, task_id: str) -> int:

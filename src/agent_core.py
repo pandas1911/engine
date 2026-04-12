@@ -73,6 +73,12 @@ class Agent:
     def state(self) -> AgentState:
         return self._state_machine.current_state
 
+    def pop_event(self) -> Optional[QueueEvent]:
+        """Pop the next event from the queue, or None if empty."""
+        if self._event_queue:
+            return self._event_queue.pop(0)
+        return None
+
     def _create_child_agent(
         self,
         session: Session,
@@ -216,12 +222,12 @@ class Agent:
         except Exception as e:
             return f"[工具错误] {str(e)}"
 
-    async def _resume_from_children(self):
+    async def _resume_from_children(self, child_results: Dict[str, str]):
         """Continue processing after all children complete."""
         if self._state_machine.current_state == AgentState.WAITING_FOR_CHILDREN:
             self._state_machine.trigger("children_settled")
 
-        child_results = self.registry.collect_child_results(self.task_id)
+        # child_results is now passed as parameter (aggregated in registry.complete())
 
         if child_results:
             print(
@@ -256,21 +262,15 @@ class Agent:
             await self._finish_and_notify()
 
     async def _drain_events(self):
-        """Process queued events after tool loop completes.
-
-        Swift equivalent: func drainEvents() async { ... } using Array
-        """
+        """Process queued events after tool loop completes."""
         if self._state_machine.current_state == AgentState.COMPLETED:
             return
 
-        if not self._event_queue:
+        event = self.pop_event()
+        if event is None:
             return
 
-        # Clear queue — complete() Gate 3 guarantees all siblings done
-        self._event_queue.clear()
-
-        # All siblings done → resume processing
-        await self._resume_from_children()
+        await self._resume_from_children(event.child_results)
 
     async def _finish_and_notify(self):
         result_preview = (
