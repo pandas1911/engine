@@ -39,7 +39,7 @@ ENV/
 *.swo
 *~
 
-# Build artifacts
-*.egg-info/
+# Tests
+tests/
 dist/
 build/
