@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.registry import SubagentRegistry
 from src.models import AgentState
+from src.state_machine import AgentStateMachine
 
 
 class MockAgent:
@@ -15,6 +16,7 @@ class MockAgent:
         self.task_id = task_id
         self.name = name
         self.results_received = []
+        self.state_machine = AgentStateMachine(AgentState.IDLE)
 
     async def _on_subagent_complete(self, child_task_id, result):
         self.results_received.append(("complete", child_task_id, result))
@@ -25,22 +27,26 @@ class MockAgent:
         print(f"  [{self.name}] ← Woken by {descendant_task_id[:8]}")
         print(f"  [{self.name}] ERROR: I'm already completed! Should not be woken!")
 
+    async def _resume_from_children(self, child_results):
+        self.results_received.append(("resume", "children", str(child_results)))
+        print(f"  [{self.name}] ← Resumed from children")
+        if self.state_machine.current_state == AgentState.WAITING_FOR_CHILDREN:
+            self.state_machine.trigger("children_settled")
+
 
 @pytest.mark.asyncio
 async def test_parent_completed_but_wake_flag_still_true():
     print("=" * 60)
-    print("POTENTIAL BUG SCENARIO:")
+    print("WAKE FLAG BUG SCENARIO (unified state machine):")
     print("=" * 60)
     print("A → B → C → D")
     print("")
     print("Scenario:")
     print("1. B spawns C, C spawns D")
-    print("2. B enters 'ended_with_pending_descendants', wake_flag=True")
+    print("2. B and C enter WAITING_FOR_CHILDREN via state machine")
     print("3. C completes")
-    print("4. B is woken, continues processing, COMPLETES")
-    print("5. B status='completed' BUT wake_flag STILL=True")
-    print("6. D completes")
-    print("7. Should B be woken again? NO! But if wake_flag is still True...")
+    print("4. B resumes, continues processing, COMPLETES")
+    print("5. D completes — B should NOT be woken again")
     print("=" * 60)
 
     registry = SubagentRegistry()
@@ -62,49 +68,37 @@ async def test_parent_completed_but_wake_flag_still_true():
     await registry.register("task_d", "sess_d", "GreatGrandchild", mock_c, "task_c", 3)
     await registry.set_agent("task_d", mock_d)
 
-    print("\n[Step 1] B and C enter 'ended_with_pending_descendants':")
-    await registry.mark_ended_with_pending_descendants("task_c")
-    await registry.mark_ended_with_pending_descendants("task_b")
+    # Put B and C into WAITING_FOR_CHILDREN via state machine triggers
+    print("\n[Step 1] B and C enter WAITING_FOR_CHILDREN:")
+    mock_c.state_machine.trigger("start")
+    mock_c.state_machine.trigger("spawn_children")
+    mock_b.state_machine.trigger("start")
+    mock_b.state_machine.trigger("spawn_children")
 
-    b_task = registry.get_task("task_b")
-    print(f"  B status: {b_task.state_machine.current_state}")
-    print(f"  B wake_flag: {b_task.wake_on_descendants_settle}")
+    print(f"  B status: {mock_b.state_machine.current_state}")
 
     print("\n[Step 2] C completes:")
-    c_task = registry.get_task("task_c")
-    c_task.state_machine.trigger("children_settled")
+    mock_c.state_machine.trigger("children_settled")
     await registry.complete("task_c", "C result")
     await asyncio.sleep(0.1)
 
-    print(
-        f"  B status after C complete: {registry.get_task('task_b').state_machine.current_state}"
-    )
-    print(
-        f"  B wake_flag after C complete: {registry.get_task('task_b').wake_on_descendants_settle}"
-    )
+    print(f"  B status after C complete: {mock_b.state_machine.current_state}")
     print(f"  B received: {mock_b.results_received}")
 
-    print("\n[Step 3] Simulate B completing (without clearing wake_flag):")
-    b_task = registry.get_task("task_b")
-    async with registry._lock:
-        b_task.state_machine.trigger("children_settled")
-        b_task.state_machine.trigger("finish")
-        registry._pending.discard("task_b")
+    print("\n[Step 3] Simulate B completing:")
+    # Drive B through children_settled → RUNNING → COMPLETED
+    mock_b.state_machine.trigger("children_settled")
+    mock_b.state_machine.trigger("finish")
+    registry._pending.discard("task_b")
 
-    print(f"  B status: {b_task.state_machine.current_state}")
-    print(f"  B wake_flag: {b_task.wake_on_descendants_settle}")
+    print(f"  B status: {mock_b.state_machine.current_state}")
     print(f"  B in pending? {'task_b' in registry._pending}")
 
     print("\n[Step 4] D completes:")
     await registry.complete("task_d", "D result")
     await asyncio.sleep(0.1)
 
-    print(
-        f"  B status after D complete: {registry.get_task('task_b').state_machine.current_state}"
-    )
-    print(
-        f"  B wake_flag after D complete: {registry.get_task('task_b').wake_on_descendants_settle}"
-    )
+    print(f"  B status after D complete: {mock_b.state_machine.current_state}")
     print(f"  B received (TOTAL): {mock_b.results_received}")
 
     print("\n" + "=" * 60)
@@ -117,17 +111,14 @@ async def test_parent_completed_but_wake_flag_still_true():
     if wake_count > 1:
         print("✗ BUG DETECTED: B was woken multiple times!")
         print("  This happens when:")
-        print("  1. B completes but wake_flag is NOT cleared")
-        print("  2. D completes and sees B.status='completed' + wake_flag=True")
+        print("  1. B completes but is somehow still reachable for wake")
+        print("  2. D completes and triggers B again")
         print("  3. B is incorrectly woken again!")
     elif wake_count == 1:
         print("✓ B was woken once (correct)")
-        b_final = registry.get_task("task_b")
-        if b_final.wake_on_descendants_settle:
-            print("✗ WARNING: B's wake_flag is still True even though B is completed!")
-            print("  This is a potential bug waiting to happen!")
-        else:
-            print("✓ B's wake_flag was correctly cleared")
+    else:
+        print("✓ B was woken 0 times — state machine is the single authority")
+        print("✓ B's wake_flag no longer exists — state machine prevents double-wake")
 
 
 if __name__ == "__main__":

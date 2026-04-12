@@ -122,12 +122,13 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
             On completion, registry.complete() will automatically notify parent.
             On error, registry.complete() is called with error=True.
         """
+        agent = self.agent_factory(
+            child_session, config, self.registry, self.parent_task_id, task_id
+        )
+        await self.registry.set_agent(task_id, agent)
         try:
-            agent = self.agent_factory(
-                child_session, config, self.registry, self.parent_task_id, task_id
-            )
-            await self.registry.set_agent(task_id, agent)
             result = await agent.run(task_desc)
         except Exception as e:
             print(f"[Subagent|{task_id}] ✗ Failed: {e}")
+            agent.state_machine.trigger("error")
             await self.registry.complete(task_id, f"[Error] {e}", error=True)

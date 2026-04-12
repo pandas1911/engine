@@ -9,7 +9,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Dict, Optional, Set
 
 from src.models import AgentState, QueueEvent, SubagentTask
-from src.state_machine import AgentStateMachine
 
 if TYPE_CHECKING:
     from src.agent_core import Agent
@@ -71,7 +70,6 @@ class SubagentRegistry:
             parent_task_id=parent_task_id,
             depth=depth,
         )
-        task.state_machine = AgentStateMachine(AgentState.RUNNING)
 
         async with self._lock:
             self._tasks[task_id] = task
@@ -146,9 +144,8 @@ class SubagentRegistry:
                 return
 
             task = self._tasks[task_id]
-            task.state_machine.trigger("error" if error else "finish")
             task.result = result
-            task.completed_event.set()
+            task.ended_at = datetime.now().timestamp()
             self._pending.discard(task_id)
 
             parent_task_id = task.parent_task_id
@@ -178,17 +175,14 @@ class SubagentRegistry:
         # Collect aggregated child results
         child_results = self.collect_child_results(parent_task_id)
 
-        # [Branch A] Parent ended waiting for descendants → wake
+        # [Branch A] Parent waiting for descendants → wake
+        parent_agent = parent_task.agent
         if (
-            parent_task.state_machine.current_state
-            in [AgentState.COMPLETED, AgentState.WAITING_FOR_CHILDREN]
-            and parent_task.wake_on_descendants_settle
+            parent_agent is not None
+            and parent_agent.state_machine.current_state
+            == AgentState.WAITING_FOR_CHILDREN
         ):
-            parent_agent: Agent = parent_task.agent
-            if parent_agent is not None:
-                parent_task.state_machine.trigger("children_settled")
-                parent_task.wake_on_descendants_settle = False
-                asyncio.create_task(parent_agent._resume_from_children(child_results))
+            asyncio.create_task(parent_agent._resume_from_children(child_results))
             return
 
         # [Branch B] Parent is running → push to event queue
@@ -288,19 +282,6 @@ class SubagentRegistry:
             if task.parent_task_id == parent_task_id and task.result is not None:
                 results[task_id] = task.result
         return results
-
-    async def mark_ended_with_pending_descendants(self, task_id: str):
-        """Mark an Agent as ended but with pending descendants.
-
-        Args:
-            task_id: The task ID to mark
-        """
-        async with self._lock:
-            if task_id in self._tasks:
-                task = self._tasks[task_id]
-                task.state_machine.trigger("spawn_children")
-                task.wake_on_descendants_settle = True
-                task.ended_at = datetime.now().timestamp()
 
 
 __all__ = ["SubagentRegistry"]

@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.registry import SubagentRegistry
 from src.models import AgentState
+from src.state_machine import AgentStateMachine
 
 
 class MockAgent:
@@ -15,6 +16,7 @@ class MockAgent:
         self.task_id = task_id
         self.name = name
         self.results_received = []
+        self.state_machine = AgentStateMachine(AgentState.IDLE)
 
     async def _on_subagent_complete(self, child_task_id, result):
         self.results_received.append(("complete", child_task_id, result))
@@ -23,6 +25,12 @@ class MockAgent:
     async def _on_descendant_wake(self, descendant_task_id, result):
         self.results_received.append(("wake", descendant_task_id, result))
         print(f"  [{self.name}] ← Woken by {descendant_task_id[:8]}")
+
+    async def _resume_from_children(self, child_results):
+        self.results_received.append(("resume", "children", str(child_results)))
+        print(f"  [{self.name}] ← Resumed from children")
+        if self.state_machine.current_state == AgentState.WAITING_FOR_CHILDREN:
+            self.state_machine.trigger("children_settled")
 
 
 @pytest.mark.asyncio
@@ -60,8 +68,9 @@ async def test_b_has_multiple_children():
     )
 
     print("\n[Step 2] B enters 'ended_with_pending_descendants':")
-    await registry.mark_ended_with_pending_descendants("task_b")
-    print(f"  B status: {registry.get_task('task_b').state_machine.current_state}")
+    mock_b.state_machine.trigger("start")
+    mock_b.state_machine.trigger("spawn_children")
+    print(f"  B status: {mock_b.state_machine.current_state}")
     print(f"  B in pending? {'task_b' in registry._pending}")
 
     print("\n[Step 3] C completes:")
@@ -69,7 +78,7 @@ async def test_b_has_multiple_children():
     await asyncio.sleep(0.1)
 
     print(f"  B's pending children: {registry.count_pending_for_parent('task_b')}")
-    print(f"  B status: {registry.get_task('task_b').state_machine.current_state}")
+    print(f"  B status: {mock_b.state_machine.current_state}")
     print(f"  B in pending? {'task_b' in registry._pending}")
     print(f"  B received: {mock_b.results_received}")
 
@@ -78,7 +87,7 @@ async def test_b_has_multiple_children():
     await asyncio.sleep(0.1)
 
     print(f"  B's pending children: {registry.count_pending_for_parent('task_b')}")
-    print(f"  B status: {registry.get_task('task_b').state_machine.current_state}")
+    print(f"  B status: {mock_b.state_machine.current_state}")
     print(f"  B in pending? {'task_b' in registry._pending}")
     print(f"  B received: {mock_b.results_received}")
     print(f"  A received: {mock_a.results_received}")
@@ -127,11 +136,13 @@ async def test_b_has_grandchild():
     print(f"  Pending: {[t[:8] for t in registry._pending]}")
 
     print("\n[Step 2] C enters 'ended_with_pending_descendants':")
-    await registry.mark_ended_with_pending_descendants("task_c")
+    mock_c.state_machine.trigger("start")
+    mock_c.state_machine.trigger("spawn_children")
     print(f"  C in pending? {'task_c' in registry._pending}")
 
     print("\n[Step 3] B enters 'ended_with_pending_descendants':")
-    await registry.mark_ended_with_pending_descendants("task_b")
+    mock_b.state_machine.trigger("start")
+    mock_b.state_machine.trigger("spawn_children")
     print(f"  B in pending? {'task_b' in registry._pending}")
 
     print("\n[Step 4] D completes:")
@@ -139,12 +150,12 @@ async def test_b_has_grandchild():
     await asyncio.sleep(0.1)
 
     print(f"  C's pending children: {registry.count_pending_for_parent('task_c')}")
-    print(f"  C status: {registry.get_task('task_c').state_machine.current_state}")
+    print(f"  C status: {mock_c.state_machine.current_state}")
     print(f"  C in pending? {'task_c' in registry._pending}")
     print(f"  C received: {mock_c.results_received}")
 
     print(f"\n  B's pending children: {registry.count_pending_for_parent('task_b')}")
-    print(f"  B status: {registry.get_task('task_b').state_machine.current_state}")
+    print(f"  B status: {mock_b.state_machine.current_state}")
     print(f"  B in pending? {'task_b' in registry._pending}")
     print(f"  B received: {mock_b.results_received}")
 

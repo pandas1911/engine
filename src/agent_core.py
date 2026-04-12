@@ -46,7 +46,7 @@ class Agent:
         self.label = label or (
             "Root" if session.depth == 0 else f"Sub Depth:{session.depth}"
         )
-        self._state_machine = AgentStateMachine(AgentState.IDLE)
+        self.state_machine = AgentStateMachine(AgentState.IDLE)
         self._final_result: Optional[str] = None
         self._completion_event = asyncio.Event()
         self.display_id = f"[{self.label}|{self.task_id}]"
@@ -71,7 +71,7 @@ class Agent:
 
     @property
     def state(self) -> AgentState:
-        return self._state_machine.current_state
+        return self.state_machine.current_state
 
     def pop_event(self) -> Optional[QueueEvent]:
         """Pop the next event from the queue, or None if empty."""
@@ -113,7 +113,7 @@ class Agent:
         if message:
             self.session.add_message("user", message)
 
-        self._state_machine.trigger("start")
+        self.state_machine.trigger("start")
         print(f"[{self.label}|{self.task_id}] → Processing")
 
         spawned_any = await self._process_tool_calls()
@@ -121,13 +121,12 @@ class Agent:
         # Drain deferred events before branching decision
         await self._drain_events()
 
-        if self._state_machine.current_state == AgentState.COMPLETED:
+        if self.state_machine.current_state == AgentState.COMPLETED:
             # Drain already triggered full completion chain
             pass
         elif spawned_any:
             print(f"[{self.label}|{self.task_id}] → Waiting for subagents")
-            self._state_machine.trigger("spawn_children")
-            await self.registry.mark_ended_with_pending_descendants(self.task_id)
+            self.state_machine.trigger("spawn_children")
             return "[等待子代理回调...]"
         else:
             print(f"[{self.label}|{self.task_id}] ✓ Completed")
@@ -224,8 +223,8 @@ class Agent:
 
     async def _resume_from_children(self, child_results: Dict[str, str]):
         """Continue processing after all children complete."""
-        if self._state_machine.current_state == AgentState.WAITING_FOR_CHILDREN:
-            self._state_machine.trigger("children_settled")
+        if self.state_machine.current_state == AgentState.WAITING_FOR_CHILDREN:
+            self.state_machine.trigger("children_settled")
 
         # child_results is now passed as parameter (aggregated in registry.complete())
 
@@ -251,19 +250,18 @@ class Agent:
         # Drain deferred events
         await self._drain_events()
 
-        if self._state_machine.current_state == AgentState.COMPLETED:
+        if self.state_machine.current_state == AgentState.COMPLETED:
             return
 
         if spawned_any:
             print(f"{self.display_id} → Re-waiting for new subagents")
-            self._state_machine.trigger("spawn_children")
-            await self.registry.mark_ended_with_pending_descendants(self.task_id)
+            self.state_machine.trigger("spawn_children")
         else:
             await self._finish_and_notify()
 
     async def _drain_events(self):
         """Process queued events after tool loop completes."""
-        if self._state_machine.current_state == AgentState.COMPLETED:
+        if self.state_machine.current_state == AgentState.COMPLETED:
             return
 
         event = self.pop_event()
@@ -280,7 +278,7 @@ class Agent:
         )
         print(f"{self.display_id} ✓ Done: {result_preview}")
 
-        self._state_machine.trigger("finish")
+        self.state_machine.trigger("finish")
         self._completion_event.set()
 
         if self.parent_task_id:

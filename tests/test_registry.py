@@ -11,6 +11,7 @@ import asyncio
 
 from src.registry import SubagentRegistry
 from src.models import AgentState, SubagentTask, QueueEvent
+from src.state_machine import AgentStateMachine
 
 
 class MockAgent:
@@ -21,10 +22,14 @@ class MockAgent:
         self.registry = registry
         self._event_queue: list = []
         self.resumed = False
+        self.state_machine = AgentStateMachine(AgentState.IDLE)
 
-    async def _resume_from_children(self):
+    async def _resume_from_children(self, child_results):
         """Mock resume method - tracks if it was called."""
         self.resumed = True
+        # Simulate what real Agent does: transition back to RUNNING
+        if self.state_machine.current_state == AgentState.WAITING_FOR_CHILDREN:
+            self.state_machine.trigger("children_settled")
 
 
 def make_test_registry() -> SubagentRegistry:
@@ -146,8 +151,8 @@ class TestComplete:
         assert len(parent_agent._event_queue) == 1
         event = parent_agent._event_queue[0]
         assert isinstance(event, QueueEvent)
-        assert event.child_task_id == "child-1"
-        assert event.result == "result-1"
+        assert event.trigger_task_id == "child-1"
+        assert event.child_results == {"child-1": "result-1"}
         assert event.error is False
         assert parent_agent.resumed is False  # Should NOT wake
 
@@ -185,8 +190,9 @@ class TestComplete:
             )
         )
 
-        # Mark parent as ended waiting
-        asyncio.run(registry.mark_ended_with_pending_descendants("parent-1"))
+        # Put parent agent into WAITING_FOR_CHILDREN state
+        parent_agent.state_machine.trigger("start")
+        parent_agent.state_machine.trigger("spawn_children")
 
         # Complete the child - should wake parent
         asyncio.run(registry.complete("child-1", "result-1", error=False))
@@ -195,9 +201,8 @@ class TestComplete:
         assert parent_agent.resumed is True
         assert len(parent_agent._event_queue) == 0  # Should NOT push to queue
 
-        # Verify parent status was reset to running
-        parent_task = registry.get_task("parent-1")
-        assert parent_task.state_machine.current_state == AgentState.RUNNING
+        # Verify parent agent state was reset to running
+        assert parent_agent.state_machine.current_state == AgentState.RUNNING
 
     def test_complete_no_action_when_pending_descendants(self):
         """Gate 1 — pending descendants → no push, no wake."""
@@ -360,11 +365,11 @@ class TestComplete:
         # Complete child-2 (all siblings done → push to queue)
         asyncio.run(registry.complete("child-2", "result-2", error=False))
 
-        # Verify both events in queue (child-2 triggers the push, but only its own event)
+        # Verify event in queue with ALL siblings' results
         assert len(parent_agent._event_queue) == 1
         event = parent_agent._event_queue[0]
-        assert event.child_task_id == "child-2"
-        assert event.result == "result-2"
+        assert event.trigger_task_id == "child-2"
+        assert event.child_results == {"child-1": "result-1", "child-2": "result-2"}
 
     def test_complete_error_result(self):
         """error=True → QueueEvent.error is True."""
@@ -403,10 +408,10 @@ class TestComplete:
         assert len(parent_agent._event_queue) == 1
         event = parent_agent._event_queue[0]
         assert event.error is True
-        assert event.result == "error-result"
+        assert event.child_results == {"child-1": "error-result"}
 
     def test_complete_queue_item_format(self):
-        """Verify QueueEvent fields (child_task_id, result, error)."""
+        """Verify QueueEvent fields (trigger_task_id, child_results, error)."""
         registry = make_test_registry()
 
         parent_agent = MockAgent("parent-1", registry)
@@ -443,11 +448,11 @@ class TestComplete:
 
         # Verify all fields
         assert isinstance(event, QueueEvent)
-        assert hasattr(event, "child_task_id")
-        assert hasattr(event, "result")
+        assert hasattr(event, "trigger_task_id")
+        assert hasattr(event, "child_results")
         assert hasattr(event, "error")
-        assert event.child_task_id == "child-1"
-        assert event.result == "test-result"
+        assert event.trigger_task_id == "child-1"
+        assert event.child_results == {"child-1": "test-result"}
         assert event.error is False
 
     def test_complete_no_direct_callbacks(self):
@@ -552,13 +557,13 @@ class TestMultiLevel:
         # Complete C (B is running, so queue to B)
         asyncio.run(registry.complete("C", "result-C", error=False))
         assert len(agent_b._event_queue) == 1
-        assert agent_b._event_queue[0].child_task_id == "C"
+        assert agent_b._event_queue[0].trigger_task_id == "C"
         assert len(agent_a._event_queue) == 0  # A shouldn't receive anything yet
 
         # Complete B (all B's descendants done, A is running)
         asyncio.run(registry.complete("B", "result-B", error=False))
         assert len(agent_a._event_queue) == 1
-        assert agent_a._event_queue[0].child_task_id == "B"
+        assert agent_a._event_queue[0].trigger_task_id == "B"
 
     def test_grandchildren_wake_grandparent(self):
         """Grandparent ends waiting, grandchild completes → wake grandparent."""
@@ -606,8 +611,9 @@ class TestMultiLevel:
             )
         )
 
-        # Mark grandparent as ended waiting FIRST (waiting for descendants to settle)
-        asyncio.run(registry.mark_ended_with_pending_descendants("grandparent"))
+        # Put grandparent agent into WAITING_FOR_CHILDREN state
+        grandparent_agent.state_machine.trigger("start")
+        grandparent_agent.state_machine.trigger("spawn_children")
 
         # Now complete grandchild - parent is running, so grandchild queues to parent
         # But wait, parent has no agent set up to receive...
@@ -616,7 +622,7 @@ class TestMultiLevel:
 
         # Parent's queue should have the event
         assert len(parent_agent._event_queue) == 1
-        assert parent_agent._event_queue[0].child_task_id == "grandchild"
+        assert parent_agent._event_queue[0].trigger_task_id == "grandchild"
 
         # Grandparent should NOT be woken yet - parent is still running
         assert grandparent_agent.resumed is False
@@ -673,10 +679,14 @@ class TestMultiLevel:
         asyncio.run(registry.complete("child-3", "result-3", error=False))
         assert len(parent_agent._event_queue) == 1
 
-        # Verify only child-3's event was pushed (the one that triggered)
+        # Verify event contains ALL children's results (collect_child_results gets all completed)
         event = parent_agent._event_queue[0]
-        assert event.child_task_id == "child-3"
-        assert event.result == "result-3"
+        assert event.trigger_task_id == "child-3"
+        assert event.child_results == {
+            "child-1": "result-1",
+            "child-2": "result-2",
+            "child-3": "result-3",
+        }
 
 
 class TestEdgeCases:
@@ -712,8 +722,8 @@ class TestEdgeCases:
 
         # Should complete without error
         task = registry.get_task("root")
-        assert task.state_machine.current_state == AgentState.COMPLETED
         assert task.result == "root-result"
+        assert task.ended_at is not None
 
     def test_cycle_detection(self):
         """Attempting to create cycle should raise ValueError."""

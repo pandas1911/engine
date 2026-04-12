@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.registry import SubagentRegistry
 from src.models import AgentState
+from src.state_machine import AgentStateMachine
 
 
 class MockAgent:
@@ -18,10 +19,13 @@ class MockAgent:
         self._event_queue = []
         self.status = "running"
         self.resumed = False
+        self.state_machine = AgentStateMachine(AgentState.IDLE)
 
-    async def _resume_from_children(self):
+    async def _resume_from_children(self, child_results):
         self.resumed = True
         print(f"  [{self.name}] ← Resumed from children")
+        if self.state_machine.current_state == AgentState.WAITING_FOR_CHILDREN:
+            self.state_machine.trigger("children_settled")
 
         pending = self.registry.count_pending_for_parent(self.task_id)
         print(f"  [{self.name}] Pending children: {pending}")
@@ -78,8 +82,9 @@ async def test_child_spawns_slowly():
     )
 
     print("\n[Step 1] C enters 'ended_with_pending_descendants':")
-    await registry.mark_ended_with_pending_descendants("task_c")
-    print(f"  C status: {registry.get_task('task_c').state_machine.current_state}")
+    mock_c.state_machine.trigger("start")
+    mock_c.state_machine.trigger("spawn_children")
+    print(f"  C status: {mock_c.state_machine.current_state}")
     print(f"  C in pending: {'task_c' in registry._pending}")
 
     print("\n[Step 2] C1 registers and completes IMMEDIATELY:")
@@ -99,7 +104,7 @@ async def test_child_spawns_slowly():
     await asyncio.sleep(0.1)
 
     print(f"\n  C's pending children: {registry.count_pending_for_parent('task_c')}")
-    print(f"  C status: {registry.get_task('task_c').state_machine.current_state}")
+    print(f"  C status: {mock_c.state_machine.current_state}")
     print(f"  C event queue: {mock_c._event_queue}")
     print(f"  C resumed: {mock_c.resumed}")
 

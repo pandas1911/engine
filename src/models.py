@@ -3,7 +3,6 @@
 This module contains all data models for the Agent system.
 """
 
-import asyncio
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set
@@ -87,12 +86,9 @@ class SubagentTask:
     task_description: str
     parent_agent: Any  # Forward reference to Agent
     parent_task_id: Optional[str] = None
-    state_machine: Optional[Any] = None  # AgentStateMachine, set during registration
     result: Optional[str] = None
     depth: int = 0
     child_task_ids: Set[str] = field(default_factory=set)
-    completed_event: asyncio.Event = field(default_factory=asyncio.Event)
-    wake_on_descendants_settle: bool = False
     ended_at: Optional[float] = None
     agent: Optional[Any] = None  # Reference to the agent instance for this task
 
