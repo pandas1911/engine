@@ -149,15 +149,15 @@ class SubagentRegistry:
             self._pending.discard(task_id)
 
             parent_task_id = task.parent_task_id
-            pending_descendants = self._count_pending_descendants_locked(task_id)
+            pending_children = self._count_pending_for_parent(task_id)
             pending_siblings = (
-                self.count_pending_for_parent(parent_task_id) if parent_task_id else 0
+                self._count_pending_for_parent(parent_task_id) if parent_task_id else 0
             )
 
-        # [Gate 1] Still have pending descendants → return
-        if pending_descendants > 0:
+        # [Gate 1] Still have pending children → return
+        if pending_children > 0:
             print(
-                f"[Registry] {task_id} done, {pending_descendants} descendants pending"
+                f"[Registry] {task_id} done, {pending_children} children pending"
             )
             return
 
@@ -193,38 +193,40 @@ class SubagentRegistry:
             )
             parent_agent._event_queue.append(event)
 
-    def _count_pending_descendants_locked(self, task_id: str) -> int:
-        """Count pending descendants of a task - Corresponds to OpenClaw's countPendingDescendantRuns.
-
-        Must be called while holding self._lock.
-
-        Args:
-            task_id: The task ID to count descendants for
-
-        Returns:
-            Number of pending descendant tasks
-        """
-        if task_id not in self._tasks:
-            return 0
-
-        task = self._tasks[task_id]
-        count = 0
-        visited = {task_id}
-        queue = list(task.child_task_ids)
-
-        while queue:
-            child_id = queue.pop(0)
-            if child_id in visited:
-                continue
-            visited.add(child_id)
-
-            if child_id in self._tasks:
-                child_task = self._tasks[child_id]
-                if child_id in self._pending:
-                    count += 1
-                queue.extend(child_task.child_task_ids)
-
-        return count
+    # Replaced by _count_pending_for_parent. See docs/notebook.md for analysis.
+    #
+    # def _count_pending_descendants_locked(self, task_id: str) -> int:
+    #     """Count pending descendants of a task - Corresponds to OpenClaw's countPendingDescendantRuns.
+    #
+    #     Must be called while holding self._lock.
+    #
+    #     Args:
+    #         task_id: The task ID to count descendants for
+    #
+    #     Returns:
+    #         Number of pending descendant tasks
+    #     """
+    #     if task_id not in self._tasks:
+    #         return 0
+    #
+    #     task = self._tasks[task_id]
+    #     count = 0
+    #     visited = {task_id}
+    #     queue = list(task.child_task_ids)
+    #
+    #     while queue:
+    #         child_id = queue.pop(0)
+    #         if child_id in visited:
+    #             continue
+    #         visited.add(child_id)
+    #
+    #         if child_id in self._tasks:
+    #             child_task = self._tasks[child_id]
+    #             if child_id in self._pending:
+    #                 count += 1
+    #             queue.extend(child_task.child_task_ids)
+    #
+    #     return count
 
     def has_pending(self) -> bool:
         """Check if there are any pending tasks.
@@ -242,20 +244,10 @@ class SubagentRegistry:
         """
         return len(self._pending)
 
-    def count_pending_for_parent(self, parent_task_id: str) -> int:
-        """Count pending subagents for a specific parent.
-
-        Args:
-            parent_task_id: The parent task ID to count for
-
-        Returns:
-            Number of pending child tasks for this parent
-        """
-        count = 0
-        for task_id, task in self._tasks.items():
-            if task.parent_task_id == parent_task_id and task_id in self._pending:
-                count += 1
-        return count
+    def _count_pending_for_parent(self, parent_task_id: str) -> int:
+        if parent_task_id not in self._tasks:
+            return 0
+        return sum(1 for cid in self._tasks[parent_task_id].child_task_ids if cid in self._pending)
 
     def get_task(self, task_id: str) -> Optional[SubagentTask]:
         """Get a task by ID.

@@ -79,7 +79,8 @@ You are a **subagent** spawned by the {parent_label} for a specific task.
 4. **Be ephemeral** - You may be terminated after task completion. That's fine.
 5. **Trust push-based completion** - Descendant results are auto-announced back to you
 
-{"## Sub-Agent Spawning\\nYou CAN spawn your own sub-agents." if can_spawn else "## Sub-Agent Spawning\\nYou are a leaf worker and CANNOT spawn further sub-agents."}
+## Sub-Agent Spawning
+{"You CAN spawn your own sub-agents." if can_spawn else "You are a leaf worker and CANNOT spawn further sub-agents."}
 
 ## Session Context
 - Label: {label}
