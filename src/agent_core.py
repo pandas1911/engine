@@ -121,16 +121,9 @@ class Agent:
         # Drain deferred events before branching decision
         await self._drain_events()
 
-        if self.state_machine.current_state == AgentState.COMPLETED:
-            # Drain already triggered full completion chain
-            pass
-        elif spawned_any:
-            print(f"[{self.label}|{self.task_id}] → Waiting for subagents")
-            self.state_machine.trigger("spawn_children")
-            return "[等待子代理回调...]"
-        else:
-            print(f"[{self.label}|{self.task_id}] ✓ Completed")
-            await self._finish_and_notify()
+        result = await self._after_drain(spawned_any)
+        if result is not None:
+            return result
 
         return self._final_result or "[无回复]"
 
@@ -250,14 +243,7 @@ class Agent:
         # Drain deferred events
         await self._drain_events()
 
-        if self.state_machine.current_state == AgentState.COMPLETED:
-            return
-
-        if spawned_any:
-            print(f"{self.display_id} → Re-waiting for new subagents")
-            self.state_machine.trigger("spawn_children")
-        else:
-            await self._finish_and_notify()
+        await self._after_drain(spawned_any)
 
     async def _drain_events(self):
         """Process queued events after tool loop completes."""
@@ -269,6 +255,35 @@ class Agent:
             return
 
         await self._resume_from_children(event.child_results)
+
+    async def _after_drain(self, spawned_any: bool) -> Optional[str]:
+        """Branch after _drain_events(). State machine is source of truth.
+
+        _drain_events() may recursively call _resume_from_children(), which
+        can spawn children or finish on its own. So after drain returns, the
+        local spawned_any may be stale — check state machine first.
+
+        Returns str if fully handled (caller should return it), None otherwise.
+        """
+        state = self.state_machine.current_state
+
+        # Drain already triggered full completion chain
+        if state == AgentState.COMPLETED:
+            return self._final_result or "[无回复]"
+
+        # Drain's inner _resume_from_children already spawned and transitioned
+        if state == AgentState.WAITING_FOR_CHILDREN:
+            return "[等待子代理回调...]"
+
+        # State is still RUNNING — drain did nothing, trust local spawned_any
+        if spawned_any:
+            print(f"{self.display_id} → Waiting for subagents")
+            self.state_machine.trigger("spawn_children")
+            return "[等待子代理回调...]"
+        else:
+            print(f"{self.display_id} ✓ Completed")
+            await self._finish_and_notify()
+            return None
 
     async def _finish_and_notify(self):
         result_preview = (

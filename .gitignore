@@ -43,3 +43,4 @@ ENV/
 tests/
 dist/
 build/
+docs/
