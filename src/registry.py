@@ -175,8 +175,9 @@ class SubagentRegistry:
         # Collect aggregated child results
         child_results = self.collect_child_results(parent_task_id)
 
+        parent_agent: "Agent" = parent_task.agent
+
         # [Branch A] Parent waiting for descendants → wake
-        parent_agent = parent_task.agent
         if (
             parent_agent is not None
             and parent_agent.state_machine.current_state
@@ -186,7 +187,6 @@ class SubagentRegistry:
             return
 
         # [Branch B] Parent is running → push to event queue
-        parent_agent = parent_task.agent
         if parent_agent is not None:
             event = QueueEvent(
                 trigger_task_id=task_id, child_results=child_results, error=error

@@ -144,4 +144,11 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
         except Exception as e:
             print(f"[Subagent|{task_id}] ✗ Failed: {e}")
             agent.state_machine.trigger("error")
-            await self.registry.complete(task_id, f"[Error] {e}", error=True)
+            error_result = (
+                f"Child agent execution failed.\n\n"
+                f"Task: {task_desc}\n"
+                f"Error Type: {type(e).__name__}\n"
+                f"Error Details: {str(e)}\n\n"
+                f"The child agent has been terminated. Please decide whether to re-spawn a new child agent or adjust the task strategy based on the error information above."
+            )
+            await self.registry.complete(task_id, error_result, error=True)
