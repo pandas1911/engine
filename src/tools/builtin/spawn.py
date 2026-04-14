@@ -16,12 +16,25 @@ class SpawnTool(Tool):
     """Tool for spawning child agents asynchronously."""
 
     name = "spawn"
-    description = "创建一个子代理来异步执行任务，任务执行完毕后子代理将自动唤醒主代理并汇报任务结果"
+    description = (
+        "Spawn a child agent to asynchronously execute an independent task. "
+        "Multiple calls per turn are supported to dispatch multiple child agents in parallel.\n"
+        "[Execution] Returns immediately: a confirmation with task_id on success, or an error message on failure. "
+        "After calling, the parent agent may continue with other tasks or end the current turn — no need to wait for child results. "
+        "Child agents will proactively report their results back to the parent once completed in the background.\n"
+        "[Use Cases] Best suited for breaking down a task into independent subtasks and dispatching them in parallel to child agents."
+    )
     parameters = {
         "type": "object",
         "properties": {
-            "task": {"type": "string", "description": "要分配的任务"},
-            "label": {"type": "string", "description": "子代理标签（可选）"},
+            "task": {
+                "type": "string",
+                "description": "The task description assigned to the child agent. The child agent will treat it as its sole objective and execute independently, so ensure it includes sufficient context and clear completion criteria.",
+            },
+            "label": {
+                "type": "string",
+                "description": "A descriptive label for the child agent, used for log tracing and result identification (optional). A short name that summarizes the task is recommended.",
+            },
         },
         "required": ["task"],
     }
@@ -44,7 +57,7 @@ class SpawnTool(Tool):
         config = context["config"]
 
         if parent_session.depth >= config.max_depth:
-            return f"[错误] 已达到最大深度限制 ({config.max_depth})"
+            return f"[Spawn Failed] Maximum nesting depth reached (current: {parent_session.depth}/{config.max_depth}). Please complete the task at the current level — no further child agents can be spawned."
 
         task_desc = arguments.get("task", "")
         label = arguments.get("label", "subagent")
@@ -75,11 +88,11 @@ You are a **subagent** spawned by the {parent_label} for a specific task.
 ## Rules
 1. **Stay focused** - Do your assigned task, nothing else
 2. **Complete the task** - Your final message will be automatically reported to the {parent_label}
-3. **Don't initiate** - No heartbeats, no proactive actions, no side quests
-4. **Be ephemeral** - You may be terminated after task completion. That's fine.
-5. **Trust push-based completion** - Descendant results are auto-announced back to you
+3. **Be ephemeral** - You may be terminated after task completion. That's fine.
+4. **Trust push-based completion** - Descendant results are auto-announced back to you
 
-{"## Sub-Agent Spawning\\nYou CAN spawn your own sub-agents." if can_spawn else "## Sub-Agent Spawning\\nYou are a leaf worker and CANNOT spawn further sub-agents."}
+## Sub-Agent Spawning
+{"You CAN spawn your own sub-agents." if can_spawn else "You are a leaf worker and CANNOT spawn further sub-agents."}
 
 ## Session Context
 - Label: {label}
@@ -103,7 +116,7 @@ You are a **subagent** spawned by the {parent_label} for a specific task.
 
         return f"""━━━━ Spawned Task ━━━━
 Task ID: {task_id}
-Agent: {label}
+Agent Label: {label}
 
 Sub-agent is now executing in the background. Upon completion, you will be automatically re-activated and receive a full result report. You may proceed with other independent tasks or simply end your current turn."""
 
@@ -122,12 +135,20 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
             On completion, registry.complete() will automatically notify parent.
             On error, registry.complete() is called with error=True.
         """
+        agent = self.agent_factory(
+            child_session, config, self.registry, self.parent_task_id, task_id
+        )
+        await self.registry.set_agent(task_id, agent)
         try:
-            agent = self.agent_factory(
-                child_session, config, self.registry, self.parent_task_id, task_id
-            )
-            await self.registry.set_agent(task_id, agent)
             result = await agent.run(task_desc)
         except Exception as e:
             print(f"[Subagent|{task_id}] ✗ Failed: {e}")
-            await self.registry.complete(task_id, f"[Error] {e}", error=True)
+            agent.state_machine.trigger("error")
+            error_result = (
+                f"Child agent execution failed.\n\n"
+                f"Task: {task_desc}\n"
+                f"Error Type: {type(e).__name__}\n"
+                f"Error Details: {str(e)}\n\n"
+                f"The child agent has been terminated. Please decide whether to re-spawn a new child agent or adjust the task strategy based on the error information above."
+            )
+            await self.registry.complete(task_id, error_result, error=True)
