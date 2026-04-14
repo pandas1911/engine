@@ -1,109 +1,216 @@
 # NOTEBOOK
 
-## 工具并行化运行
-
-## 移除冗余函数 `_count_pending_descendants_locked`
+## 修复 `_drain_events()` 后 `spawned_any` 丢失导致的控制流 Bug
 
 ### 背景
 
-`SubagentRegistry` 中有两个功能高度重叠的函数：
+`agent_core.py` 中 `run()` 和 `_resume_from_children()` 在调用 `_drain_events()` 之后，都需要根据"是否 spawn 了子代理"来决定下一步行为。但 `_drain_events()` 可能递归调用 `_resume_from_children()`，后者内部**也会 spawn 子代理、也会改变状态机**。
 
-- `_count_pending_descendants_locked(task_id)` — BFS 遍历**所有后代**（子、孙、曾孙…），统计 pending 数量
-- `count_pending_for_parent(parent_task_id)` — 遍历全部 `_tasks`，统计**直接子节点**中 pending 的数量
+这导致外层的 `spawned_any` 局部变量在 drain 之后不再可信。
 
-两者唯一的调用点都在 `complete()` 方法中：
+### Bug 复现场景
 
-```python
-# registry.py:152-155
-pending_descendants = self._count_pending_descendants_locked(task_id)          # Gate 1
-pending_siblings = self.count_pending_for_parent(parent_task_id) if parent_task_id else 0  # Gate 3
+#### 场景：drain 内部递归 spawn 后，外层重复 trigger 导致 crash
+
+```
+run()
+  spawned_any = True                     ← LLM spawn 了子代理 A
+  _drain_events()
+    pop_event → 拿到旧的完成事件
+    _resume_from_children()
+      _process_tool_calls() → spawn 了子代理 B
+      _drain_events() → 无事件
+      state == RUNNING, spawned_any=True
+      → trigger("spawn_children")        ← 状态变为 WAITING_FOR_CHILDREN ✅
+  回到 run()
+    state != COMPLETED
+    spawned_any == True                  ← 还是外层的旧值
+    → trigger("spawn_children")          ← 💥 InvalidTransitionError!
+                                         ← WAITING_FOR_CHILDREN 没有 spawn_children 转换
 ```
 
-### 冗余原因：传播保证
+#### 状态机转换表（参考）
 
-`complete()` 的 Gate 1 机制保证了**自底向上**的完成顺序：一个任务的后代如果没有全部完成，该任务本身不可能越过 Gate 1 通知父节点。
+```python
+TRANSITIONS = {
+    (IDLE, "start"):                  RUNNING,
+    (RUNNING, "spawn_children"):      WAITING_FOR_CHILDREN,
+    (RUNNING, "finish"):              COMPLETED,
+    (RUNNING, "error"):               ERROR,
+    (WAITING_FOR_CHILDREN, "children_settled"): RUNNING,
+}
+```
 
-这意味着：**不可能存在「直接子节点已完成，但孙节点仍 pending」的情况。**
+注意：`WAITING_FOR_CHILDREN` 上只能触发 `children_settled`，没有 `spawn_children`。
 
-推理链：
+### 问题本质
 
-1. 任务 C 有子节点 D → D pending → C 的 `complete()` 被 Gate 1 拦住 → C 不可能完成
-2. 因此，如果孙节点 pending，直接子节点必定也 pending
-3. 只检查直接子节点就能得出与深遍历相同的结果
+`run()` 和 `_resume_from_children()` 有**重复的 post-drain 分支逻辑**，且都只检查 `COMPLETED` 和 `spawned_any`，遗漏了 `WAITING_FOR_CHILDREN` 状态。当 drain 内部已经改变了状态机时，外层的分支逻辑就用过时的信息做了错误的决策。
 
-| 场景 | `_count_pending_descendants` | `count_pending_for_parent` | 行为一致？ |
-|---|---|---|---|
-| 所有后代都 done | 0 | 0 | ✅ |
-| 直接子节点 pending | > 0 | > 0 | ✅ |
-| 孙节点 pending、子节点 done | **不可能**（Gate 1 阻断） | — | — |
+### 方案：抽取 `_after_drain()` 消除重复
 
-### 验证：无绕过路径
+**核心原则**：`_drain_events()` 之后，状态机是唯一的真相来源。先查状态机，状态机没动才看本层的 `spawned_any`。
 
-对全代码库的搜索确认传播保证是稳固的：
+#### 新增方法 `_after_drain`
 
-| 检查项 | 结果 |
-|---|---|
-| `_pending` 变异点 | 仅 `register()` (add) 和 `complete()` (discard) 两处 |
-| `complete()` 调用点 | 仅 `agent_core.py:285`（正常完成）和 `spawn.py:135`（异常完成）两处 |
-| 取消/超时/强制删除方法 | 不存在（config 定义了 timeout 但未实现） |
-| `_tasks` 删除操作 | 不存在（任务注册后永不被移除） |
-| 外部状态篡改 | `safety.py` 只读访问 `_tasks`，无写操作 |
+```python
+async def _after_drain(self, spawned_any: bool) -> Optional[str]:
+    """Post-drain branching: decide spawn/wait/finish based on current state.
 
-无论正常完成还是异常退出，都经过 `complete()` → Gate 1，传播保证不被打破。
+    Args:
+        spawned_any: Whether the current layer's _process_tool_calls spawned children.
+                     Only consulted when state machine is still RUNNING after drain.
 
-### 改动方案
+    Returns:
+        str if the method has fully handled the outcome (caller should return it),
+        None if the caller should proceed with its own return logic.
+    """
+    state = self.state_machine.current_state
 
-#### 1. 注释掉 `_count_pending_descendants_locked` 方法（L196-227）
+    if state == AgentState.COMPLETED:
+        # drain 触发了完整完成链（_resume_from_children → _finish_and_notify）
+        return self._final_result or "[无回复]"
 
-不删除，整体注释掉，方便回滚。
+    if state == AgentState.WAITING_FOR_CHILDREN:
+        # drain 内部已经 spawn 了子代理并处理了状态转换
+        return "[等待子代理回调...]"
 
-#### 2. `count_pending_for_parent` 改名为 `_count_pending_for_parent`
+    # 状态还是 RUNNING → drain 什么都没做，由本层的 spawned_any 决定
+    if spawned_any:
+        self.state_machine.trigger("spawn_children")
+        return "[等待子代理回调...]"
+    else:
+        await self._finish_and_notify()
+        return None
+```
 
-该方法唯一的调用点是 `complete()` 内部 L154，无外部调用，加下划线前缀表示私有。
-
-#### 3. 替换调用点（`registry.py:152`）
+#### 改动 1：`run()` 方法（L112-135）
 
 ```python
 # Before
-pending_descendants = self._count_pending_descendants_locked(task_id)
+async def run(self, message: Optional[str] = None) -> str:
+    if message:
+        self.session.add_message("user", message)
+
+    self.state_machine.trigger("start")
+    print(f"[{self.label}|{self.task_id}] → Processing")
+
+    spawned_any = await self._process_tool_calls()
+
+    await self._drain_events()
+
+    if self.state_machine.current_state == AgentState.COMPLETED:
+        pass
+    elif spawned_any:
+        print(f"[{self.label}|{self.task_id}] → Waiting for subagents")
+        self.state_machine.trigger("spawn_children")
+        return "[等待子代理回调...]"
+    else:
+        print(f"[{self.label}|{self.task_id}] ✓ Completed")
+        await self._finish_and_notify()
+
+    return self._final_result or "[无回复]"
 
 # After
-pending_children = self._count_pending_for_parent(task_id)
+async def run(self, message: Optional[str] = None) -> str:
+    if message:
+        self.session.add_message("user", message)
+
+    self.state_machine.trigger("start")
+    print(f"[{self.label}|{self.task_id}] → Processing")
+
+    spawned_any = await self._process_tool_calls()
+
+    await self._drain_events()
+
+    result = await self._after_drain(spawned_any)
+    if result is not None:
+        return result
+
+    return self._final_result or "[无回复]"
 ```
 
-#### 4. 优化 `_count_pending_for_parent` 实现（可选，降低复杂度）
-
-当前实现是 O(n) 全表扫描，可改为 O(k) 集合查询（k = 子节点数）：
+#### 改动 2：`_resume_from_children()` 方法（L248-260）
 
 ```python
-# Before (O(n) — 遍历全部 tasks)
-def _count_pending_for_parent(self, parent_task_id: str) -> int:
-    count = 0
-    for task_id, task in self._tasks.items():
-        if task.parent_task_id == parent_task_id and task_id in self._pending:
-            count += 1
-    return count
+# Before (L248-260)
+        spawned_any = await self._process_tool_calls()
 
-# After (O(k) — 只查 child_task_ids)
-def _count_pending_for_parent(self, parent_task_id: str) -> int:
-    if parent_task_id not in self._tasks:
-        return 0
-    return sum(1 for cid in self._tasks[parent_task_id].child_task_ids if cid in self._pending)
+        await self._drain_events()
+
+        if self.state_machine.current_state == AgentState.COMPLETED:
+            return
+
+        if spawned_any:
+            print(f"{self.display_id} → Re-waiting for new subagents")
+            self.state_machine.trigger("spawn_children")
+        else:
+            await self._finish_and_notify()
+
+# After
+        spawned_any = await self._process_tool_calls()
+
+        await self._drain_events()
+
+        await self._after_drain(spawned_any)
 ```
 
-#### 改动后 `complete()` 方法中的 Gate 逻辑
+#### 改动 3：新增 `_after_drain` 方法（放在 `_drain_events` 之后）
 
 ```python
-parent_task_id = task.parent_task_id
-pending_children = self._count_pending_for_parent(task_id)                        # Gate 1: 我的子节点
-pending_siblings = self._count_pending_for_parent(parent_task_id) if parent_task_id else 0  # Gate 3: 兄弟节点
+    async def _after_drain(self, spawned_any: bool) -> Optional[str]:
+        """Post-drain branching: decide spawn/wait/finish based on current state.
 
-# [Gate 1] Still have pending children → return
-if pending_children > 0:
-    print(f"[Registry] {task_id} done, {pending_children} children pending")
-    return
+        Called after _drain_events() in both run() and _resume_from_children().
+        Uses state machine as the single source of truth — if drain already
+        changed the state (to COMPLETED or WAITING_FOR_CHILDREN), we respect
+        that. Only when state is still RUNNING do we consult the local
+        spawned_any flag.
+
+        Args:
+            spawned_any: Whether the current layer's _process_tool_calls spawned children.
+
+        Returns:
+            str if fully handled (caller should return it), None otherwise.
+        """
+        state = self.state_machine.current_state
+
+        if state == AgentState.COMPLETED:
+            return self._final_result or "[无回复]"
+
+        if state == AgentState.WAITING_FOR_CHILDREN:
+            return "[等待子代理回调...]"
+
+        if spawned_any:
+            print(f"{self.display_id} → Waiting for subagents")
+            self.state_machine.trigger("spawn_children")
+            return "[等待子代理回调...]"
+        else:
+            print(f"{self.display_id} ✓ Completed")
+            await self._finish_and_notify()
+            return None
 ```
 
-### 附带发现：`safety.py` 的 Bug
+### 修改文件清单
 
-`safety.py:94` 引用了 `task.status`，但 `SubagentTask` 模型中没有 `status` 字段，会导致 `AttributeError`。建议修复为 `task.ended_at is not None`。这是独立问题，不在本次重构范围内。
+| 文件 | 改动 |
+|---|---|
+| `src/agent_core.py` | 新增 `_after_drain()` 方法；修改 `run()` 和 `_resume_from_children()` 的 post-drain 分支 |
+
+### 决策点
+
+`_after_drain()` 返回 `None` vs 有值，用于区分"我已经处理完了，你直接返回"和"我走了 finish 路径，但你可能还有自己的返回逻辑"。目前 `run()` 需要这个区分（返回 `self._final_result or "[无回复]"`），`_resume_from_children()` 不需要（void 返回）。
+
+如果后续觉得返回值语义不清晰，也可以统一让 `_after_drain` 只做分支、不返回值，让调用方自己处理返回——但那样 `run()` 就需要重新检查状态来决定返回内容，实质上是把相同逻辑又写了一遍。
+
+### 测试场景覆盖
+
+| # | 场景 | 预期行为 |
+|---|---|---|
+| 1 | `spawned_any=False`, drain 无事件 | → `_finish_and_notify()` → COMPLETED |
+| 2 | `spawned_any=True`, drain 无事件 | → `spawn_children` → WAITING_FOR_CHILDREN |
+| 3 | `spawned_any=True`, drain 内部走 finish | → COMPLETED，外层不重复 spawn |
+| 4 | `spawned_any=True`, drain 内部又 spawn | → WAITING_FOR_CHILDREN，外层不重复 spawn |
+| 5 | `spawned_any=False`, drain 内部 spawn | → WAITING_FOR_CHILDREN，外层 `spawned_any` 被忽略 |
+| 6 | drain 递归多层，最深层 spawn | → WAITING_FOR_CHILDREN，中间层和外层都正确传递 |
+| 7 | drain 递归多层，最深层 finish | → COMPLETED，中间层和外层都正确处理 |
