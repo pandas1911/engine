@@ -305,22 +305,6 @@ class Agent:
         return self._tool_registry.get_schemas()
 
 
-async def run_agent(task: str, config: Optional[Config] = None) -> tuple[str, Session]:
-    """Run root Agent."""
-    from src.config import Config as ConfigCls
-
-    cfg = config or ConfigCls()
-
-    root_session = Session(id=f"root_{uuid.uuid4().hex[:8]}", depth=0)
-    root_session.add_message("system", "你是主Agent，可以派生子Agent并行处理任务。")
-
-    agent = Agent(root_session, cfg)
-    result = await agent.run(task)
-
-    return result, root_session
-
-
 __all__ = [
     "Agent",
-    "run_agent",
 ]

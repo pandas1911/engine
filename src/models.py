@@ -100,6 +100,16 @@ class QueueEvent:
     error: bool
 
 
+@dataclass
+class AgentResult:
+    """Result from agent execution."""
+
+    content: str
+    session: Session
+    success: bool
+    error: Optional[str] = None
+
+
 __all__ = [
     "AgentState",
     "Message",
@@ -108,4 +118,5 @@ __all__ = [
     "LLMResponse",
     "SubagentTask",
     "QueueEvent",
+    "AgentResult",
 ]
