@@ -8,16 +8,16 @@ import json
 import uuid
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from src.models import AgentState, LLMResponse, QueueEvent, Session, ToolCall
-from src.config import Config
-from src.registry import SubagentRegistry
-from src.state_machine import AgentStateMachine
-from src.tools.base import ToolRegistry
-from src.tools.builtin.spawn import SpawnTool
-from src.llm_provider import MockLLMProvider
+from engine.models import AgentState, LLMResponse, QueueEvent, Session, ToolCall
+from engine.config import Config
+from engine.registry import SubagentRegistry
+from engine.state_machine import AgentStateMachine
+from engine.tools.base import ToolRegistry
+from engine.tools.builtin.spawn import SpawnTool
+from engine.llm_provider import MockLLMProvider
 
 if TYPE_CHECKING:
-    from src.llm_provider import LLMProvider
+    from engine.llm_provider import LLMProvider
 
 
 class Agent:

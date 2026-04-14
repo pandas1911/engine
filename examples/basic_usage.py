@@ -3,13 +3,13 @@ import asyncio
 import sys
 import uuid
 
-from src.agent_core import Agent
-from src.config import ConfigLoader
-from src.llm_provider import LLMProvider
-from src.models import AgentState, Session
-from src.registry import SubagentRegistry
+from engine.agent_core import Agent
+from engine.config import ConfigLoader
+from engine.llm_provider import LLMProvider
+from engine.models import AgentState, Session
+from engine.registry import SubagentRegistry
 
-from src.tools.custom.mock import MockTool
+from engine.tools.custom.mock import MockTool
 
 
 DEFAULT_PROMPT = """ 

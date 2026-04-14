@@ -11,7 +11,7 @@ import asyncio
 from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
-    from src.registry import SubagentRegistry
+    from engine.registry import SubagentRegistry
 
 
 class ConcurrencyLimiter:
@@ -91,7 +91,7 @@ class RegistrySizeMonitor:
         completed_tasks = [
             (task_id, task)
             for task_id, task in registry._tasks.items()
-            if task.status in ("completed", "error")
+            if task.result is not None
         ]
 
         completed_tasks.sort(

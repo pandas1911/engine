@@ -8,8 +8,8 @@ from typing import Any, Dict, List, Optional
 
 from openai import AsyncOpenAI
 
-from src.config import Config
-from src.models import LLMResponse, ToolCall
+from engine.config import Config
+from engine.models import LLMResponse, ToolCall
 
 
 class BaseLLMProvider(ABC):

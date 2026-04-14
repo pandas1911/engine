@@ -8,10 +8,10 @@ import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING, Dict, Optional, Set
 
-from src.models import AgentState, QueueEvent, SubagentTask
+from engine.models import AgentState, QueueEvent, SubagentTask
 
 if TYPE_CHECKING:
-    from src.agent_core import Agent
+    from engine.agent_core import Agent
 
 
 class SubagentRegistry:

@@ -4,12 +4,12 @@ import asyncio
 import uuid
 from typing import Any, Callable, Dict, TYPE_CHECKING
 
-from src.config import Config
-from src.models import Session
-from src.tools.base import Tool
+from engine.config import Config
+from engine.models import Session
+from engine.tools.base import Tool
 
 if TYPE_CHECKING:
-    from src.registry import SubagentRegistry
+    from engine.registry import SubagentRegistry
 
 
 class SpawnTool(Tool):

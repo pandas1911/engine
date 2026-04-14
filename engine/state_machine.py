@@ -5,7 +5,7 @@ This module provides a simple state machine for managing agent execution states.
 
 from typing import Dict, Tuple
 
-from src.models import AgentState
+from engine.models import AgentState
 
 
 class InvalidTransitionError(Exception):
