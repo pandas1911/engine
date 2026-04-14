@@ -40,7 +40,6 @@ ENV/
 *~
 
 # Tests
-tests/
 dist/
 build/
 docs/
