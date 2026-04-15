@@ -14,5 +14,5 @@ dependencies = [
     "pytest-asyncio",
 ]
 
-[tool.setuptools]
-package-dir = {"" = "engine"}
+[tool.setuptools.packages.find]
+include = ["engine*"]

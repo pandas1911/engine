@@ -5,7 +5,7 @@ Verifies that engine.delegate() can handle a prompt requiring
 """
 
 import pytest
-import engine
+from engine import delegate
 
 TEST_PROMPT = """
     现在对你的构建子代理的能力进行测试，请严格根据以下要求执行：
@@ -19,6 +19,6 @@ TEST_PROMPT = """
 
 @pytest.mark.asyncio
 async def test_multilayer_subagent():
-    result = await engine.delegate(TEST_PROMPT)
+    result = await delegate(TEST_PROMPT)
     assert result.success, f"delegate failed: {result.error}"
     assert result.content, "delegate returned empty content"

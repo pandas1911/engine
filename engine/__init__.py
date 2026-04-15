@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from engine.agent_core import Agent
-from engine.config import Config, ConfigLoader
+from engine.config import Config, get_config
 from engine.llm_provider import LLMProvider
 from engine.models import AgentResult, AgentState, Session
 from engine.registry import SubagentRegistry
@@ -74,7 +74,7 @@ async def delegate(
 
     try:
         if config is None:
-            config = ConfigLoader.load_from_env()
+            config = get_config()
 
         llm_provider = LLMProvider(config)
         registry = SubagentRegistry()

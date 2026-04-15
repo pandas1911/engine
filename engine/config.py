@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from dotenv import load_dotenv
 import os
@@ -19,28 +20,47 @@ class Config:
     max_result_length: int = 4000
 
 
+class ConfigProvider(ABC):
+    @abstractmethod
+    def get(self, key: str) -> Optional[str]:
+        pass
+
+
+class DotEnvProvider(ConfigProvider):
+    def __init__(self, path: Optional[str] = None):
+        target = path or os.path.join(os.getcwd(), ".env")
+        if os.path.isfile(target):
+            load_dotenv(target, override=False)
+
+    def get(self, key: str) -> Optional[str]:
+        return os.getenv(key)
+
+
+class EnvVarProvider(ConfigProvider):
+    def get(self, key: str) -> Optional[str]:
+        return os.getenv(key)
+
+
 class ConfigLoader:
     REQUIRED_KEYS = ["LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"]
 
-    @staticmethod
-    def load_from_env() -> Config:
-        load_dotenv()
+    MAPPING = {
+        "LLM_API_KEY": "api_key",
+        "LLM_BASE_URL": "base_url",
+        "LLM_MODEL": "model",
+    }
 
+    @staticmethod
+    def load(provider: ConfigProvider) -> Config:
         missing_keys = []
         config_values = {}
 
-        mapping = {
-            "LLM_API_KEY": "api_key",
-            "LLM_BASE_URL": "base_url",
-            "LLM_MODEL": "model",
-        }
-
         for key in ConfigLoader.REQUIRED_KEYS:
-            value = os.getenv(key)
+            value = provider.get(key)
             if value is None or value.strip() == "":
                 missing_keys.append(key)
             else:
-                config_values[mapping[key]] = value
+                config_values[ConfigLoader.MAPPING[key]] = value
 
         if missing_keys:
             raise ValueError(
@@ -53,6 +73,14 @@ class ConfigLoader:
             base_url=config_values["base_url"],
             model=config_values["model"],
         )
+
+    @staticmethod
+    def load_from_env(dotenv_path: Optional[str] = None) -> Config:
+        if dotenv_path or os.getenv("LLM_API_KEY") is None:
+            provider = DotEnvProvider(path=dotenv_path)
+        else:
+            provider = EnvVarProvider()
+        return ConfigLoader.load(provider)
 
 
 _config: Optional[Config] = None
