@@ -261,7 +261,7 @@ class SubagentRegistry:
         return self._tasks.get(task_id)
 
     def collect_child_results(self, parent_task_id: str) -> Dict[str, str]:
-        """Collect all direct child results - Corresponds to OpenClaw's childCompletionFindings.
+        """Collect all direct child results 
 
         Args:
             parent_task_id: The parent task ID to collect results for
@@ -269,10 +269,14 @@ class SubagentRegistry:
         Returns:
             Dictionary mapping child task IDs to their results
         """
+        parent = self._tasks.get(parent_task_id)
+        if not parent:
+            return {}
         results = {}
-        for task_id, task in self._tasks.items():
-            if task.parent_task_id == parent_task_id and task.result is not None:
-                results[task_id] = task.result
+        for child_id in parent.child_task_ids:
+            child_task = self._tasks.get(child_id)
+            if child_task and child_task.result is not None:
+                results[child_id] = child_task.result
         return results
 
 

@@ -145,7 +145,7 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
             print(f"[Subagent|{task_id}] ✗ Failed: {e}")
             agent.state_machine.trigger("error")
             error_result = (
-                f"Child agent execution failed.\n\n"
+                f"[ERROR] Child agent execution failed.\n\n"
                 f"Task: {task_desc}\n"
                 f"Error Type: {type(e).__name__}\n"
                 f"Error Details: {str(e)}\n\n"
