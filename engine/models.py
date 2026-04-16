@@ -94,9 +94,17 @@ class SubagentTask:
 
 
 @dataclass
+class CollectedChildResult:
+    """子代理结果收集的完整信息，用于替代下游对 _tasks 的依赖。"""
+
+    task_description: str
+    result: str
+
+
+@dataclass
 class QueueEvent:
     trigger_task_id: str  # Trigger child task_id (debug/log)
-    child_results: Dict[str, str]  # All child task_id → result aggregation
+    child_results: Dict[str, CollectedChildResult]  # All child task_id → enriched result
     error: bool
 
 
@@ -117,6 +125,7 @@ __all__ = [
     "ToolCall",
     "LLMResponse",
     "SubagentTask",
+    "CollectedChildResult",
     "QueueEvent",
     "AgentResult",
 ]

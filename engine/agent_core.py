@@ -8,7 +8,7 @@ import json
 import uuid
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from engine.models import AgentState, LLMResponse, QueueEvent, Session, ToolCall
+from engine.models import AgentState, CollectedChildResult, LLMResponse, QueueEvent, Session, ToolCall
 from engine.config import Config
 from engine.registry import SubagentRegistry
 from engine.state_machine import AgentStateMachine
@@ -216,23 +216,19 @@ class Agent:
         except Exception as e:
             return f"[ERROR] Tool '{tool_call.name}' execution failed: {type(e).__name__}: {str(e)}"
 
-    async def _resume_from_children(self, child_results: Dict[str, str]):
+    async def _resume_from_children(self, child_results: Dict[str, CollectedChildResult]):
         """Continue processing after all children complete."""
         if self.state_machine.current_state == AgentState.WAITING_FOR_CHILDREN:
             self.state_machine.trigger("children_settled")
-
-        # child_results is now passed as parameter (aggregated in registry.complete())
 
         if child_results:
             print(
                 f"{self.display_id} ← Collected {len(child_results)} descendant results"
             )
             findings_prompt = "All sub-agents have completed their tasks. Below is a summary of their results.\n\n"
-            for task_id, result in child_results.items():
-                task = self.registry.get_task(task_id)
-                task_desc = task.task_description if task else "Unknown task"
+            for task_id, info in child_results.items():
                 findings_prompt += (
-                    f"--- Task ID: {task_id} ---\nTask: {task_desc}\nResult: {result}\n\n"
+                    f"--- Task ID: {task_id} ---\nTask: {info.task_description}\nResult: {info.result}\n\n"
                 )
         else:
             print(f"{self.display_id} ← No descendant results collected")

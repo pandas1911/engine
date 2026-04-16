@@ -8,7 +8,7 @@ import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING, Dict, Optional, Set
 
-from engine.models import AgentState, QueueEvent, SubagentTask
+from engine.models import AgentState, CollectedChildResult, QueueEvent, SubagentTask
 
 if TYPE_CHECKING:
     from engine.agent_core import Agent
@@ -175,6 +175,11 @@ class SubagentRegistry:
         # Collect aggregated child results
         child_results = self.collect_child_results(parent_task_id)
 
+        # Cleanup: remove collected children from _tasks and parent's child_task_ids
+        parent_task.child_task_ids.clear()
+        for child_id in child_results:
+            self._tasks.pop(child_id, None)
+
         parent_agent: "Agent" = parent_task.agent
 
         # [Branch A] Parent waiting for descendants → wake
@@ -260,14 +265,14 @@ class SubagentRegistry:
         """
         return self._tasks.get(task_id)
 
-    def collect_child_results(self, parent_task_id: str) -> Dict[str, str]:
-        """Collect all direct child results 
+    def collect_child_results(self, parent_task_id: str) -> Dict[str, CollectedChildResult]:
+        """Collect all direct child results with task_description.
 
         Args:
             parent_task_id: The parent task ID to collect results for
 
         Returns:
-            Dictionary mapping child task IDs to their results
+            Dictionary mapping child task IDs to their CollectedChildResult
         """
         parent = self._tasks.get(parent_task_id)
         if not parent:
@@ -276,7 +281,10 @@ class SubagentRegistry:
         for child_id in parent.child_task_ids:
             child_task = self._tasks.get(child_id)
             if child_task and child_task.result is not None:
-                results[child_id] = child_task.result
+                results[child_id] = CollectedChildResult(
+                    task_description=child_task.task_description,
+                    result=child_task.result,
+                )
         return results
 
 
