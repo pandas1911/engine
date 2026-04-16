@@ -8,6 +8,7 @@ import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING, Dict, Optional, Set
 
+from engine.logger import get_logger
 from engine.models import AgentState, CollectedChildResult, QueueEvent, SubagentTask
 
 if TYPE_CHECKING:
@@ -53,7 +54,16 @@ class SubagentRegistry:
         Raises:
             ValueError: If registering would create a cycle in the task hierarchy
         """
-        print(f"[{task_id} 完成注册]")
+        logger = get_logger()
+        logger.info(
+            "Registry",
+            "Task registered | task_id={}, session_id={}, parent_task_id={}, depth={}".format(
+                task_id, session_id, parent_task_id or "None (root)", depth
+            ),
+            task_id=task_id, state="running", depth=depth,
+            event_type="registry_register",
+            data={"session_id": session_id, "parent_task_id": parent_task_id, "depth": depth, "description": description}
+        )
 
         # Check for cycles before registering
         if parent_task_id and self._would_create_cycle(task_id, parent_task_id):
@@ -156,8 +166,16 @@ class SubagentRegistry:
 
         # [Gate 1] Still have pending children → return
         if pending_children > 0:
-            print(
-                f"[Registry] {task_id} done, {pending_children} children pending"
+            logger = get_logger()
+            logger.info(
+                "Registry",
+                "Task completed but has pending children | task_id={}, pending_children={}".format(
+                    task_id, pending_children
+                ),
+                task_id=task_id, state="running",
+                depth=self._tasks[task_id].depth if task_id in self._tasks else 0,
+                event_type="registry_complete_blocked_children",
+                data={"pending_children": pending_children, "result_length": len(result) if result else 0}
             )
             return
 
@@ -167,6 +185,17 @@ class SubagentRegistry:
 
         # [Gate 3] Still have pending siblings → return
         if pending_siblings > 0:
+            logger = get_logger()
+            logger.info(
+                "Registry",
+                "Task completed but has pending siblings | task_id={}, parent_task_id={}, pending_siblings={}".format(
+                    task_id, parent_task_id, pending_siblings
+                ),
+                task_id=task_id, state="running",
+                depth=self._tasks[task_id].depth if task_id in self._tasks else 0,
+                event_type="registry_complete_blocked_siblings",
+                data={"parent_task_id": parent_task_id, "pending_siblings": pending_siblings}
+            )
             return
 
         # All gates passed → notify parent
@@ -175,12 +204,27 @@ class SubagentRegistry:
         # Collect aggregated child results
         child_results = self.collect_child_results(parent_task_id)
 
+        task_depth = self._tasks[task_id].depth if task_id in self._tasks else 0
+
         # Cleanup: remove collected children from _tasks and parent's child_task_ids
         parent_task.child_task_ids.clear()
         for child_id in child_results:
             self._tasks.pop(child_id, None)
 
         parent_agent: "Agent" = parent_task.agent
+        parent_state = parent_agent.state_machine.current_state.value if parent_agent else "None"
+        branch = "A (wake parent)" if parent_state == "waiting_for_children" else "B (enqueue to parent)"
+        child_ids = list(child_results.keys())
+        logger = get_logger()
+        logger.info(
+            "Registry",
+            "All gates passed, notifying parent | task_id={}, parent_task_id={}, branch={}, parent_state={}, child_count={}".format(
+                task_id, parent_task_id, branch, parent_state, len(child_results)
+            ),
+            task_id=task_id, state="running", depth=task_depth,
+            event_type="registry_notify_parent",
+            data={"parent_task_id": parent_task_id, "parent_state": parent_state, "branch": branch, "child_result_count": len(child_results), "child_ids": child_ids}
+        )
 
         # [Branch A] Parent waiting for descendants → wake
         if (

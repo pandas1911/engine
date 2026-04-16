@@ -9,11 +9,12 @@ from typing import List, Optional
 from engine.agent_core import Agent
 from engine.config import Config, get_config
 from engine.llm_provider import LLMProvider
+from engine.logger import init_logger, get_logger, stop_logger
 from engine.models import AgentResult, AgentState, Session
 from engine.registry import SubagentRegistry
 from engine.tools.base import Tool, FunctionTool
 
-__all__ = ["delegate", "Tool", "FunctionTool", "AgentResult"]
+__all__ = ["delegate", "Tool", "FunctionTool", "AgentResult", "init_logger", "get_logger", "stop_logger"]
 
 DEFAULT_SYSTEM_PROMPT = (
     "你是主Agent，请尽可能构建子代理来并行处理任务。"
@@ -76,6 +77,8 @@ async def delegate(
         if config is None:
             config = get_config()
 
+        init_logger(log_dir=config.log_dir)
+
         llm_provider = LLMProvider(config)
         registry = SubagentRegistry()
 
@@ -116,3 +119,5 @@ async def delegate(
             success=False,
             error=str(e),
         )
+    finally:
+        await stop_logger()

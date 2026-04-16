@@ -18,6 +18,7 @@ class Config:
     agent_timeout: float = 300.0
     max_registry_size: int = 1000
     max_result_length: int = 4000
+    log_dir: Optional[str] = None
 
 
 class ConfigProvider(ABC):
@@ -48,6 +49,7 @@ class ConfigLoader:
         "LLM_API_KEY": "api_key",
         "LLM_BASE_URL": "base_url",
         "LLM_MODEL": "model",
+        "LOG_DIR": "log_dir",
     }
 
     @staticmethod
@@ -68,11 +70,17 @@ class ConfigLoader:
                 f"Please ensure these are set in your .env file or environment."
             )
 
-        return Config(
+        config = Config(
             api_key=config_values["api_key"],
             base_url=config_values["base_url"],
             model=config_values["model"],
         )
+
+        log_dir = provider.get("LOG_DIR")
+        if log_dir:
+            config.log_dir = log_dir
+
+        return config
 
     @staticmethod
     def load_from_env(dotenv_path: Optional[str] = None) -> Config:

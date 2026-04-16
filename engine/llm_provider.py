@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from openai import AsyncOpenAI
 
 from engine.config import Config
+from engine.logger import get_logger
 from engine.models import LLMResponse, ToolCall
 
 
@@ -22,6 +23,7 @@ class BaseLLMProvider(ABC):
         tools: List[Dict],
         agent_label: str = "Root",
         task_id: str = "unknown",
+        depth: int = 0,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> LLMResponse:
@@ -32,6 +34,7 @@ class BaseLLMProvider(ABC):
             tools: List of tool definitions available to the LLM
             agent_label: Label for the agent making the request
             task_id: ID of the task being executed
+            depth: Nesting depth of the calling agent
             temperature: Optional temperature parameter for the LLM
             max_tokens: Optional max_tokens parameter for the LLM
 
@@ -83,6 +86,7 @@ class LLMProvider(BaseLLMProvider):
         tools: List[Dict],
         agent_label: str = "Root",
         task_id: str = "unknown",
+        depth: int = 0,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> LLMResponse:
@@ -93,6 +97,7 @@ class LLMProvider(BaseLLMProvider):
             tools: List of tool definitions available to the LLM
             agent_label: Label for the agent making the request
             task_id: ID of the task being executed
+            depth: Nesting depth of the calling agent
             temperature: Optional temperature parameter for the LLM
             max_tokens: Optional max_tokens parameter for the LLM
 
@@ -124,10 +129,16 @@ class LLMProvider(BaseLLMProvider):
                         )
                         break
 
-            print(
-                "[{agent_label}|{task_id}] → LLM ({msg_count} msgs)".format(
-                    agent_label=agent_label, task_id=task_id, msg_count=len(messages)
-                )
+            logger = get_logger()
+            msg_roles = [m.get("role", "?") for m in messages]
+            logger.info(
+                agent_label,
+                "Sending LLM API request | model={}, message_count={}, has_tools={}, tool_count={}".format(
+                    self.model, len(messages), bool(tools), len(tools) if tools else 0
+                ),
+                task_id=task_id, state="running", depth=depth,
+                event_type="llm_api_request",
+                data={"model": self.model, "message_count": len(messages), "message_roles": msg_roles, "has_tools": bool(tools), "tool_count": len(tools) if tools else 0}
             )
 
             response = await self.client.chat.completions.create(**params)
@@ -153,41 +164,46 @@ class LLMProvider(BaseLLMProvider):
             content = message.content or ""
             content = self._strip_thinking(content)
 
-            display_id = "[{agent_label}|{task_id}]".format(
-                agent_label=agent_label, task_id=task_id
-            )
-
             if tool_calls:
+                logger = get_logger()
                 for tc in tool_calls:
-                    task = tc.arguments.get("task", "")
-                    label = tc.arguments.get("label", "sub")
-                    task_preview = task[:50] + "..." if len(task) > 50 else task
-                    print(
-                        "{display_id} ← Tool: {tool_name}(task='{task_preview}', label='{label}')".format(
-                            display_id=display_id,
-                            tool_name=tc.name,
-                            task_preview=task_preview,
-                            label=label,
-                        )
+                    args_str = json.dumps(tc.arguments, ensure_ascii=False) if isinstance(tc.arguments, dict) else str(tc.arguments)
+                    logger.tool(
+                        agent_label,
+                        "LLM returned tool call | tool=\"{}\", call_id={}, arguments={}".format(
+                            tc.name, tc.call_id, args_str[:500] + "..." if len(args_str) > 500 else args_str
+                        ),
+                        task_id=task_id, state="running", depth=depth,
+                        tool_name=tc.name,
+                        data={"call_id": tc.call_id, "arguments": tc.arguments}
                     )
             elif content.strip():
-                preview = content[:300].replace("\n", " ")
-                if len(content) > 300:
-                    preview += "..."
-                print("{display_id} ← Response: {preview}".format(
-                    display_id=display_id, preview=preview
-                ))
+                logger = get_logger()
+                content_preview = content[:500].replace("\n", " ")
+                if len(content) > 500:
+                    content_preview += "..."
+                logger.info(
+                    agent_label,
+                    "LLM returned text response | content_length={}, thinking_stripped={}".format(
+                        len(content), self.strip_thinking
+                    ),
+                    task_id=task_id, state="running", depth=depth,
+                    event_type="llm_text_response",
+                    data={"content_length": len(content), "thinking_stripped": self.strip_thinking, "content_preview": content_preview}
+                )
 
             return LLMResponse(content=content, tool_calls=tool_calls)
 
         except Exception as e:
-            print(
-                "[{agent_label}|{task_id}] Error: {error_type}: {error}".format(
-                    agent_label=agent_label,
-                    task_id=task_id,
-                    error_type=type(e).__name__,
-                    error=e,
-                )
+            logger = get_logger()
+            logger.error(
+                agent_label,
+                "LLM API call failed | error_type={}, error=\"{}\", model={}".format(
+                    type(e).__name__, str(e), self.model
+                ),
+                task_id=task_id, state="error", depth=depth,
+                event_type="llm_api_error",
+                data={"error_type": type(e).__name__, "error_message": str(e), "model": self.model, "message_count": len(messages)}
             )
             raise
 
@@ -244,6 +260,7 @@ class MockLLMProvider(BaseLLMProvider):
         tools: List[Dict],
         agent_label: str = "Root",
         task_id: str = "unknown",
+        depth: int = 0,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> LLMResponse:
@@ -254,6 +271,7 @@ class MockLLMProvider(BaseLLMProvider):
             tools: List of tool definitions available to the LLM
             agent_label: Label for the agent making the request
             task_id: ID of the task being executed
+            depth: Nesting depth of the calling agent
             temperature: Optional temperature parameter for the LLM
             max_tokens: Optional max_tokens parameter for the LLM
 
