@@ -13,6 +13,17 @@ from engine.logger import get_logger
 from engine.models import LLMResponse, ToolCall
 
 
+class LLMProviderError(Exception):
+    """Unified LLM provider exception wrapper.
+
+    Regardless of whether the underlying SDK is openai, anthropic, or custom,
+    all LLM call exceptions are wrapped as LLMProviderError.
+    """
+    def __init__(self, original_error: Exception):
+        self.original_error = original_error
+        super().__init__(str(original_error))
+
+
 class BaseLLMProvider(ABC):
     """Abstract base class for LLM providers."""
 
@@ -205,7 +216,7 @@ class LLMProvider(BaseLLMProvider):
                 event_type="llm_api_error",
                 data={"error_type": type(e).__name__, "error_message": str(e), "model": self.model, "message_count": len(messages)}
             )
-            raise
+            raise LLMProviderError(e) from e
 
     def _strip_thinking(self, content: Optional[str]) -> str:
         """Remove thinking tags from content.
@@ -357,4 +368,4 @@ class MockLLMProvider(BaseLLMProvider):
         raise NotImplementedError("Streaming not yet implemented")
 
 
-__all__ = ["BaseLLMProvider", "LLMProvider", "MockLLMProvider"]
+__all__ = ["BaseLLMProvider", "LLMProvider", "LLMProviderError", "MockLLMProvider"]

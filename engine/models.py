@@ -19,6 +19,25 @@ class AgentState(Enum):
     ERROR = "error"
 
 
+class ErrorCategory(Enum):
+    """Error categories — extend as needed."""
+    LLM_ERROR = "llm_error"
+    INTERNAL_ERROR = "internal_error"
+
+
+@dataclass
+class AgentError:
+    """Structured error information for programmatic consumers."""
+    category: ErrorCategory
+    message: str
+    exception_type: Optional[str] = None
+
+    def __str__(self) -> str:
+        if self.exception_type:
+            return "[{}] {} - {}".format(self.category.value, self.exception_type, self.message)
+        return "[{}] {}".format(self.category.value, self.message)
+
+
 @dataclass
 class Message:
     """A message in a conversation session."""
@@ -95,7 +114,7 @@ class SubagentTask:
 
 @dataclass
 class CollectedChildResult:
-    """子代理结果收集的完整信息，用于替代下游对 _tasks 的依赖。"""
+    """Complete information collected from child agent results, replacing downstream dependency on _tasks."""
 
     task_description: str
     result: str
@@ -115,11 +134,13 @@ class AgentResult:
     content: str
     session: Session
     success: bool
-    error: Optional[str] = None
+    error: Optional[AgentError] = None
 
 
 __all__ = [
     "AgentState",
+    "ErrorCategory",
+    "AgentError",
     "Message",
     "Session",
     "ToolCall",

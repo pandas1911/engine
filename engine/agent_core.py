@@ -8,13 +8,13 @@ import json
 import uuid
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from engine.models import AgentState, CollectedChildResult, LLMResponse, QueueEvent, Session, ToolCall
+from engine.models import AgentState, CollectedChildResult, ErrorCategory, AgentError, LLMResponse, QueueEvent, Session, ToolCall
 from engine.config import Config
 from engine.registry import SubagentRegistry
 from engine.state_machine import AgentStateMachine
 from engine.tools.base import ToolRegistry
 from engine.tools.builtin.spawn import SpawnTool
-from engine.llm_provider import MockLLMProvider
+from engine.llm_provider import MockLLMProvider, LLMProviderError
 from engine.logger import get_logger
 
 if TYPE_CHECKING:
@@ -50,11 +50,12 @@ class Agent:
         self.state_machine = AgentStateMachine(AgentState.IDLE)
         self._final_result: Optional[str] = None
         self._completion_event = asyncio.Event()
+        self._error_info: Optional[AgentError] = None
         self.display_id = f"[{self.label}|{self.task_id}]"
         self._event_queue: List[
             QueueEvent
         ] = []  # Deferred event queue (native list, Swift Array equivalent)
-        self._child_counter = 0  # 子代理命名计数器
+        self._child_counter = 0  # Child agent naming counter
         # Use provided registry or create new one
         self._tool_registry = tool_registry or ToolRegistry()
 
@@ -157,16 +158,20 @@ class Agent:
         )
         logger.state_change(self.label, prev_state.value, self.state.value, "start", task_id=self.task_id, depth=self.session.depth, data={"trigger_location": "run()"})
 
-        spawned_any = await self._process_tool_calls()
+        try:
+            spawned_any = await self._process_tool_calls()
 
-        # Drain deferred events before branching decision
-        await self._drain_events()
+            # Drain deferred events before branching decision
+            await self._drain_events()
 
-        result = await self._after_drain(spawned_any)
-        if result is not None:
-            return result
+            result = await self._after_drain(spawned_any)
+            if result is not None:
+                return result
 
-        return self._final_result
+            return self._final_result
+        except Exception as e:
+            await self._abort(e)
+            return self._final_result
 
     async def _process_tool_calls(self) -> bool:
         """Process tool calls from the LLM.
@@ -350,53 +355,56 @@ class Agent:
 
     async def _resume_from_children(self, child_results: Dict[str, CollectedChildResult]):
         """Continue processing after all children complete."""
-        if self.state_machine.current_state == AgentState.WAITING_FOR_CHILDREN:
-            prev_state = self.state
-            self.state_machine.trigger("children_settled")
+        try:
+            if self.state_machine.current_state == AgentState.WAITING_FOR_CHILDREN:
+                prev_state = self.state
+                self.state_machine.trigger("children_settled")
+                logger = get_logger()
+                logger.state_change(self.label, prev_state.value, self.state.value, "children_settled", task_id=self.task_id, depth=self.session.depth, data={"trigger_location": "_resume_from_children()"})
+
             logger = get_logger()
-            logger.state_change(self.label, prev_state.value, self.state.value, "children_settled", task_id=self.task_id, depth=self.session.depth, data={"trigger_location": "_resume_from_children()"})
-
-        logger = get_logger()
-        if child_results:
-            result_summaries = {}
-            for tid, info in child_results.items():
-                result_summaries[tid] = {
-                    "task_description": info.task_description,
-                    "result_length": len(info.result),
-                    "result_preview": info.result[:200] + "..." if len(info.result) > 200 else info.result,
-                }
-            logger.info(
-                self.label,
-                "Resuming from children | collected {} child result(s), child_task_ids={}".format(
-                    len(child_results), list(child_results.keys())
-                ),
-                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                event_type="children_results",
-                data={"child_count": len(child_results), "child_task_ids": list(child_results.keys()), "results_summary": result_summaries}
-            )
-            findings_prompt = "All sub-agents have completed their tasks. Below is a summary of their results.\n\n"
-            for task_id, info in child_results.items():
-                findings_prompt += (
-                    f"--- Task ID: {task_id} ---\nTask: {info.task_description}\nResult: {info.result}\n\n"
+            if child_results:
+                result_summaries = {}
+                for tid, info in child_results.items():
+                    result_summaries[tid] = {
+                        "task_description": info.task_description,
+                        "result_length": len(info.result),
+                        "result_preview": info.result[:200] + "..." if len(info.result) > 200 else info.result,
+                    }
+                logger.info(
+                    self.label,
+                    "Resuming from children | collected {} child result(s), child_task_ids={}".format(
+                        len(child_results), list(child_results.keys())
+                    ),
+                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                    event_type="children_results",
+                    data={"child_count": len(child_results), "child_task_ids": list(child_results.keys()), "results_summary": result_summaries}
                 )
-        else:
-            logger.info(
-                self.label,
-                "Resuming from children | no child results collected",
-                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                event_type="children_results",
-                data={"child_count": 0}
-            )
-            findings_prompt = "[WARNING] All sub-agents have completed their tasks, but no results were collected."
+                findings_prompt = "All sub-agents have completed their tasks. Below is a summary of their results.\n\n"
+                for task_id, info in child_results.items():
+                    findings_prompt += (
+                        f"--- Task ID: {task_id} ---\nTask: {info.task_description}\nResult: {info.result}\n\n"
+                    )
+            else:
+                logger.info(
+                    self.label,
+                    "Resuming from children | no child results collected",
+                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                    event_type="children_results",
+                    data={"child_count": 0}
+                )
+                findings_prompt = "[WARNING] All sub-agents have completed their tasks, but no results were collected."
 
-        self.session.add_message("user", findings_prompt)
+            self.session.add_message("user", findings_prompt)
 
-        spawned_any = await self._process_tool_calls()
+            spawned_any = await self._process_tool_calls()
 
-        # Drain deferred events
-        await self._drain_events()
+            # Drain deferred events
+            await self._drain_events()
 
-        await self._after_drain(spawned_any)
+            await self._after_drain(spawned_any)
+        except Exception as e:
+            await self._abort(e)
 
     async def _drain_events(self):
         """Process queued events after tool loop completes."""
@@ -462,6 +470,81 @@ class Agent:
             )
             await self._finish_and_notify()
             return None
+
+    def _classify_error(self, error: Exception) -> ErrorCategory:
+        """Classify error category based on exception type."""
+        if isinstance(error, LLMProviderError):
+            return ErrorCategory.LLM_ERROR
+        return ErrorCategory.INTERNAL_ERROR
+
+    async def _abort(self, error: Exception) -> None:
+        """Unified crash handler. Never throws."""
+        # Step 1: Log (best effort)
+        try:
+            logger = get_logger()
+            logger.error(
+                self.label,
+                "Agent aborted | error_type={}, error=\"{}\"".format(
+                    type(error).__name__, str(error)
+                ),
+                task_id=self.task_id,
+                state=self.state.value,
+                depth=self.session.depth,
+                event_type="agent_abort",
+                data={
+                    "error_type": type(error).__name__,
+                    "error_message": str(error),
+                },
+            )
+        except Exception:
+            pass
+
+        # Step 2: Set _final_result + _error_info
+        if self.state != AgentState.ERROR:
+            self._final_result = "[ERROR] Agent aborted: {} - {}".format(
+                type(error).__name__, str(error)
+            )
+            category = self._classify_error(error)
+            self._error_info = AgentError(
+                category=category,
+                message=str(error),
+                exception_type=type(error).__name__,
+            )
+
+        # Step 3: State transition (only in non-terminal states)
+        transitioned_to_error = False
+        if self.state not in (AgentState.COMPLETED, AgentState.ERROR):
+            try:
+                if self.state_machine.can_trigger("error"):
+                    prev_state = self.state
+                    self.state_machine.trigger("error")
+                    transitioned_to_error = True
+                    try:
+                        logger = get_logger()
+                        logger.state_change(
+                            self.label, prev_state.value, self.state.value, "error",
+                            task_id=self.task_id, depth=self.session.depth,
+                            data={"trigger_location": "_abort()"},
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # Step 4: _completion_event.set() (best effort)
+        try:
+            self._completion_event.set()
+        except Exception:
+            pass
+
+        # Step 5: Notify parent (only when actually transitioned to ERROR)
+        if self.parent_task_id and transitioned_to_error:
+            try:
+                await self.registry.complete(
+                    self.task_id, self._final_result, error=True
+                )
+            except Exception:
+                pass
 
     async def _finish_and_notify(self):
         logger = get_logger()

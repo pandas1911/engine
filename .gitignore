@@ -2,7 +2,7 @@
 .env
 
 # Project specific files
-AGENTS.md
+# AGENTS.md
 
 # Node modules
 node_modules/

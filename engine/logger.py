@@ -74,16 +74,21 @@ class TerminalFormatter:
         if entry.tool_name:
             label = "{}({})".format(entry.agent_label, entry.tool_name)
 
-        prefix = "{}[{}|{} {}]{} {}[{}]{}".format(
-            color,
-            label,
-            entry.agent_id,
-            time_part,
-            self.RESET,
-            self.CYAN,
-            entry.state.upper(),
-            self.RESET,
-        )
+        if entry.level == "error" or entry.event_type == "state_change":
+            prefix = "{}[{}|{} {}]{}".format(
+                color, label, entry.agent_id, time_part, self.RESET
+            )
+        else:
+            prefix = "{}[{}|{} {}]{} {}[{}]{}".format(
+                color,
+                label,
+                entry.agent_id,
+                time_part,
+                self.RESET,
+                self.CYAN,
+                entry.state.upper(),
+                self.RESET,
+            )
 
         parts = [prefix, entry.message]
         if entry.data:

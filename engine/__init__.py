@@ -10,7 +10,7 @@ from engine.agent_core import Agent
 from engine.config import Config, get_config
 from engine.llm_provider import LLMProvider
 from engine.logger import init_logger, get_logger, stop_logger
-from engine.models import AgentResult, AgentState, Session
+from engine.models import AgentError, AgentResult, AgentState, ErrorCategory, Session
 from engine.registry import SubagentRegistry
 from engine.tools.base import Tool, FunctionTool
 
@@ -104,20 +104,26 @@ async def delegate(
 
         await agent.run(task_description)
 
-        if agent.state != AgentState.COMPLETED:
+        if agent.state not in (AgentState.COMPLETED, AgentState.ERROR):
             await agent._completion_event.wait()
 
+        success = agent.state == AgentState.COMPLETED
         return AgentResult(
             content=agent._final_result or "",
             session=session,
-            success=True,
+            success=success,
+            error=None if success else agent._error_info,
         )
     except Exception as e:
         return AgentResult(
             content="",
             session=session,
             success=False,
-            error=str(e),
+            error=AgentError(
+                category=ErrorCategory.INTERNAL_ERROR,
+                message=str(e),
+                exception_type=type(e).__name__,
+            ),
         )
     finally:
         await stop_logger()

@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 from engine.config import Config
 from engine.logger import get_logger
-from engine.models import Session
+from engine.models import AgentState, Session
 from engine.tools.base import Tool
 
 if TYPE_CHECKING:
@@ -166,15 +166,15 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
 
         Note:
             On completion, registry.complete() will automatically notify parent.
-            On error, registry.complete() is called with error=True.
+            On error, agent._abort() handles state transition and notification.
         """
         agent = self.agent_factory(
             child_session, config, self.registry, self.parent_task_id, task_id,
             label=agent_display_name,
         )
         await self.registry.set_agent(task_id, agent)
-        logger = get_logger()
         try:
+            logger = get_logger()
             logger.info(
                 agent_display_name or "Sub",
                 "Child agent starting background execution | task=\"{}\"".format(task_desc[:200]),
@@ -182,29 +182,63 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
                 event_type="child_run_start",
                 data={"task_description": task_desc}
             )
-            result = await agent.run(task_desc)
-            result_preview = (result[:500] + "...") if result and len(result) > 500 else (result or "None")
-            logger.info(
-                agent_display_name or "Sub",
-                "Child agent completed successfully | result_length={}".format(len(result) if result else 0),
-                task_id=task_id, state="completed", depth=child_session.depth,
-                event_type="child_run_success",
-                data={"result_length": len(result) if result else 0, "result_preview": result_preview}
-            )
+            await agent.run(task_desc)
         except Exception as e:
+            # Safety net — agent.run() should catch all exceptions internally via _abort()
+            # If we reach here, _abort() or run() has a bug
+            await agent._abort(e)
+            logger = get_logger()
             logger.error(
                 agent_display_name or "Sub",
-                "Child agent execution failed | error_type={}, error=\"{}\"".format(type(e).__name__, str(e)),
+                "UNEXPECTED: child agent leaked exception | error_type={}, error=\"{}\"".format(
+                    type(e).__name__, str(e)),
                 task_id=task_id, state="error", depth=child_session.depth,
-                event_type="child_run_error",
-                data={"error_type": type(e).__name__, "error_message": str(e), "task_description": task_desc}
+                event_type="child_run_unhandled",
+                data={"error_type": type(e).__name__, "error_message": str(e)},
             )
-            agent.state_machine.trigger("error")
-            error_result = (
-                f"[ERROR] Child agent execution failed.\n\n"
-                f"Task: {task_desc}\n"
-                f"Error Type: {type(e).__name__}\n"
-                f"Error Details: {str(e)}\n\n"
-                f"The child agent has been terminated. Please decide whether to re-spawn a new child agent or adjust the task strategy based on the error information above."
+            return
+
+        # Log based on final state (registry.complete handled internally by agent)
+        state = agent.state_machine.current_state
+        if state == AgentState.COMPLETED:
+            result_preview = (
+                (agent._final_result[:500] + "...")
+                if agent._final_result and len(agent._final_result) > 500
+                else (agent._final_result or "None")
             )
-            await self.registry.complete(task_id, error_result, error=True)
+            logger = get_logger()
+            logger.info(
+                agent_display_name or "Sub",
+                "Child agent completed | result_length={}".format(
+                    len(agent._final_result) if agent._final_result else 0),
+                task_id=task_id, state="completed", depth=child_session.depth,
+                event_type="child_run_success",
+                data={"result_length": len(agent._final_result) if agent._final_result else 0,
+                      "result_preview": result_preview},
+            )
+        elif state == AgentState.ERROR:
+            logger = get_logger()
+            logger.error(
+                agent_display_name or "Sub",
+                "Child agent aborted | error={}".format(agent._final_result),
+                task_id=task_id, state="error", depth=child_session.depth,
+                event_type="child_run_abort",
+                data={"error_result": agent._final_result},
+            )
+        elif state == AgentState.WAITING_FOR_CHILDREN:
+            logger = get_logger()
+            logger.info(
+                agent_display_name or "Sub",
+                "Child agent waiting for sub-agents | state={}".format(state.value),
+                task_id=task_id, state=state.value, depth=child_session.depth,
+                event_type="child_run_waiting",
+            )
+        else:
+            logger = get_logger()
+            logger.warning(
+                agent_display_name or "Sub",
+                "Child agent in unexpected state | state={}".format(state.value),
+                task_id=task_id, state=state.value, depth=child_session.depth,
+                event_type="child_run_unexpected_state",
+                data={"state": state.value},
+            )
