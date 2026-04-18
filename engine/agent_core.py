@@ -8,21 +8,26 @@ import json
 import uuid
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from engine.models import AgentState, CollectedChildResult, ErrorCategory, AgentError, LLMResponse, QueueEvent, Session, ToolCall
+from engine.models import AgentState, ErrorCategory, AgentError, LLMResponse, Session, ToolCall
 from engine.config import Config
-from engine.registry import SubagentRegistry
+from engine.subagent.registry import SubagentRegistry
+from engine.subagent.events import AgentEvent, ChildCompletionEvent
+from engine.subagent.manager import SubAgentManager
 from engine.state_machine import AgentStateMachine
 from engine.tools.base import ToolRegistry
-from engine.tools.builtin.spawn import SpawnTool
 from engine.llm_provider import MockLLMProvider, LLMProviderError
 from engine.logger import get_logger
 
 if TYPE_CHECKING:
     from engine.llm_provider import LLMProvider
+    from engine.subagent.models import CollectedChildResult
 
 
 class Agent:
-    """Core Agent class with multi-level nesting support."""
+    """Core Agent class with multi-level nesting support.
+
+    # Implements: Drainable protocol (engine.subagent.protocol)
+    """
 
     MAX_TOOL_ITERATIONS = 20
 
@@ -53,9 +58,17 @@ class Agent:
         self._error_info: Optional[AgentError] = None
         self.display_id = f"[{self.label}|{self.task_id}]"
         self._event_queue: List[
-            QueueEvent
+            AgentEvent
         ] = []  # Deferred event queue (native list, Swift Array equivalent)
         self._child_counter = 0  # Child agent naming counter
+        # SubAgentManager handles child spawning and notification
+        self._subagent_mgr = SubAgentManager(
+            registry=self.registry,
+            event_queue=self._event_queue,
+            drainable=self,
+            agent_task_id=self.task_id,
+            parent_label=self.label,
+        )
         # Use provided registry or create new one
         self._tool_registry = tool_registry or ToolRegistry()
 
@@ -66,11 +79,8 @@ class Agent:
 
         # SpawnTool conditional injection
         if session.depth < config.max_depth:
-            self._tool_registry.register_spawn(
-                SpawnTool(
-                    self._create_child_agent, self.registry, self.task_id, self.label
-                )
-            )
+            spawn_tool = self._subagent_mgr.create_spawn_tool()
+            self._tool_registry.register_spawn(spawn_tool)
 
         logger = get_logger()
         logger.info(
@@ -95,7 +105,7 @@ class Agent:
     def state(self) -> AgentState:
         return self.state_machine.current_state
 
-    def pop_event(self) -> Optional[QueueEvent]:
+    def pop_event(self) -> Optional[AgentEvent]:
         """Pop the next event from the queue, or None if empty."""
         if self._event_queue:
             return self._event_queue.pop(0)
@@ -162,7 +172,7 @@ class Agent:
             spawned_any = await self._process_tool_calls()
 
             # Drain deferred events before branching decision
-            await self._drain_events()
+            await self.drain_events()
 
             result = await self._after_drain(spawned_any)
             if result is not None:
@@ -326,6 +336,7 @@ class Agent:
             "registry": self.registry,
             "parent_agent": self,
             "parent_task_id": self.task_id,
+            "agent_factory": self._create_child_agent,
         }
 
         try:
@@ -353,14 +364,14 @@ class Agent:
             )
             return f"[ERROR] Tool '{tool_call.name}' execution failed: {type(e).__name__}: {str(e)}"
 
-    async def _resume_from_children(self, child_results: Dict[str, CollectedChildResult]):
-        """Continue processing after all children complete."""
+    async def resume_from_children(self, formatted_prompt: str, child_results: Optional[Dict[str, "CollectedChildResult"]] = None):
+        """Continue processing after all children complete. Accepts pre-formatted prompt from SubAgentManager."""
         try:
             if self.state_machine.current_state == AgentState.WAITING_FOR_CHILDREN:
                 prev_state = self.state
                 self.state_machine.trigger("children_settled")
                 logger = get_logger()
-                logger.state_change(self.label, prev_state.value, self.state.value, "children_settled", task_id=self.task_id, depth=self.session.depth, data={"trigger_location": "_resume_from_children()"})
+                logger.state_change(self.label, prev_state.value, self.state.value, "children_settled", task_id=self.task_id, depth=self.session.depth, data={"trigger_location": "resume_from_children()"})
 
             logger = get_logger()
             if child_results:
@@ -380,11 +391,6 @@ class Agent:
                     event_type="children_results",
                     data={"child_count": len(child_results), "child_task_ids": list(child_results.keys()), "results_summary": result_summaries}
                 )
-                findings_prompt = "All sub-agents have completed their tasks. Below is a summary of their results.\n\n"
-                for task_id, info in child_results.items():
-                    findings_prompt += (
-                        f"--- Task ID: {task_id} ---\nTask: {info.task_description}\nResult: {info.result}\n\n"
-                    )
             else:
                 logger.info(
                     self.label,
@@ -393,21 +399,20 @@ class Agent:
                     event_type="children_results",
                     data={"child_count": 0}
                 )
-                findings_prompt = "[WARNING] All sub-agents have completed their tasks, but no results were collected."
 
-            self.session.add_message("user", findings_prompt)
+            self.session.add_message("user", formatted_prompt)
 
             spawned_any = await self._process_tool_calls()
 
             # Drain deferred events
-            await self._drain_events()
+            await self.drain_events()
 
             await self._after_drain(spawned_any)
         except Exception as e:
             await self._abort(e)
 
-    async def _drain_events(self):
-        """Process queued events after tool loop completes."""
+    async def drain_events(self):
+        """Process queued events after tool loop completes. Public for Drainable protocol."""
         if self.state_machine.current_state == AgentState.COMPLETED:
             return
 
@@ -419,19 +424,20 @@ class Agent:
         logger.info(
             self.label,
             "Draining deferred event | trigger_task_id={}, child_result_count={}".format(
-                event.trigger_task_id, len(event.child_results)
+                getattr(event, 'trigger_task_id', 'N/A'), len(getattr(event, 'child_results', {}))
             ),
             task_id=self.task_id, state=self.state.value, depth=self.session.depth,
             event_type="drain_event",
-            data={"trigger_task_id": event.trigger_task_id, "child_result_count": len(event.child_results), "error": event.error}
+            data={"trigger_task_id": getattr(event, 'trigger_task_id', 'N/A'), "child_result_count": len(getattr(event, 'child_results', {})), "error": getattr(event, 'error', False)}
         )
 
-        await self._resume_from_children(event.child_results)
+        if isinstance(event, ChildCompletionEvent):
+            await self.resume_from_children(event.formatted_prompt, event.child_results)
 
     async def _after_drain(self, spawned_any: bool) -> Optional[str]:
-        """Branch after _drain_events(). State machine is source of truth.
+        """Branch after drain_events(). State machine is source of truth.
 
-        _drain_events() may recursively call _resume_from_children(), which
+        drain_events() may recursively call resume_from_children(), which
         can spawn children or finish on its own. So after drain returns, the
         local spawned_any may be stale — check state machine first.
 
@@ -443,7 +449,7 @@ class Agent:
         if state == AgentState.COMPLETED:
             return self._final_result
 
-        # Drain's inner _resume_from_children already spawned and transitioned
+        # Drain's inner resume_from_children already spawned and transitioned
         if state == AgentState.WAITING_FOR_CHILDREN:
             return "[Waiting for sub-agents to report back...]"
 
@@ -461,6 +467,19 @@ class Agent:
             logger.state_change(self.label, prev_state.value, self.state.value, "spawn_children", task_id=self.task_id, depth=self.session.depth, data={"trigger_location": "_after_drain()"})
             return "[Waiting for sub-agents to report back...]"
         else:
+            if self._has_pending_children():
+                logger = get_logger()
+                logger.info(
+                    self.label,
+                    "No new spawns but pending children exist, waiting for them to complete",
+                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                    event_type="waiting_for_pending_children",
+                )
+                prev_state = self.state
+                self.state_machine.trigger("spawn_children")
+                logger.state_change(self.label, prev_state.value, self.state.value, "spawn_children", task_id=self.task_id, depth=self.session.depth, data={"trigger_location": "_after_drain() - pending children"})
+                return "[Waiting for sub-agents to report back...]"
+
             logger = get_logger()
             logger.info(
                 self.label,
@@ -470,6 +489,12 @@ class Agent:
             )
             await self._finish_and_notify()
             return None
+
+    def _has_pending_children(self) -> bool:
+        task = self.registry.get_task(self.task_id)
+        if not task or not task.child_task_ids:
+            return False
+        return self.registry.count_pending_children(self.task_id) > 0
 
     def _classify_error(self, error: Exception) -> ErrorCategory:
         """Classify error category based on exception type."""
@@ -545,6 +570,10 @@ class Agent:
                 )
             except Exception:
                 pass
+
+    async def abort(self, error: Exception) -> None:
+        """Public abort interface (Drainable protocol)."""
+        await self._abort(error)
 
     async def _finish_and_notify(self):
         logger = get_logger()

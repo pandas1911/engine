@@ -1,24 +1,36 @@
-"""Subagent Registry - Support for multi-level nesting.
+"""Subagent Registry - Pure data CRUD with handler-based notification.
 
 This module provides the SubagentRegistry for tracking subagent tasks.
-Corresponds to OpenClaw's subagent-registry.ts
+Extracted from engine/registry.py with gate-check and notification logic
+removed — that responsibility moves to SubAgentManager.
 """
 
 import asyncio
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Dict, Optional, Set
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Set
 
 from engine.logger import get_logger
-from engine.models import AgentState, CollectedChildResult, QueueEvent, SubagentTask
+from engine.subagent.models import CollectedChildResult, SubagentTask
 
 if TYPE_CHECKING:
     from engine.agent_core import Agent
 
 
+@dataclass
+class CompleteInfo:
+    """Completion info returned by store_result for handler notification."""
+
+    parent_task_id: Optional[str]
+    pending_children: int
+    pending_siblings: int
+
+
 class SubagentRegistry:
     """Subagent Registry - Support for multi-level nesting.
 
-    Corresponds to OpenClaw's subagent-registry.ts
+    Pure data CRUD operations with handler-based notification.
+    Gate-check and notification logic lives in SubAgentManager.
     """
 
     def __init__(self):
@@ -26,6 +38,7 @@ class SubagentRegistry:
         self._tasks: Dict[str, SubagentTask] = {}
         self._pending: Set[str] = set()
         self._lock = asyncio.Lock()
+        self._completion_handlers: Dict[str, Callable] = {}  # maps parent_task_id → callback
 
     async def register(
         self,
@@ -147,135 +160,36 @@ class SubagentRegistry:
         ancestors = self.get_all_ancestors(parent_task_id)
         return new_agent_id in ancestors
 
-    async def complete(self, task_id: str, result: str, error: bool = False):
-        """Called when a subagent completes."""
+    def register_handler(self, parent_task_id: str, handler: Callable):
+        """Register a completion handler for a parent task."""
+        self._completion_handlers[parent_task_id] = handler
+
+    async def store_result(self, task_id: str, result: str) -> CompleteInfo:
+        """Store result and return completion info. Counts computed inside lock."""
         async with self._lock:
             if task_id not in self._tasks:
-                return
-
+                return CompleteInfo(parent_task_id=None, pending_children=0, pending_siblings=0)
             task = self._tasks[task_id]
             task.result = result
             task.ended_at = datetime.now().timestamp()
             self._pending.discard(task_id)
-
             parent_task_id = task.parent_task_id
             pending_children = self._count_pending_for_parent(task_id)
             pending_siblings = (
                 self._count_pending_for_parent(parent_task_id) if parent_task_id else 0
             )
-
-        # [Gate 1] Still have pending children → return
-        if pending_children > 0:
-            logger = get_logger()
-            logger.info(
-                "Registry",
-                "Task completed but has pending children | task_id={}, pending_children={}".format(
-                    task_id, pending_children
-                ),
-                task_id=task_id, state="running",
-                depth=self._tasks[task_id].depth if task_id in self._tasks else 0,
-                event_type="registry_complete_blocked_children",
-                data={"pending_children": pending_children, "result_length": len(result) if result else 0}
-            )
-            return
-
-        # [Gate 2] Parent doesn't exist or not registered → return
-        if not (parent_task_id and parent_task_id in self._tasks):
-            return
-
-        # [Gate 3] Still have pending siblings → return
-        if pending_siblings > 0:
-            logger = get_logger()
-            logger.info(
-                "Registry",
-                "Task completed but has pending siblings | task_id={}, parent_task_id={}, pending_siblings={}".format(
-                    task_id, parent_task_id, pending_siblings
-                ),
-                task_id=task_id, state="running",
-                depth=self._tasks[task_id].depth if task_id in self._tasks else 0,
-                event_type="registry_complete_blocked_siblings",
-                data={"parent_task_id": parent_task_id, "pending_siblings": pending_siblings}
-            )
-            return
-
-        # All gates passed → notify parent
-        parent_task: SubagentTask = self._tasks[parent_task_id]
-
-        # Collect aggregated child results
-        child_results = self.collect_child_results(parent_task_id)
-
-        task_depth = self._tasks[task_id].depth if task_id in self._tasks else 0
-
-        # Cleanup: remove collected children from _tasks and parent's child_task_ids
-        parent_task.child_task_ids.clear()
-        for child_id in child_results:
-            self._tasks.pop(child_id, None)
-
-        parent_agent: "Agent" = parent_task.agent
-        parent_state = parent_agent.state_machine.current_state.value if parent_agent else "None"
-        branch = "A (wake parent)" if parent_state == "waiting_for_children" else "B (enqueue to parent)"
-        child_ids = list(child_results.keys())
-        logger = get_logger()
-        logger.info(
-            "Registry",
-            "All gates passed, notifying parent | task_id={}, parent_task_id={}, branch={}, parent_state={}, child_count={}".format(
-                task_id, parent_task_id, branch, parent_state, len(child_results)
-            ),
-            task_id=task_id, state="running", depth=task_depth,
-            event_type="registry_notify_parent",
-            data={"parent_task_id": parent_task_id, "parent_state": parent_state, "branch": branch, "child_result_count": len(child_results), "child_ids": child_ids}
+        return CompleteInfo(
+            parent_task_id=parent_task_id,
+            pending_children=pending_children,
+            pending_siblings=pending_siblings,
         )
 
-        # [Branch A] Parent waiting for descendants → wake
-        if (
-            parent_agent is not None
-            and parent_agent.state_machine.current_state
-            == AgentState.WAITING_FOR_CHILDREN
-        ):
-            asyncio.create_task(parent_agent._resume_from_children(child_results))
-            return
-
-        # [Branch B] Parent is running → push to event queue
-        if parent_agent is not None:
-            event = QueueEvent(
-                trigger_task_id=task_id, child_results=child_results, error=error
-            )
-            parent_agent._event_queue.append(event)
-
-    # Replaced by _count_pending_for_parent. See docs/notebook.md for analysis.
-    #
-    # def _count_pending_descendants_locked(self, task_id: str) -> int:
-    #     """Count pending descendants of a task - Corresponds to OpenClaw's countPendingDescendantRuns.
-    #
-    #     Must be called while holding self._lock.
-    #
-    #     Args:
-    #         task_id: The task ID to count descendants for
-    #
-    #     Returns:
-    #         Number of pending descendant tasks
-    #     """
-    #     if task_id not in self._tasks:
-    #         return 0
-    #
-    #     task = self._tasks[task_id]
-    #     count = 0
-    #     visited = {task_id}
-    #     queue = list(task.child_task_ids)
-    #
-    #     while queue:
-    #         child_id = queue.pop(0)
-    #         if child_id in visited:
-    #             continue
-    #         visited.add(child_id)
-    #
-    #         if child_id in self._tasks:
-    #             child_task = self._tasks[child_id]
-    #             if child_id in self._pending:
-    #                 count += 1
-    #             queue.extend(child_task.child_task_ids)
-    #
-    #     return count
+    async def complete(self, task_id: str, result: str, error: bool = False):
+        """Store result and notify registered handler. Called by child agents."""
+        info = await self.store_result(task_id, result)
+        handler = self._completion_handlers.get(info.parent_task_id)
+        if handler:
+            await handler(task_id, info)
 
     def has_pending(self) -> bool:
         """Check if there are any pending tasks.
@@ -297,6 +211,10 @@ class SubagentRegistry:
         if parent_task_id not in self._tasks:
             return 0
         return sum(1 for cid in self._tasks[parent_task_id].child_task_ids if cid in self._pending)
+
+    def count_pending_children(self, task_id: str) -> int:
+        """Count direct children of `task_id` still pending."""
+        return self._count_pending_for_parent(task_id)
 
     def get_task(self, task_id: str) -> Optional[SubagentTask]:
         """Get a task by ID.
@@ -332,4 +250,4 @@ class SubagentRegistry:
         return results
 
 
-__all__ = ["SubagentRegistry"]
+__all__ = ["CompleteInfo", "SubagentRegistry"]

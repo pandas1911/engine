@@ -14,5 +14,8 @@ dependencies = [
     "pytest-asyncio",
 ]
 
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
 [tool.setuptools.packages.find]
 include = ["engine*"]

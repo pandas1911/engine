@@ -11,7 +11,7 @@ import asyncio
 from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
-    from engine.registry import SubagentRegistry
+    from engine.subagent.registry import SubagentRegistry
 
 
 class ConcurrencyLimiter:

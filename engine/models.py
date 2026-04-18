@@ -3,10 +3,15 @@
 This module contains all data models for the Agent system.
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 from dataclasses import dataclass, field
+
+if TYPE_CHECKING:
+    from engine.subagent.models import CollectedChildResult
 
 
 class AgentState(Enum):
@@ -97,30 +102,6 @@ class LLMResponse:
 
 
 @dataclass
-class SubagentTask:
-    """A task for a subagent execution."""
-
-    task_id: str
-    session_id: str
-    task_description: str
-    parent_agent: Any  # Forward reference to Agent
-    parent_task_id: Optional[str] = None
-    result: Optional[str] = None
-    depth: int = 0
-    child_task_ids: Set[str] = field(default_factory=set)
-    ended_at: Optional[float] = None
-    agent: Optional[Any] = None  # Reference to the agent instance for this task
-
-
-@dataclass
-class CollectedChildResult:
-    """Complete information collected from child agent results, replacing downstream dependency on _tasks."""
-
-    task_description: str
-    result: str
-
-
-@dataclass
 class QueueEvent:
     trigger_task_id: str  # Trigger child task_id (debug/log)
     child_results: Dict[str, CollectedChildResult]  # All child task_id → enriched result
@@ -145,8 +126,7 @@ __all__ = [
     "Session",
     "ToolCall",
     "LLMResponse",
-    "SubagentTask",
-    "CollectedChildResult",
     "QueueEvent",
     "AgentResult",
 ]
+

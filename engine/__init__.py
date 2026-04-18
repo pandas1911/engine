@@ -11,7 +11,7 @@ from engine.config import Config, get_config
 from engine.llm_provider import LLMProvider
 from engine.logger import init_logger, get_logger, stop_logger
 from engine.models import AgentError, AgentResult, AgentState, ErrorCategory, Session
-from engine.registry import SubagentRegistry
+from engine.subagent.registry import SubagentRegistry
 from engine.tools.base import Tool, FunctionTool
 
 __all__ = ["delegate", "Tool", "FunctionTool", "AgentResult", "init_logger", "get_logger", "stop_logger"]
