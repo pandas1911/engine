@@ -6,9 +6,10 @@ from engine.agent_core import Agent
 from engine.config import Config, get_config
 from engine.llm_provider import BaseLLMProvider, LLMProviderError, MockLLMProvider
 from engine.models import (
-    AgentError, AgentResult, AgentState, CollectedChildResult, ErrorCategory, Session, LLMResponse,
+    AgentError, AgentResult, AgentState, ErrorCategory, Session, LLMResponse,
 )
-from engine.registry import SubagentRegistry
+from engine.subagent.models import CollectedChildResult
+from engine.subagent.registry import SubagentRegistry
 
 
 class FailingLLMProvider(MockLLMProvider):
@@ -65,8 +66,8 @@ async def test_t1_root_process_tool_calls_error(config):
 
 
 @pytest.mark.asyncio
-async def test_t2_root_resume_from_children_error(config):
-    """T2: Root agent _resume_from_children() raises exception -> ERROR, no hang."""
+async def test_t2_rootresume_from_children_error(config):
+    """T2: Root agent resume_from_children() raises exception -> ERROR, no hang."""
     session = Session(id="test_t2", depth=0)
     agent = Agent(session=session, config=config, llm_provider=FailingLLMProvider(fail_on_call=2))
 
@@ -91,7 +92,7 @@ async def test_t3_sub_agent_run_error(config):
 
 @pytest.mark.asyncio
 async def test_t4_sub_agent_resume_error(config):
-    """T4: Sub-agent _resume_from_children() raises exception -> ERROR state."""
+    """T4: Sub-agent resume_from_children() raises exception -> ERROR state."""
     session = Session(id="test_t4", depth=1)
     registry = SubagentRegistry()
     agent = Agent(session=session, config=config, registry=registry,
@@ -101,7 +102,7 @@ async def test_t4_sub_agent_resume_error(config):
     agent.state_machine.trigger("spawn_children")
 
     child_results = {"child_1": CollectedChildResult(task_description="test", result="done")}
-    await agent._resume_from_children(child_results)
+    await agent.resume_from_children(child_results)
 
     assert agent.state == AgentState.ERROR
 

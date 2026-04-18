@@ -22,7 +22,7 @@ async def test_delegate_creates_log_file(tmp_path):
     from engine.llm_provider import MockLLMProvider
     from engine.logger import init_logger, stop_logger
     from engine.models import Session
-    from engine.registry import SubagentRegistry
+    from engine.subagent.registry import SubagentRegistry
 
     config = Config(
         api_key="test",
@@ -86,7 +86,7 @@ async def test_log_contains_lifecycle_events(tmp_path):
     from engine.llm_provider import MockLLMProvider
     from engine.logger import init_logger, stop_logger
     from engine.models import Session
-    from engine.registry import SubagentRegistry
+    from engine.subagent.registry import SubagentRegistry
 
     config = Config(
         api_key="test", base_url="http://localhost", model="test"
@@ -139,7 +139,7 @@ async def test_custom_log_directory_works(tmp_path):
     from engine.llm_provider import MockLLMProvider
     from engine.logger import init_logger, stop_logger
     from engine.models import Session
-    from engine.registry import SubagentRegistry
+    from engine.subagent.registry import SubagentRegistry
 
     custom_dir = str(tmp_path / "my_custom_logs")
     config = Config(
@@ -189,7 +189,7 @@ async def test_root_agent_label_in_logs(tmp_path):
     from engine.llm_provider import MockLLMProvider
     from engine.logger import init_logger, stop_logger
     from engine.models import Session
-    from engine.registry import SubagentRegistry
+    from engine.subagent.registry import SubagentRegistry
 
     config = Config(
         api_key="test", base_url="http://localhost", model="test"
