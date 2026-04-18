@@ -7,7 +7,7 @@ from engine.agent_core import Agent
 from engine.config import ConfigLoader
 from engine.llm_provider import LLMProvider
 from engine.models import AgentState, Session
-from engine.registry import SubagentRegistry
+from engine.subagent.registry import SubagentRegistry
 
 from engine.tools.custom.mock import MockTool
 
