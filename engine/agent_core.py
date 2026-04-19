@@ -165,27 +165,13 @@ class Agent:
         self._log.state_change(prev_state.value, self.state.value, "start", trigger_location="run()")
 
         try:
-            spawned_any = await self._process_tool_calls()
-
-            # Drain deferred events before branching decision
-            await self.drain_events()
-
-            result = await self._after_drain(spawned_any)
-            if result is not None:
-                return result
-
-            return self._final_result
+            return await self._execute_cycle()
         except Exception as e:
             await self._abort(e)
             return self._final_result
 
-    async def _process_tool_calls(self) -> bool:
-        """Process tool calls from the LLM.
-
-        Returns:
-            True if any child agents were spawned
-        """
-        spawned = False
+    async def _process_tool_calls(self) -> None:
+        """Process tool calls from the LLM."""
         iteration = 0
 
         while iteration < self.MAX_TOOL_ITERATIONS:
@@ -268,9 +254,6 @@ class Agent:
                 result = await self._execute_tool(tool_call)
                 self.session.add_message("tool", result, tool_call_id=tool_call.call_id)
 
-                if tool_call.name == "spawn":
-                    spawned = True
-
         if iteration >= self.MAX_TOOL_ITERATIONS:
             self._log.error(
                 "iteration_limit",
@@ -282,7 +265,59 @@ class Agent:
             )
             self._final_result = self._final_result or "[WARNING] Maximum tool call iterations reached."
 
-        return spawned
+        return
+
+    async def _execute_cycle(self) -> str:
+        """Core execution: tool calls → drain events → decide next state.
+
+        Linear flow (no recursion, no outer loop). Every path ends with return.
+        Shared by run() and resume_from_children().
+        """
+        if self.state != AgentState.RUNNING:
+            return self._final_result or ""
+
+        await self._process_tool_calls()
+
+        # Drain ALL queued events iteratively (replaces recursive drain_events chain)
+        while True:
+            if self.state in (AgentState.COMPLETED, AgentState.ERROR):
+                return self._final_result or ""
+
+            event = self.pop_event()
+            if event is None:
+                break
+
+            if isinstance(event, ChildCompletionEvent):
+                self._log.info(
+                    "drain_event",
+                    "Draining deferred event | trigger_task_id={}, child_result_count={}".format(
+                        getattr(event, 'trigger_task_id', 'N/A'), len(getattr(event, 'child_results', {}))
+                    ),
+                    trigger_task_id=getattr(event, 'trigger_task_id', 'N/A'),
+                    child_result_count=len(getattr(event, 'child_results', {})),
+                    error=getattr(event, 'error', False),
+                )
+                self.session.add_message("user", event.formatted_prompt)
+                await self._process_tool_calls()
+                # Loop continues — processes any events queued during _process_tool_calls
+
+        # All events drained — decide next state using registry as single source of truth
+        if self._has_pending_children():
+            self._log.info(
+                "waiting_for_children",
+                "Spawned child agents detected, transitioning to WAITING_FOR_CHILDREN",
+            )
+            prev_state = self.state
+            self.state_machine.trigger("spawn_children")
+            self._log.state_change(prev_state.value, self.state.value, "spawn_children", trigger_location="_execute_cycle()")
+            return "[Waiting for sub-agents to report back...]"
+        else:
+            self._log.info(
+                "agent_direct_complete",
+                "Agent finished without spawning children, proceeding to finalize",
+            )
+            await self._finish_and_notify()
+            return self._final_result or ""
 
     async def _execute_tool(self, tool_call: ToolCall) -> str:
         """Execute a single tool call.
@@ -381,87 +416,9 @@ class Agent:
 
             self.session.add_message("user", formatted_prompt)
 
-            spawned_any = await self._process_tool_calls()
-
-            # Drain deferred events
-            await self.drain_events()
-
-            await self._after_drain(spawned_any)
+            await self._execute_cycle()
         except Exception as e:
             await self._abort(e)
-
-    async def drain_events(self):
-        """Process queued events after tool loop completes. Public for Drainable protocol."""
-        if self.state_machine.current_state == AgentState.COMPLETED:
-            return
-
-        event = self.pop_event()
-        if event is None:
-            return
-
-        self._log.info(
-            "drain_event",
-            "Draining deferred event | trigger_task_id={}, child_result_count={}".format(
-                getattr(event, 'trigger_task_id', 'N/A'), len(getattr(event, 'child_results', {}))
-            ),
-            trigger_task_id=getattr(event, 'trigger_task_id', 'N/A'),
-            child_result_count=len(getattr(event, 'child_results', {})),
-            error=getattr(event, 'error', False),
-        )
-
-        if isinstance(event, ChildCompletionEvent):
-            await self.resume_from_children(event.formatted_prompt, event.child_results)
-
-    async def _after_drain(self, spawned_any: bool) -> Optional[str]:
-        """Branch after drain_events(). State machine is source of truth.
-
-        drain_events() may recursively call resume_from_children(), which
-        can spawn children or finish on its own. So after drain returns, the
-        local spawned_any may be stale — check state machine first.
-
-        Returns str if fully handled (caller should return it), None otherwise.
-        """
-        state = self.state_machine.current_state
-
-        # Drain already triggered full completion chain
-        if state == AgentState.COMPLETED:
-            return self._final_result
-
-        # Inner drain's _abort() already transitioned to ERROR
-        if state == AgentState.ERROR:
-            return self._final_result
-
-        # Drain's inner resume_from_children already spawned and transitioned
-        if state == AgentState.WAITING_FOR_CHILDREN:
-            return "[Waiting for sub-agents to report back...]"
-
-        # State is still RUNNING — drain did nothing, trust local spawned_any
-        if spawned_any:
-            self._log.info(
-                "waiting_for_children",
-                "Spawned child agents detected, transitioning to WAITING_FOR_CHILDREN",
-            )
-            prev_state = self.state
-            self.state_machine.trigger("spawn_children")
-            self._log.state_change(prev_state.value, self.state.value, "spawn_children", trigger_location="_after_drain()")
-            return "[Waiting for sub-agents to report back...]"
-        else:
-            if self._has_pending_children():
-                self._log.info(
-                    "waiting_for_pending_children",
-                    "No new spawns but pending children exist, waiting for them to complete",
-                )
-                prev_state = self.state
-                self.state_machine.trigger("spawn_children")
-                self._log.state_change(prev_state.value, self.state.value, "spawn_children", trigger_location="_after_drain() - pending children")
-                return "[Waiting for sub-agents to report back...]"
-
-            self._log.info(
-                "agent_direct_complete",
-                "Agent finished without spawning children, proceeding to finalize",
-            )
-            await self._finish_and_notify()
-            return None
 
     def _has_pending_children(self) -> bool:
         task = self.registry.get_task(self.task_id)

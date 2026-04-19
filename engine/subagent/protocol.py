@@ -12,19 +12,15 @@ if TYPE_CHECKING:
 
 @runtime_checkable
 class Drainable(Protocol):
-    """Protocol for objects whose event queues can be drained.
+    """Protocol for objects that support async resume and abort.
 
-    Implementors must expose their current state, allow async event draining,
+    Implementors must expose their current state, support resuming from children,
     and support async abort with an error.
     """
 
     @property
     def state(self) -> AgentState:
         """Current agent state."""
-        ...
-
-    async def drain_events(self) -> None:
-        """Process / drain the internal event queue."""
         ...
 
     async def resume_from_children(
