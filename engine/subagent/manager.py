@@ -288,6 +288,7 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
             if (_ct and _ct.agent)
             else None
         ) or "Child({})".format(task_id[:8])
+        _child_depth = _ct.depth if _ct else 0
 
         # [Gate 1] Still have pending children → return
         if info.pending_children > 0:
@@ -298,7 +299,7 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
                     task_id, info.pending_children
                 ),
                 task_id=task_id, state="running",
-                depth=self._registry._tasks[task_id].depth if task_id in self._registry._tasks else 0,
+                depth=_child_depth,
                 event_type="registry_complete_blocked_children",
                 data={"pending_children": info.pending_children, "result_length": 0}
             )
@@ -317,23 +318,14 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
                     task_id, info.parent_task_id, info.pending_siblings
                 ),
                 task_id=task_id, state="running",
-                depth=self._registry._tasks[task_id].depth if task_id in self._registry._tasks else 0,
+                depth=_child_depth,
                 event_type="registry_complete_blocked_siblings",
                 data={"parent_task_id": info.parent_task_id, "pending_siblings": info.pending_siblings}
             )
             return
 
         # All gates passed → collect results and notify parent
-        child_results = self._registry.collect_child_results(self._agent_task_id)
-
-        task_depth = self._registry._tasks[task_id].depth if task_id in self._registry._tasks else 0
-
-        # Cleanup: remove collected children from _tasks and parent's child_task_ids
-        parent_task = self._registry.get_task(self._agent_task_id)
-        if parent_task:
-            parent_task.child_task_ids.clear()
-            for child_id in child_results:
-                self._registry._tasks.pop(child_id, None)
+        child_results = await self._registry.collect_and_cleanup(self._agent_task_id)
 
         parent_state = self._drainable.state
         branch = (
@@ -349,7 +341,7 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
             "All gates passed, notifying parent | task_id={}, parent_task_id={}, branch={}, parent_state={}, child_count={}".format(
                 task_id, self._agent_task_id, branch, parent_state.value, len(child_results)
             ),
-            task_id=task_id, state="running", depth=task_depth,
+            task_id=task_id, state="running", depth=_child_depth,
             event_type="registry_notify_parent",
             data={"parent_task_id": self._agent_task_id, "parent_state": parent_state.value, "branch": branch, "child_result_count": len(child_results), "child_ids": child_ids}
         )
@@ -379,7 +371,7 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
                     "Parent already completed, re-propagating notification to grandparent | parent_task_id={}".format(
                         self._agent_task_id),
                     task_id=self._agent_task_id, state="completed",
-                    depth=self._registry._tasks[self._agent_task_id].depth if self._agent_task_id in self._registry._tasks else 0,
+                    depth=self._registry.get_task_depth(self._agent_task_id),
                     event_type="registry_repropagate_completed_parent",
                     data={"parent_task_id": self._agent_task_id},
                 )
