@@ -249,5 +249,39 @@ class SubagentRegistry:
                 )
         return results
 
+    def get_task_depth(self, task_id: str) -> int:
+        """Get the depth of a task.
+
+        Args:
+            task_id: The task ID to look up.
+
+        Returns:
+            The task's depth, or 0 if the task is not found.
+        """
+        task = self._tasks.get(task_id)
+        return task.depth if task else 0
+
+    async def collect_and_cleanup(
+        self, parent_task_id: str
+    ) -> Dict[str, CollectedChildResult]:
+        """Atomically collect child results, clear parent's child list, and remove child tasks.
+
+        All operations are performed inside the registry lock for consistency.
+
+        Args:
+            parent_task_id: The parent task whose children should be collected and cleaned.
+
+        Returns:
+            Mapping from child task ID to CollectedChildResult.
+        """
+        async with self._lock:
+            results = self.collect_child_results(parent_task_id)
+            parent = self._tasks.get(parent_task_id)
+            if parent:
+                parent.child_task_ids.clear()
+                for child_id in results:
+                    self._tasks.pop(child_id, None)
+            return results
+
 
 __all__ = ["CompleteInfo", "SubagentRegistry"]
