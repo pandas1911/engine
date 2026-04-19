@@ -7,12 +7,14 @@ This module consolidates logic from:
 """
 
 import asyncio
+import json
 import uuid
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from engine.models import AgentState, Session
 from engine.config import Config
 from engine.logger import get_logger
+from engine.safety import ResultTruncator
 from engine.subagent.events import AgentEvent, ChildCompletionEvent
 from engine.subagent.models import CollectedChildResult
 from engine.subagent.registry import CompleteInfo, SubagentRegistry
@@ -39,6 +41,7 @@ class SubAgentManager:
         drainable: "Drainable",
         agent_task_id: str,
         parent_label: str,
+        config: Optional[Config] = None,
     ):
         """
         Args:
@@ -47,12 +50,14 @@ class SubAgentManager:
             drainable: Drainable protocol (the Agent)
             agent_task_id: THIS agent's task_id
             parent_label: Display label for logging
+            config: Runtime configuration (used for result truncation limits)
         """
         self._registry = registry
         self._event_queue = event_queue
         self._drainable = drainable
         self._agent_task_id = agent_task_id
         self._parent_label = parent_label
+        self._config = config
         self._child_counter = 0
         # Register handler: when any child of this agent completes,
         # registry routes the callback here
@@ -401,7 +406,7 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
     # ------------------------------------------------------------------
 
     def _format_child_results(self, child_results: Dict[str, CollectedChildResult]) -> str:
-        """Format child results into a prompt for the parent agent.
+        """Format child results into a JSON prompt for the parent agent.
 
         Args:
             child_results: Mapping from child task ID to collected result.
@@ -409,14 +414,21 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
         Returns:
             Formatted string ready to be injected as a user message.
         """
-        if child_results:
-            findings_prompt = "All sub-agents have completed their tasks. Below is a summary of their results.\n\n"
-            for task_id, info in child_results.items():
-                findings_prompt += (
-                    f"--- Task ID: {task_id} ---\nTask: {info.task_description}\nResult: {info.result}\n\n"
-                )
-        else:
-            findings_prompt = "[WARNING] All sub-agents have completed their tasks, but no results were collected."
+        if not child_results:
+            return "[WARNING] All sub-agents have completed their tasks, but no results were collected."
+
+        max_len = self._config.max_result_length if self._config else 4000
+        findings_prompt = "All sub-agents have completed their tasks. Below are their results.\n\n"
+
+        for task_id, info in child_results.items():
+            truncated = ResultTruncator.truncate(info.result, max_len)
+            entry = {
+                "task_id": task_id,
+                "task": info.task_description,
+                "result": truncated,
+            }
+            findings_prompt += json.dumps(entry, ensure_ascii=False) + "\n"
+
         return findings_prompt
 
     # ------------------------------------------------------------------

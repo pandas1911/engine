@@ -17,7 +17,7 @@ class Config:
     max_concurrent_agents: int = 10
     agent_timeout: float = 300.0
     max_registry_size: int = 1000
-    max_result_length: int = 4000
+    max_result_length: int = 2500
     log_dir: Optional[str] = None
 
 

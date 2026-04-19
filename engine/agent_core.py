@@ -74,6 +74,7 @@ class Agent:
             drainable=self,
             agent_task_id=self.task_id,
             parent_label=self.label,
+            config=self.config,
         )
         # Use provided registry or create new one
         self._tool_registry = tool_registry or ToolRegistry()
