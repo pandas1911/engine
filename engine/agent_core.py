@@ -449,6 +449,10 @@ class Agent:
         if state == AgentState.COMPLETED:
             return self._final_result
 
+        # Inner drain's _abort() already transitioned to ERROR
+        if state == AgentState.ERROR:
+            return self._final_result
+
         # Drain's inner resume_from_children already spawned and transitioned
         if state == AgentState.WAITING_FOR_CHILDREN:
             return "[Waiting for sub-agents to report back...]"
