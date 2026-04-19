@@ -16,7 +16,7 @@ from engine.subagent.manager import SubAgentManager
 from engine.state_machine import AgentStateMachine
 from engine.tools.base import ToolRegistry
 from engine.llm_provider import MockLLMProvider, LLMProviderError
-from engine.logger import get_logger
+from engine.agent_log import AgentLogHelper
 
 if TYPE_CHECKING:
     from engine.llm_provider import LLMProvider
@@ -57,6 +57,12 @@ class Agent:
         self._completion_event = asyncio.Event()
         self._error_info: Optional[AgentError] = None
         self.display_id = f"[{self.label}|{self.task_id}]"
+        self._log = AgentLogHelper(
+            label=self.label,
+            task_id=self.task_id,
+            state_getter=lambda: self.state_machine.current_state,
+            depth_getter=lambda: self.session.depth,
+        )
         self._event_queue: List[
             AgentEvent
         ] = []  # Deferred event queue (native list, Swift Array equivalent)
@@ -82,23 +88,18 @@ class Agent:
             spawn_tool = self._subagent_mgr.create_spawn_tool()
             self._tool_registry.register_spawn(spawn_tool)
 
-        logger = get_logger()
-        logger.info(
-            self.label,
+        self._log.info(
+            "agent_init",
             "Agent instance created | session_id={}, depth={}, parent_task_id={}, spawn_enabled={}, tool_count={}, max_iterations={}".format(
                 self.session.id, self.session.depth,
                 self.parent_task_id or "None (root)",
                 self.session.depth < self.config.max_depth,
                 len(self._tool_registry), self.MAX_TOOL_ITERATIONS,
             ),
-            task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-            event_type="agent_init",
-            data={
-                "session_id": self.session.id,
-                "parent_task_id": self.parent_task_id,
-                "spawn_enabled": self.session.depth < self.config.max_depth,
-                "tool_count": len(self._tool_registry),
-            }
+            session_id=self.session.id,
+            parent_task_id=self.parent_task_id,
+            spawn_enabled=self.session.depth < self.config.max_depth,
+            tool_count=len(self._tool_registry),
         )
 
     @property
@@ -150,23 +151,18 @@ class Agent:
 
         prev_state = self.state
         self.state_machine.trigger("start")
-        logger = get_logger()
         message_preview = (message[:200] + "...") if message and len(message) > 200 else (message or "None")
-        logger.info(
-            self.label,
+        self._log.info(
+            "agent_run_start",
             "Agent run started | incoming_message_length={}, session_message_count={}, message_preview=\"{}\"".format(
                 len(message) if message else 0,
                 len(self.session.messages), message_preview,
             ),
-            task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-            event_type="agent_run_start",
-            data={
-                "message_length": len(message) if message else 0,
-                "session_msg_count": len(self.session.messages),
-                "message_preview": message_preview,
-            }
+            message_length=len(message) if message else 0,
+            session_msg_count=len(self.session.messages),
+            message_preview=message_preview,
         )
-        logger.state_change(self.label, prev_state.value, self.state.value, "start", task_id=self.task_id, depth=self.session.depth, data={"trigger_location": "run()"})
+        self._log.state_change(prev_state.value, self.state.value, "start", trigger_location="run()")
 
         try:
             spawned_any = await self._process_tool_calls()
@@ -196,27 +192,23 @@ class Agent:
             iteration += 1
 
             if iteration == 1:
-                logger = get_logger()
-                logger.info(
-                    self.label,
+                self._log.info(
+                    "tool_loop_start",
                     "Tool call loop starting | max_iterations={}".format(self.MAX_TOOL_ITERATIONS),
-                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                    event_type="tool_loop_start",
-                    data={"max_iterations": self.MAX_TOOL_ITERATIONS}
+                    max_iterations=self.MAX_TOOL_ITERATIONS,
                 )
 
             if self.llm is None:
                 break
 
-            logger = get_logger()
-            logger.info(
-                self.label,
+            self._log.info(
+                "llm_request",
                 "Sending request to LLM | iteration={}/{}, message_count={}".format(
                     iteration, self.MAX_TOOL_ITERATIONS, len(self.session.messages)
                 ),
-                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                event_type="llm_request",
-                data={"iteration": iteration, "max_iterations": self.MAX_TOOL_ITERATIONS, "message_count": len(self.session.messages)}
+                iteration=iteration,
+                max_iterations=self.MAX_TOOL_ITERATIONS,
+                message_count=len(self.session.messages),
             )
 
             response = await self.llm.chat(
@@ -229,15 +221,13 @@ class Agent:
 
             if not response.has_tool_calls():
                 content_preview = (response.content[:500] + "...") if response.content and len(response.content) > 500 else (response.content or "None")
-                logger = get_logger()
-                logger.info(
-                    self.label,
+                self._log.info(
+                    "llm_text_response",
                     "LLM returned text response (no tool calls) | content_length={}, content_preview=\"{}\"".format(
                         len(response.content) if response.content else 0, content_preview
                     ),
-                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                    event_type="llm_text_response",
-                    data={"content_length": len(response.content) if response.content else 0, "content_preview": content_preview}
+                    content_length=len(response.content) if response.content else 0,
+                    content_preview=content_preview,
                 )
                 if response.content:
                     self.session.add_message("assistant", response.content)
@@ -264,15 +254,14 @@ class Agent:
             )
 
             tool_names = [tc.name for tc in response.tool_calls]
-            logger = get_logger()
-            logger.info(
-                self.label,
+            self._log.info(
+                "llm_tool_calls",
                 "LLM requested {} tool call(s) | tools={}, iteration={}/{}".format(
                     len(response.tool_calls), tool_names, iteration, self.MAX_TOOL_ITERATIONS
                 ),
-                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                event_type="llm_tool_calls",
-                data={"tool_count": len(response.tool_calls), "tool_names": tool_names, "iteration": iteration}
+                tool_count=len(response.tool_calls),
+                tool_names=tool_names,
+                iteration=iteration,
             )
 
             for tool_call in response.tool_calls:
@@ -283,15 +272,13 @@ class Agent:
                     spawned = True
 
         if iteration >= self.MAX_TOOL_ITERATIONS:
-            logger = get_logger()
-            logger.error(
-                self.label,
+            self._log.error(
+                "iteration_limit",
                 "Tool call loop hit iteration limit ({}) | has_final_result={}".format(
                     self.MAX_TOOL_ITERATIONS, self._final_result is not None
                 ),
-                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                event_type="iteration_limit",
-                data={"max_iterations": self.MAX_TOOL_ITERATIONS, "has_final_result": self._final_result is not None}
+                max_iterations=self.MAX_TOOL_ITERATIONS,
+                has_final_result=self._final_result is not None,
             )
             self._final_result = self._final_result or "[WARNING] Maximum tool call iterations reached."
 
@@ -308,25 +295,22 @@ class Agent:
         """
         tool = self._tool_registry.get(tool_call.name)
 
-        logger = get_logger()
-        logger.tool(
-            self.label,
+        self._log.tool(
+            tool_call.name,
             "Executing tool '{}' | call_id={}, arguments={}".format(
                 tool_call.name, tool_call.call_id,
                 json.dumps(tool_call.arguments, ensure_ascii=False) if isinstance(tool_call.arguments, dict) else tool_call.arguments
             ),
-            task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-            tool_name=tool_call.name,
-            data={"call_id": tool_call.call_id, "arguments": tool_call.arguments}
+            call_id=tool_call.call_id,
+            arguments=tool_call.arguments,
         )
 
         if not tool:
-            logger.error(
-                self.label,
+            self._log.error(
+                "tool_not_found",
                 "Tool '{}' not found in registry | call_id={}".format(tool_call.name, tool_call.call_id),
-                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                event_type="tool_not_found",
-                data={"tool_name": tool_call.name, "call_id": tool_call.call_id}
+                tool_name=tool_call.name,
+                call_id=tool_call.call_id,
             )
             return f"[ERROR] Tool not found: '{tool_call.name}' is not registered."
 
@@ -342,25 +326,24 @@ class Agent:
         try:
             result = await tool.execute(tool_call.arguments, context)
             result_preview = (result[:500] + "...") if len(result) > 500 else result
-            logger.tool(
-                self.label,
+            self._log.tool(
+                tool_call.name,
                 "Tool '{}' completed | result_length={}, result_preview=\"{}\"".format(
                     tool_call.name, len(result), result_preview
                 ),
-                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                tool_name=tool_call.name,
-                data={"result_length": len(result), "result_preview": result_preview}
+                result_length=len(result),
+                result_preview=result_preview,
             )
             return result
         except Exception as e:
-            logger.error(
-                self.label,
+            self._log.error(
+                "tool_error",
                 "Tool '{}' execution failed | error_type={}, error=\"{}\"".format(
                     tool_call.name, type(e).__name__, str(e)
                 ),
-                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                event_type="tool_error",
-                data={"tool_name": tool_call.name, "error_type": type(e).__name__, "error_message": str(e)}
+                tool_name=tool_call.name,
+                error_type=type(e).__name__,
+                error_message=str(e),
             )
             return f"[ERROR] Tool '{tool_call.name}' execution failed: {type(e).__name__}: {str(e)}"
 
@@ -370,10 +353,8 @@ class Agent:
             if self.state_machine.current_state == AgentState.WAITING_FOR_CHILDREN:
                 prev_state = self.state
                 self.state_machine.trigger("children_settled")
-                logger = get_logger()
-                logger.state_change(self.label, prev_state.value, self.state.value, "children_settled", task_id=self.task_id, depth=self.session.depth, data={"trigger_location": "resume_from_children()"})
+                self._log.state_change(prev_state.value, self.state.value, "children_settled", trigger_location="resume_from_children()")
 
-            logger = get_logger()
             if child_results:
                 result_summaries = {}
                 for tid, info in child_results.items():
@@ -382,22 +363,20 @@ class Agent:
                         "result_length": len(info.result),
                         "result_preview": info.result[:200] + "..." if len(info.result) > 200 else info.result,
                     }
-                logger.info(
-                    self.label,
+                self._log.info(
+                    "children_results",
                     "Resuming from children | collected {} child result(s), child_task_ids={}".format(
                         len(child_results), list(child_results.keys())
                     ),
-                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                    event_type="children_results",
-                    data={"child_count": len(child_results), "child_task_ids": list(child_results.keys()), "results_summary": result_summaries}
+                    child_count=len(child_results),
+                    child_task_ids=list(child_results.keys()),
+                    results_summary=result_summaries,
                 )
             else:
-                logger.info(
-                    self.label,
+                self._log.info(
+                    "children_results",
                     "Resuming from children | no child results collected",
-                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                    event_type="children_results",
-                    data={"child_count": 0}
+                    child_count=0,
                 )
 
             self.session.add_message("user", formatted_prompt)
@@ -420,15 +399,14 @@ class Agent:
         if event is None:
             return
 
-        logger = get_logger()
-        logger.info(
-            self.label,
+        self._log.info(
+            "drain_event",
             "Draining deferred event | trigger_task_id={}, child_result_count={}".format(
                 getattr(event, 'trigger_task_id', 'N/A'), len(getattr(event, 'child_results', {}))
             ),
-            task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-            event_type="drain_event",
-            data={"trigger_task_id": getattr(event, 'trigger_task_id', 'N/A'), "child_result_count": len(getattr(event, 'child_results', {})), "error": getattr(event, 'error', False)}
+            trigger_task_id=getattr(event, 'trigger_task_id', 'N/A'),
+            child_result_count=len(getattr(event, 'child_results', {})),
+            error=getattr(event, 'error', False),
         )
 
         if isinstance(event, ChildCompletionEvent):
@@ -459,37 +437,28 @@ class Agent:
 
         # State is still RUNNING — drain did nothing, trust local spawned_any
         if spawned_any:
-            logger = get_logger()
-            logger.info(
-                self.label,
+            self._log.info(
+                "waiting_for_children",
                 "Spawned child agents detected, transitioning to WAITING_FOR_CHILDREN",
-                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                event_type="waiting_for_children",
             )
             prev_state = self.state
             self.state_machine.trigger("spawn_children")
-            logger.state_change(self.label, prev_state.value, self.state.value, "spawn_children", task_id=self.task_id, depth=self.session.depth, data={"trigger_location": "_after_drain()"})
+            self._log.state_change(prev_state.value, self.state.value, "spawn_children", trigger_location="_after_drain()")
             return "[Waiting for sub-agents to report back...]"
         else:
             if self._has_pending_children():
-                logger = get_logger()
-                logger.info(
-                    self.label,
+                self._log.info(
+                    "waiting_for_pending_children",
                     "No new spawns but pending children exist, waiting for them to complete",
-                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                    event_type="waiting_for_pending_children",
                 )
                 prev_state = self.state
                 self.state_machine.trigger("spawn_children")
-                logger.state_change(self.label, prev_state.value, self.state.value, "spawn_children", task_id=self.task_id, depth=self.session.depth, data={"trigger_location": "_after_drain() - pending children"})
+                self._log.state_change(prev_state.value, self.state.value, "spawn_children", trigger_location="_after_drain() - pending children")
                 return "[Waiting for sub-agents to report back...]"
 
-            logger = get_logger()
-            logger.info(
-                self.label,
+            self._log.info(
+                "agent_direct_complete",
                 "Agent finished without spawning children, proceeding to finalize",
-                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                event_type="agent_direct_complete",
             )
             await self._finish_and_notify()
             return None
@@ -510,20 +479,13 @@ class Agent:
         """Unified crash handler. Never throws."""
         # Step 1: Log (best effort)
         try:
-            logger = get_logger()
-            logger.error(
-                self.label,
+            self._log.error(
+                "agent_abort",
                 "Agent aborted | error_type={}, error=\"{}\"".format(
                     type(error).__name__, str(error)
                 ),
-                task_id=self.task_id,
-                state=self.state.value,
-                depth=self.session.depth,
-                event_type="agent_abort",
-                data={
-                    "error_type": type(error).__name__,
-                    "error_message": str(error),
-                },
+                error_type=type(error).__name__,
+                error_message=str(error),
             )
         except Exception:
             pass
@@ -549,11 +511,9 @@ class Agent:
                     self.state_machine.trigger("error")
                     transitioned_to_error = True
                     try:
-                        logger = get_logger()
-                        logger.state_change(
-                            self.label, prev_state.value, self.state.value, "error",
-                            task_id=self.task_id, depth=self.session.depth,
-                            data={"trigger_location": "_abort()"},
+                        self._log.state_change(
+                            prev_state.value, self.state.value, "error",
+                            trigger_location="_abort()",
                         )
                     except Exception:
                         pass
@@ -580,22 +540,22 @@ class Agent:
         await self._abort(error)
 
     async def _finish_and_notify(self):
-        logger = get_logger()
         result_preview = (self._final_result[:300] + "...") if self._final_result and len(self._final_result) > 300 else self._final_result
-        logger.info(
-            self.label,
+        self._log.info(
+            "agent_finalize",
             "Agent finalizing | result_length={}, has_parent={}, session_message_count={}, result_preview=\"{}\"".format(
                 len(self._final_result) if self._final_result else 0,
                 self.parent_task_id is not None,
                 len(self.session.messages), result_preview
             ),
-            task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-            event_type="agent_finalize",
-            data={"result_length": len(self._final_result) if self._final_result else 0, "has_parent": self.parent_task_id is not None, "session_msg_count": len(self.session.messages), "result_preview": result_preview}
+            result_length=len(self._final_result) if self._final_result else 0,
+            has_parent=self.parent_task_id is not None,
+            session_msg_count=len(self.session.messages),
+            result_preview=result_preview,
         )
         prev_state = self.state
         self.state_machine.trigger("finish")
-        logger.state_change(self.label, prev_state.value, self.state.value, "finish", task_id=self.task_id, depth=self.session.depth, data={"trigger_location": "_finish_and_notify()"})
+        self._log.state_change(prev_state.value, self.state.value, "finish", trigger_location="_finish_and_notify()")
         self._completion_event.set()
 
         if self.parent_task_id:
