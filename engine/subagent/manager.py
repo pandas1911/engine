@@ -282,11 +282,18 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
             task_id: The completing child's task ID.
             info: Completion info from the registry (pending counts, parent).
         """
+        _ct = self._registry.get_task(task_id)
+        _child_label = (
+            getattr(_ct.agent, "label", None)
+            if (_ct and _ct.agent)
+            else None
+        ) or "Child({})".format(task_id[:8])
+
         # [Gate 1] Still have pending children → return
         if info.pending_children > 0:
             logger = get_logger()
             logger.info(
-                self._parent_label,
+                _child_label,
                 "Task completed but has pending children | task_id={}, pending_children={}".format(
                     task_id, info.pending_children
                 ),
@@ -305,7 +312,7 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
         if info.pending_siblings > 0:
             logger = get_logger()
             logger.info(
-                self._parent_label,
+                _child_label,
                 "Task completed but has pending siblings | task_id={}, parent_task_id={}, pending_siblings={}".format(
                     task_id, info.parent_task_id, info.pending_siblings
                 ),
@@ -338,7 +345,7 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
         child_ids = list(child_results.keys())
         logger = get_logger()
         logger.info(
-            self._parent_label,
+            _child_label,
             "All gates passed, notifying parent | task_id={}, parent_task_id={}, branch={}, parent_state={}, child_count={}".format(
                 task_id, self._agent_task_id, branch, parent_state.value, len(child_results)
             ),
