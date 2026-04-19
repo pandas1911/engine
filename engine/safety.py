@@ -42,8 +42,6 @@ class ConcurrencyLimiter:
 class ResultTruncator:
     """Truncates results to prevent unbounded result sizes."""
 
-    TRUNCATION_SUFFIX = "[truncated]"
-
     @staticmethod
     def truncate(result: str, max_length: int) -> str:
         """Truncate a result string if it exceeds max_length.
@@ -54,15 +52,18 @@ class ResultTruncator:
 
         Returns:
             The original string if within limits, or truncated string with suffix
+            that includes the original character count.
         """
-        if len(result) <= max_length:
+        original_length = len(result)
+        if original_length <= max_length:
             return result
 
-        available_length = max_length - len(ResultTruncator.TRUNCATION_SUFFIX)
+        suffix = "[truncated, original: {} chars]".format(original_length)
+        available_length = max_length - len(suffix)
         if available_length <= 0:
             return result[:max_length]
 
-        return result[:available_length] + ResultTruncator.TRUNCATION_SUFFIX
+        return result[:available_length] + suffix
 
 
 class RegistrySizeMonitor:
