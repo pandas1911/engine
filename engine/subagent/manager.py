@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from engine.models import AgentState, Session
 from engine.config import Config
-from engine.logger import get_logger
+from engine.logging import get_logger
 from engine.safety import ResultTruncator
 from engine.subagent.events import AgentEvent, ChildCompletionEvent
 from engine.subagent.models import CollectedChildResult

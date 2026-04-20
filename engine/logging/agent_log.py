@@ -2,7 +2,7 @@
 
 from typing import Any, Callable, Dict, Optional
 
-from engine.logger import get_logger
+from .sink import get_logger
 
 
 class AgentLogHelper:

@@ -16,7 +16,7 @@ from engine.subagent.manager import SubAgentManager
 from engine.state_machine import AgentStateMachine
 from engine.tools.base import ToolRegistry
 from engine.llm_provider import MockLLMProvider, LLMProviderError
-from engine.agent_log import AgentLogHelper
+from engine.logging.agent_log import AgentLogHelper
 
 if TYPE_CHECKING:
     from engine.llm_provider import LLMProvider

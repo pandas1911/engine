@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from openai import AsyncOpenAI
 
 from engine.config import Config
-from engine.logger import get_logger
+from engine.logging import get_logger
 from engine.models import LLMResponse, ToolCall
 
 

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Set
 
-from engine.logger import get_logger
+from engine.logging import get_logger
 from engine.subagent.models import CollectedChildResult, SubagentTask
 
 if TYPE_CHECKING:
