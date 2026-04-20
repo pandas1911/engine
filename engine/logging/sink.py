@@ -22,6 +22,10 @@ class LoggerInterface(ABC):
         pass
 
     @abstractmethod
+    def warning(self, agent_label: str, message: str, **kwargs) -> None:
+        pass
+
+    @abstractmethod
     def tool(self, agent_label: str, message: str, **kwargs) -> None:
         pass
 
@@ -52,13 +56,16 @@ class TerminalFormatter:
     YELLOW = "\033[33m"
     RED = "\033[31m"
     CYAN = "\033[36m"
+    MAGENTA = "\033[35m"
     RESET = "\033[0m"
 
     def format(self, entry: LogEntry) -> str:
         if entry.level == "error":
             color = self.RED
-        elif entry.event_type == "tool":
+        elif entry.level == "warning":
             color = self.YELLOW
+        elif entry.event_type == "tool":
+            color = self.MAGENTA
         elif entry.depth > 0:
             color = self.GREEN
         else:
@@ -227,6 +234,24 @@ class Logger(LoggerInterface):
         data = kwargs.get("data")
         entry = self._make_entry(
             level="error",
+            agent_label=agent_label,
+            message=message,
+            event_type=event_type,
+            task_id=task_id,
+            state=state,
+            depth=depth,
+            data=data,
+        )
+        self._output(entry)
+
+    def warning(self, agent_label: str, message: str, **kwargs) -> None:
+        task_id = kwargs.get("task_id", "unknown")
+        state = kwargs.get("state", "idle")
+        depth = kwargs.get("depth", 0)
+        event_type = kwargs.get("event_type", "warning")
+        data = kwargs.get("data")
+        entry = self._make_entry(
+            level="warning",
             agent_label=agent_label,
             message=message,
             event_type=event_type,

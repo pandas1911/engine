@@ -49,6 +49,18 @@ class AgentLogHelper:
             data=extra_data or None,
         )
 
+    def warning(self, event_type: str, message: str, **extra_data: Any) -> None:
+        """Log a warning event with bound agent context."""
+        get_logger().warning(
+            self._label,
+            message,
+            task_id=self._task_id,
+            state=self._state_getter().value,
+            depth=self._depth_getter(),
+            event_type=event_type,
+            data=extra_data or None,
+        )
+
     def tool(self, tool_name: str, message: str, **extra_data: Any) -> None:
         """Log a tool event with bound agent context."""
         data: Dict[str, Any] = {"tool_name": tool_name}

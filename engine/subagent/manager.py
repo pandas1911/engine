@@ -422,6 +422,17 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
 
         for task_id, info in child_results.items():
             truncated = ResultTruncator.truncate(info.result, max_len)
+            if len(info.result) > max_len:
+                logger = get_logger()
+                logger.warning(
+                    "SubAgentManager",
+                    "Child result truncated | task_id={}, original={} chars, limit={} chars".format(
+                        task_id, len(info.result), max_len
+                    ),
+                    event_type="truncation",
+                    task_id=task_id,
+                    data={"original_length": len(info.result), "max_length": max_len},
+                )
             entry = {
                 "task_id": task_id,
                 "task": info.task_description,
