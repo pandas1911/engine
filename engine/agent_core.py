@@ -66,7 +66,6 @@ class Agent:
         self._event_queue: List[
             AgentEvent
         ] = []  # Deferred event queue (native list, Swift Array equivalent)
-        self._child_counter = 0  # Child agent naming counter
         # SubAgentManager handles child spawning and notification
         self._subagent_mgr = SubAgentManager(
             registry=self.registry,

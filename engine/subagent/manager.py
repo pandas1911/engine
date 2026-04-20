@@ -8,6 +8,7 @@ This module consolidates logic from:
 
 import asyncio
 import json
+import re
 import uuid
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
@@ -114,7 +115,8 @@ class SubAgentManager:
         self._child_counter += 1
         child_index = self._child_counter
         child_depth = child_session.depth
-        display_name = "Sub-{}(d:{})".format(child_index, child_depth)
+        path_index = self._build_path_index(parent_label, child_index)
+        display_name = "Sub-{}(d:{})".format(path_index, child_depth)
         llm_label = label
 
         logger = get_logger()
@@ -203,6 +205,31 @@ Task ID: {task_id}
 Agent Label: {label}
 
 Sub-agent is now executing in the background. Upon completion, you will be automatically re-activated and receive a full result report. You may proceed with other independent tasks or simply end your current turn."""
+
+    # ------------------------------------------------------------------
+    # _build_path_index() — generates dotted path index for child labels
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_path_index(parent_label: str, child_index: int) -> str:
+        """Build a dotted path index from parent label and child counter.
+
+        Root → "1", "2" ...
+        Sub-1(d:1) → "1.1", "1.2" ...
+        Sub-2.1(d:2) → "2.1.1", "2.1.2" ...
+
+        Args:
+            parent_label: Parent agent's display label (e.g. "Root", "Sub-1(d:1)").
+            child_index: This child's sequential index within the parent.
+
+        Returns:
+            Dotted path index string.
+        """
+        match = re.match(r"Sub-(.+?)\(d:\d+\)", parent_label)
+        if match:
+            return "{}.{}".format(match.group(1), child_index)
+        # Root or unrecognized label — start fresh
+        return str(child_index)
 
     # ------------------------------------------------------------------
     # _run_child() — migrated from SpawnTool._run_child_agent() (spawn.py lines 154-244)
