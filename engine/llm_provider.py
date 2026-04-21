@@ -178,21 +178,15 @@ class LLMProvider(BaseLLMProvider):
             if tool_calls:
                 logger = get_logger()
                 for tc in tool_calls:
-                    args_str = json.dumps(tc.arguments, ensure_ascii=False) if isinstance(tc.arguments, dict) else str(tc.arguments)
                     logger.tool(
                         agent_label,
-                        "LLM returned tool call | tool=\"{}\", call_id={}, arguments={}".format(
-                            tc.name, tc.call_id, args_str[:500] + "..." if len(args_str) > 500 else args_str
-                        ),
+                        "LLM returned tool call | tool=\"{}\", call_id={}".format(tc.name, tc.call_id),
                         task_id=task_id, state="running", depth=depth,
                         tool_name=tc.name,
                         data={"call_id": tc.call_id, "arguments": tc.arguments}
                     )
             elif content.strip():
                 logger = get_logger()
-                content_preview = content[:500].replace("\n", " ")
-                if len(content) > 500:
-                    content_preview += "..."
                 logger.info(
                     agent_label,
                     "LLM returned text response | content_length={}, thinking_stripped={}".format(
@@ -200,7 +194,7 @@ class LLMProvider(BaseLLMProvider):
                     ),
                     task_id=task_id, state="running", depth=depth,
                     event_type="llm_text_response",
-                    data={"content_length": len(content), "thinking_stripped": self.strip_thinking, "content_preview": content_preview}
+                    data={"content_length": len(content), "thinking_stripped": self.strip_thinking, "content": content}
                 )
 
             return LLMResponse(content=content, tool_calls=tool_calls)

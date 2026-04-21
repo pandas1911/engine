@@ -58,6 +58,19 @@ class TerminalFormatter:
     CYAN = "\033[36m"
     MAGENTA = "\033[35m"
     RESET = "\033[0m"
+    PREVIEW_LENGTH = 500
+
+    def _truncate_for_display(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Recursively truncate string values exceeding PREVIEW_LENGTH for terminal display."""
+        result = {}
+        for key, value in data.items():
+            if isinstance(value, str) and len(value) > self.PREVIEW_LENGTH:
+                result[key] = value[: self.PREVIEW_LENGTH] + "..."
+            elif isinstance(value, dict):
+                result[key] = self._truncate_for_display(value)
+            else:
+                result[key] = value
+        return result
 
     def format(self, entry: LogEntry) -> str:
         if entry.level == "error":
@@ -99,7 +112,9 @@ class TerminalFormatter:
 
         parts = [prefix, entry.message]
         if entry.data:
-            parts.append(json.dumps(entry.data, ensure_ascii=False))
+            display_data = self._truncate_for_display(entry.data)
+            if display_data:
+                parts.append(json.dumps(display_data, ensure_ascii=False))
         return " ".join(parts)
 
 

@@ -122,9 +122,8 @@ class SubAgentManager:
         logger = get_logger()
         logger.info(
             self._parent_label,
-            "Child agent spawned successfully | child_label=\"{}\", child_task_id={}, depth={}, can_spawn={}, task_description=\"{}\"".format(
-                display_name, task_id, child_depth, can_spawn,
-                task_desc[:300] + "..." if len(task_desc) > 300 else task_desc
+            "Child agent spawned successfully | child_task_id={}, depth={}, can_spawn={}".format(
+                task_id, child_depth, can_spawn,
             ),
             task_id=self._agent_task_id, state="running", depth=parent_session.depth,
             event_type="spawn_created",
@@ -256,7 +255,7 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
             logger = get_logger()
             logger.info(
                 display_name or "Sub",
-                "Child agent starting background execution | task=\"{}\"".format(task_desc[:200]),
+                "Child agent starting background execution",
                 task_id=task_id, state="idle", depth=depth,
                 event_type="child_run_start",
                 data={"task_description": task_desc}
@@ -265,7 +264,7 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
         except Exception as e:
             # Safety net — agent.run() should catch all exceptions internally via _abort()
             # If we reach here, _abort() or run() has a bug
-            await agent._abort(e)
+            await agent.abort(e)
             logger = get_logger()
             logger.error(
                 display_name or "Sub",
@@ -278,28 +277,23 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
             return
 
         # Log based on final state (registry.complete handled internally by agent)
-        state = agent.state_machine.current_state
+        state = agent.state
         if state == AgentState.COMPLETED:
-            result_preview = (
-                (agent._final_result[:500] + "...")
-                if agent._final_result and len(agent._final_result) > 500
-                else (agent._final_result or "None")
-            )
             logger = get_logger()
             logger.info(
                 display_name or "Sub",
                 "Child agent completed | result_length={}".format(
-                    len(agent._final_result) if agent._final_result else 0),
+                    len(agent.result) if agent.result else 0),
                 task_id=task_id, state="completed", depth=depth,
                 event_type="child_run_success",
-                data={"result_length": len(agent._final_result) if agent._final_result else 0,
-                      "result_preview": result_preview},
+                data={"result_length": len(agent.result) if agent.result else 0,
+                      "result": agent.result or ""},
             )
         elif state == AgentState.ERROR:
             logger = get_logger()
             logger.error(
                 display_name or "Sub",
-                "Child agent aborted | error={}".format(agent._final_result),
+                "Child agent aborted | error={}".format(agent.result),
                 task_id=task_id, state="error", depth=depth,
                 event_type="child_run_abort",
                 data={"error_result": agent._final_result},

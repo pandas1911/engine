@@ -23,6 +23,11 @@ class Drainable(Protocol):
         """Current agent state."""
         ...
 
+    @property
+    def result(self) -> Optional[str]:
+        """The agent's final result, or None if not yet available."""
+        ...
+
     async def resume_from_children(
         self,
         formatted_prompt: str,

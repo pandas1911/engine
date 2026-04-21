@@ -106,6 +106,10 @@ class Agent:
     def state(self) -> AgentState:
         return self.state_machine.current_state
 
+    @property
+    def result(self) -> Optional[str]:
+        return self._final_result
+
     def pop_event(self) -> Optional[AgentEvent]:
         """Pop the next event from the queue, or None if empty."""
         if self._event_queue:
@@ -151,16 +155,15 @@ class Agent:
 
         prev_state = self.state
         self.state_machine.trigger("start")
-        message_preview = (message[:200] + "...") if message and len(message) > 200 else (message or "None")
         self._log.info(
             "agent_run_start",
-            "Agent run started | incoming_message_length={}, session_message_count={}, message_preview=\"{}\"".format(
+            "Agent run started | incoming_message_length={}, session_message_count={}".format(
                 len(message) if message else 0,
-                len(self.session.messages), message_preview,
+                len(self.session.messages),
             ),
             message_length=len(message) if message else 0,
             session_msg_count=len(self.session.messages),
-            message_preview=message_preview,
+            log_message=message or "",
         )
         self._log.state_change(prev_state.value, self.state.value, "start", trigger_location="run()")
 
@@ -206,14 +209,13 @@ class Agent:
             )
 
             if not response.has_tool_calls():
-                content_preview = (response.content[:500] + "...") if response.content and len(response.content) > 500 else (response.content or "None")
                 self._log.info(
                     "llm_text_response",
-                    "LLM returned text response (no tool calls) | content_length={}, content_preview=\"{}\"".format(
-                        len(response.content) if response.content else 0, content_preview
+                    "LLM returned text response (no tool calls) | content_length={}".format(
+                        len(response.content) if response.content else 0,
                     ),
                     content_length=len(response.content) if response.content else 0,
-                    content_preview=content_preview,
+                    content=response.content or "",
                 )
                 if response.content:
                     self.session.add_message("assistant", response.content)
@@ -360,14 +362,11 @@ class Agent:
 
         try:
             result = await tool.execute(tool_call.arguments, context)
-            result_preview = (result[:500] + "...") if len(result) > 500 else result
             self._log.tool(
                 tool_call.name,
-                "Tool '{}' completed | result_length={}, result_preview=\"{}\"".format(
-                    tool_call.name, len(result), result_preview
-                ),
+                "Tool '{}' completed | result_length={}".format(tool_call.name, len(result)),
                 result_length=len(result),
-                result_preview=result_preview,
+                result=result,
             )
             return result
         except Exception as e:
@@ -396,7 +395,7 @@ class Agent:
                     result_summaries[tid] = {
                         "task_description": info.task_description,
                         "result_length": len(info.result),
-                        "result_preview": info.result[:200] + "..." if len(info.result) > 200 else info.result,
+                        "result": info.result,
                     }
                 self._log.info(
                     "children_results",
@@ -497,18 +496,17 @@ class Agent:
         await self._abort(error)
 
     async def _finish_and_notify(self):
-        result_preview = (self._final_result[:300] + "...") if self._final_result and len(self._final_result) > 300 else self._final_result
         self._log.info(
             "agent_finalize",
-            "Agent finalizing | result_length={}, has_parent={}, session_message_count={}, result_preview=\"{}\"".format(
+            "Agent finalizing | result_length={}, has_parent={}, session_message_count={}".format(
                 len(self._final_result) if self._final_result else 0,
                 self.parent_task_id is not None,
-                len(self.session.messages), result_preview
+                len(self.session.messages),
             ),
             result_length=len(self._final_result) if self._final_result else 0,
             has_parent=self.parent_task_id is not None,
             session_msg_count=len(self.session.messages),
-            result_preview=result_preview,
+            result=self._final_result or "",
         )
         prev_state = self.state
         self.state_machine.trigger("finish")
