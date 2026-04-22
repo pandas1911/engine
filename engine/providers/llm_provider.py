@@ -127,19 +127,6 @@ class LLMProvider(BaseLLMProvider):
             if max_tokens is not None:
                 params["max_tokens"] = max_tokens
 
-            last_user_msg = ""
-            for msg in reversed(messages):
-                if msg.get("role") == "user":
-                    content = msg.get("content", "")
-                    if (
-                        "[子代理" not in content
-                        and "[System Instructions]" not in content
-                    ):
-                        last_user_msg = (
-                            content[:50] + "..." if len(content) > 50 else content
-                        )
-                        break
-
             logger = get_logger()
             msg_roles = [m.get("role", "?") for m in messages]
             logger.info(

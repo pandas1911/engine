@@ -477,10 +477,7 @@ class Agent:
 
         self._log.tool(
             tool_call.name,
-            "Executing tool '{}' | call_id={}, arguments={}".format(
-                tool_call.name, tool_call.call_id,
-                json.dumps(tool_call.arguments, ensure_ascii=False) if isinstance(tool_call.arguments, dict) else tool_call.arguments
-            ),
+            "Executing tool '{}' | call_id={}".format(tool_call.name, tool_call.call_id),
             call_id=tool_call.call_id,
             arguments=tool_call.arguments,
         )
