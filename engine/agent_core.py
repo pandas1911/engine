@@ -176,6 +176,7 @@ class Agent:
     async def _process_tool_calls(self) -> None:
         """Process tool calls from the LLM."""
         iteration = 0
+        warning_injected = False
 
         while iteration < self.MAX_TOOL_ITERATIONS:
             iteration += 1
@@ -189,6 +190,23 @@ class Agent:
 
             if self.llm is None:
                 break
+
+            if (
+                not warning_injected
+                and self.config.summary_warning_reserve > 0
+                and iteration == self.MAX_TOOL_ITERATIONS - self.config.summary_warning_reserve
+            ):
+                self.session.add_message("user", self._build_summary_warning(iteration))
+                warning_injected = True
+                self._log.info(
+                    "summary_warning",
+                    "Iteration limit warning injected | remaining_iterations={}".format(
+                        self.config.summary_warning_reserve
+                    ),
+                    remaining_iterations=self.config.summary_warning_reserve,
+                    current_iteration=iteration,
+                    max_iterations=self.MAX_TOOL_ITERATIONS,
+                )
 
             self._log.info(
                 "llm_request",
@@ -265,9 +283,122 @@ class Agent:
                 max_iterations=self.MAX_TOOL_ITERATIONS,
                 has_final_result=self._final_result is not None,
             )
-            self._final_result = self._final_result or "[WARNING] Maximum tool call iterations reached."
+
+            if self.config.emergency_summary_enabled:
+                self._final_result = await self._emergency_summarize()
+            else:
+                self._final_result = self._final_result or "[WARNING] Maximum tool call iterations reached."
 
         return
+
+    def _build_summary_warning(self, current_iteration: int) -> str:
+        """Build the warning message injected when approaching iteration limit.
+
+        Args:
+            current_iteration: Current iteration number
+
+        Returns:
+            Warning message string to be added as a user message.
+        """
+        remaining = self.MAX_TOOL_ITERATIONS - current_iteration
+        return (
+            "[System Notice] You have {} tool call iteration(s) remaining. "
+            "Please stop making tool calls and provide your final comprehensive answer "
+            "based on all data you have collected so far. Do NOT make any more tool calls."
+        ).format(remaining)
+
+    async def _emergency_summarize(self) -> str:
+        """Force a final summary when iteration limit is reached without a text response.
+
+        Calls LLM one more time WITHOUT tools, forcing a text-only response.
+        Uses condensed message history to control token usage.
+
+        Returns:
+            Summary text, or fallback warning if summarization fails.
+        """
+        self._log.info(
+            "emergency_summary_start",
+            "Triggering emergency summary | context_messages={}".format(
+                self.config.emergency_summary_context_messages
+            ),
+            context_messages=self.config.emergency_summary_context_messages,
+            total_session_messages=len(self.session.messages),
+        )
+
+        condensed = self._build_condensed_messages(
+            self.config.emergency_summary_context_messages
+        )
+
+        condensed.append({
+            "role": "user",
+            "content": (
+                "[System] You have exhausted all available tool call iterations. "
+                "You MUST now provide a comprehensive final answer based on all the "
+                "data and results you have gathered. Structure your answer clearly."
+            ),
+        })
+
+        try:
+            response = await self.llm.chat(
+                messages=condensed,
+                tools=[],  # Empty tools — force text-only response
+                agent_label=self.label,
+                task_id=self.task_id,
+                depth=self.session.depth,
+            )
+
+            result = response.content or "[WARNING] Emergency summary returned empty."
+
+            self._log.info(
+                "emergency_summary_complete",
+                "Emergency summary generated | result_length={}".format(len(result)),
+                result_length=len(result),
+                result=result,
+            )
+
+            self.session.add_message("assistant", result)
+
+            return result
+
+        except Exception as e:
+            self._log.error(
+                "emergency_summary_failed",
+                "Emergency summary failed | error_type={}, error={}".format(
+                    type(e).__name__, str(e)
+                ),
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
+            return "[WARNING] Maximum tool call iterations reached (summary generation failed)."
+
+    def _build_condensed_messages(self, keep_count: int) -> List[Dict]:
+        """Build a condensed message list for emergency summary.
+
+        Strategy: always keep ALL system messages (there may be multiple) +
+        last N non-system messages (most recent data).
+        If keep_count is 0, returns the full session unchanged.
+
+        Args:
+            keep_count: Number of recent non-system messages to keep.
+                        0 means keep everything (use full session).
+
+        Returns:
+            Condensed list of message dicts ready for LLM chat.
+        """
+        all_msgs = self.session.get_messages()
+
+        if keep_count <= 0:
+            return list(all_msgs)
+
+        system_msgs = [m for m in all_msgs if m.get("role") == "system"]
+        non_system_msgs = [m for m in all_msgs if m.get("role") != "system"]
+
+        recent_non_system = non_system_msgs[-keep_count:]
+
+        condensed = list(system_msgs)
+        condensed.extend(recent_non_system)
+
+        return condensed
 
     async def _execute_cycle(self) -> str:
         """Core execution: tool calls → drain events → decide next state.

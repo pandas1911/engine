@@ -18,6 +18,10 @@ class Config:
     agent_timeout: float = 300.0
     max_registry_size: int = 1000
     max_result_length: int = 2500
+    # Iteration guard configuration
+    summary_warning_reserve: int = 2  # iterations remaining when warning is injected (0 = disabled)
+    emergency_summary_enabled: bool = True  # force a final summary call when loop exhausts
+    emergency_summary_context_messages: int = 0  # messages to keep for emergency summary (0 = use full session)
     log_dir: Optional[str] = None
 
 
