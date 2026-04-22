@@ -8,7 +8,7 @@ import json
 import uuid
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from engine.models import AgentState, ErrorCategory, AgentError, LLMResponse, Session, ToolCall
+from engine.models import AgentState, ErrorCategory, AgentError, Session, ToolCall
 from engine.config import Config
 from engine.subagent.registry import SubagentRegistry
 from engine.subagent.events import AgentEvent, ChildCompletionEvent
@@ -20,7 +20,6 @@ from engine.logging.agent_log import AgentLogHelper
 
 if TYPE_CHECKING:
     from engine.llm_provider import LLMProvider
-    from engine.subagent.models import CollectedChildResult
 
 
 class Agent:
@@ -149,23 +148,35 @@ class Agent:
             label=label,
         )
 
-    async def run(self, message: Optional[str] = None) -> str:
+    async def run(self, message: Optional[str] = None, *, trigger: str = "start") -> str:
         if message:
             self.session.add_message("user", message)
 
-        prev_state = self.state
-        self.state_machine.trigger("start")
-        self._log.info(
-            "agent_run_start",
-            "Agent run started | incoming_message_length={}, session_message_count={}".format(
-                len(message) if message else 0,
-                len(self.session.messages),
-            ),
-            message_length=len(message) if message else 0,
-            session_msg_count=len(self.session.messages),
-            log_message=message or "",
-        )
-        self._log.state_change(prev_state.value, self.state.value, "start", trigger_location="run()")
+        if self.state_machine.can_trigger(trigger):
+            prev_state = self.state
+            self.state_machine.trigger(trigger)
+            if trigger == "start":
+                self._log.info(
+                    "agent_run_start",
+                    "Agent run started | incoming_message_length={}, session_message_count={}".format(
+                        len(message) if message else 0,
+                        len(self.session.messages),
+                    ),
+                    message_length=len(message) if message else 0,
+                    session_msg_count=len(self.session.messages),
+                    log_message=message or "",
+                )
+            elif trigger == "children_settled":
+                self._log.info(
+                    "agent_resume",
+                    "Agent resuming from children | incoming_message_length={}, session_message_count={}".format(
+                        len(message) if message else 0,
+                        len(self.session.messages),
+                    ),
+                    message_length=len(message) if message else 0,
+                    session_msg_count=len(self.session.messages),
+                )
+            self._log.state_change(prev_state.value, self.state.value, trigger, trigger_location="run()")
 
         try:
             return await self._execute_cycle()
@@ -404,7 +415,7 @@ class Agent:
         """Core execution: tool calls → drain events → decide next state.
 
         Linear flow (no recursion, no outer loop). Every path ends with return.
-        Shared by run() and resume_from_children().
+        Shared by run() for both start and children_settled triggers.
         """
         if self.state != AgentState.RUNNING:
             return self._final_result or ""
@@ -511,44 +522,6 @@ class Agent:
                 error_message=str(e),
             )
             return f"[ERROR] Tool '{tool_call.name}' execution failed: {type(e).__name__}: {str(e)}"
-
-    async def resume_from_children(self, formatted_prompt: str, child_results: Optional[Dict[str, "CollectedChildResult"]] = None):
-        """Continue processing after all children complete. Accepts pre-formatted prompt from SubAgentManager."""
-        try:
-            if self.state_machine.current_state == AgentState.WAITING_FOR_CHILDREN:
-                prev_state = self.state
-                self.state_machine.trigger("children_settled")
-                self._log.state_change(prev_state.value, self.state.value, "children_settled", trigger_location="resume_from_children()")
-
-            if child_results:
-                result_summaries = {}
-                for tid, info in child_results.items():
-                    result_summaries[tid] = {
-                        "task_description": info.task_description,
-                        "result_length": len(info.result),
-                        "result": info.result,
-                    }
-                self._log.info(
-                    "children_results",
-                    "Resuming from children | collected {} child result(s), child_task_ids={}".format(
-                        len(child_results), list(child_results.keys())
-                    ),
-                    child_count=len(child_results),
-                    child_task_ids=list(child_results.keys()),
-                    results_summary=result_summaries,
-                )
-            else:
-                self._log.info(
-                    "children_results",
-                    "Resuming from children | no child results collected",
-                    child_count=0,
-                )
-
-            self.session.add_message("user", formatted_prompt)
-
-            await self._execute_cycle()
-        except Exception as e:
-            await self._abort(e)
 
     def _has_pending_children(self) -> bool:
         task = self.registry.get_task(self.task_id)

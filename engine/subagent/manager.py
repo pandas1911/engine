@@ -3,7 +3,7 @@
 This module consolidates logic from:
 - SpawnTool.execute() and _run_child_agent() (engine/tools/builtin/spawn.py)
 - Registry.complete() gate checks + Branch A/B (engine/registry.py)
-- Agent.resume_from_children() prompt formatting (engine/agent_core.py)
+- Agent.run() with trigger="children_settled" prompt formatting (engine/agent_core.py)
 """
 
 import asyncio
@@ -32,7 +32,7 @@ class SubAgentManager:
     - Spawns child agents (logic migrated from SpawnTool.execute)
     - Runs child agents in background tasks (from SpawnTool._run_child_agent)
     - Handles child completion via handler chain (from Registry.complete gate checks)
-    - Formats child results for parent consumption (from Agent.resume_from_children)
+    - Formats child results for parent consumption (from Agent.run with trigger="children_settled")
     """
 
     def __init__(
@@ -380,15 +380,33 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
             else "unknown"
         )
         child_ids = list(child_results.keys())
+
+        # Build per-child result summaries for logging
+        result_summaries = {}
+        if child_results:
+            for tid, info in child_results.items():
+                result_summaries[tid] = {
+                    "task_description": info.task_description,
+                    "result_length": len(info.result),
+                    "result": info.result,
+                }
+
         logger = get_logger()
         logger.info(
             _child_label,
-            "All gates passed, notifying parent | task_id={}, parent_task_id={}, branch={}, parent_state={}, child_count={}".format(
+            "All children completed, notifying parent | task_id={}, parent_task_id={}, branch={}, parent_state={}, child_count={}".format(
                 task_id, self._agent_task_id, branch, parent_state.value, len(child_results)
             ),
             task_id=task_id, state="running", depth=_child_depth,
             event_type="registry_notify_parent",
-            data={"parent_task_id": self._agent_task_id, "parent_state": parent_state.value, "branch": branch, "child_result_count": len(child_results), "child_ids": child_ids}
+            data={
+                "parent_task_id": self._agent_task_id,
+                "parent_state": parent_state.value,
+                "branch": branch,
+                "child_count": len(child_results),
+                "child_ids": child_ids,
+                "results_summary": result_summaries,
+            }
         )
 
         formatted = self._format_child_results(child_results)
@@ -396,7 +414,7 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
         # [Branch A] Parent waiting for children → direct resume, bypass queue
         if parent_state == AgentState.WAITING_FOR_CHILDREN:
             asyncio.create_task(
-                self._drainable.resume_from_children(formatted, child_results)
+                self._drainable.run(formatted, trigger="children_settled")
             )
 
         # [Branch B] Parent still running → enqueue for self-drain
@@ -423,7 +441,7 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
                 await self._registry.complete(self._agent_task_id, parent_task.result)
 
     # ------------------------------------------------------------------
-    # _format_child_results() — migrated from Agent.resume_from_children() (agent_core.py lines 383-396)
+    # _format_child_results() — formats child results into a JSON prompt
     # ------------------------------------------------------------------
 
     def _format_child_results(self, child_results: Dict[str, CollectedChildResult]) -> str:
