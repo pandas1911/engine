@@ -11,7 +11,7 @@ class Config:
     base_url: str
     model: str
     strip_thinking: bool = True
-    max_depth: int = 3
+    max_depth: int = 4
     spawn_timeout: float = 60.0
     enable_wake_on_descendants: bool = True
     max_concurrent_agents: int = 10
