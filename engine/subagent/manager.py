@@ -12,17 +12,17 @@ import re
 import uuid
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
-from engine.models import AgentState, Session
+from engine.runtime.agent_models import AgentState, Session
 from engine.config import Config
 from engine.logging import get_logger
 from engine.safety import ResultTruncator
-from engine.subagent.events import AgentEvent, ChildCompletionEvent
-from engine.subagent.models import CollectedChildResult
-from engine.subagent.registry import CompleteInfo, SubagentRegistry
+from .events import AgentEvent, ChildCompletionEvent
+from .subagent_models import CollectedChildResult
+from engine.runtime.task_registry import CompleteInfo, AgentTaskRegistry
 
 if TYPE_CHECKING:
-    from engine.subagent.spawn import SpawnTool
-    from engine.subagent.protocol import Drainable
+    from .spawn import SpawnTool
+    from .protocol import Drainable
 
 
 class SubAgentManager:
@@ -37,7 +37,7 @@ class SubAgentManager:
 
     def __init__(
         self,
-        registry: SubagentRegistry,
+        task_registry: AgentTaskRegistry,
         event_queue: List[AgentEvent],
         drainable: "Drainable",
         agent_task_id: str,
@@ -46,14 +46,14 @@ class SubAgentManager:
     ):
         """
         Args:
-            registry: SubagentRegistry instance (shared across agents)
+            task_registry: AgentTaskRegistry instance (shared across agents)
             event_queue: Agent's _event_queue (List[AgentEvent])
             drainable: Drainable protocol (the Agent)
             agent_task_id: THIS agent's task_id
             parent_label: Display label for logging
             config: Runtime configuration (used for result truncation limits)
         """
-        self._registry = registry
+        self._task_registry = task_registry
         self._event_queue = event_queue
         self._drainable = drainable
         self._agent_task_id = agent_task_id
@@ -61,8 +61,8 @@ class SubAgentManager:
         self._config = config
         self._child_counter = 0
         # Register handler: when any child of this agent completes,
-        # registry routes the callback here
-        self._registry.register_handler(agent_task_id, self._on_child_complete)
+        # task_registry routes the callback here
+        self._task_registry.register_handler(agent_task_id, self._on_child_complete)
 
     # ------------------------------------------------------------------
     # spawn() — migrated from SpawnTool.execute() (spawn.py lines 55-152)
@@ -179,7 +179,7 @@ A one-line summary at the top is encouraged when the result is complex — skip 
 
         child_session.add_message("system", system_prompt)
 
-        await self._registry.register(
+        await self._task_registry.register(
             task_id=task_id,
             session_id=child_session.id,
             description=task_desc,
@@ -189,11 +189,11 @@ A one-line summary at the top is encouraged when the result is complex — skip 
         )
 
         child_agent = agent_factory(
-            child_session, config, self._registry, self._agent_task_id, task_id,
+            child_session, config, self._task_registry, self._agent_task_id, task_id,
             label=display_name,
         )
 
-        await self._registry.set_agent(task_id, child_agent)
+        await self._task_registry.set_agent(task_id, child_agent)
 
         asyncio.create_task(
             self._run_child(child_agent, task_id, task_desc, child_session.depth, display_name)
@@ -321,13 +321,13 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
     # ------------------------------------------------------------------
 
     async def _on_child_complete(self, task_id: str, info: CompleteInfo) -> None:
-        """Handler called by registry when a child completes. Gate checks + notification.
+        """Handler called by task_registry when a child completes. Gate checks + notification.
 
         Args:
             task_id: The completing child's task ID.
             info: Completion info from the registry (pending counts, parent).
         """
-        _ct = self._registry.get_task(task_id)
+        _ct = self._task_registry.get_task(task_id)
         _child_label = (
             getattr(_ct.agent, "label", None)
             if (_ct and _ct.agent)
@@ -351,7 +351,7 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
             return
 
         # [Gate 2] Parent doesn't exist or not registered → return
-        if not (info.parent_task_id and self._registry.get_task(info.parent_task_id)):
+        if not (info.parent_task_id and self._task_registry.get_task(info.parent_task_id)):
             return
 
         # [Gate 3] Still have pending siblings → return
@@ -370,7 +370,7 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
             return
 
         # All gates passed → collect results and notify parent
-        child_results = await self._registry.collect_and_cleanup(self._agent_task_id)
+        child_results = await self._task_registry.collect_and_cleanup(self._agent_task_id)
 
         parent_state = self._drainable.state
         branch = (
@@ -426,7 +426,7 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
         # by Gate 1 (pending_children > 0). Now that this last child is done,
         # re-propagate the notification upward to the grandparent.
         elif parent_state == AgentState.COMPLETED:
-            parent_task = self._registry.get_task(self._agent_task_id)
+            parent_task = self._task_registry.get_task(self._agent_task_id)
             if parent_task and parent_task.result:
                 logger = get_logger()
                 logger.info(
@@ -434,11 +434,11 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
                     "Parent already completed, re-propagating notification to grandparent | parent_task_id={}".format(
                         self._agent_task_id),
                     task_id=self._agent_task_id, state="completed",
-                    depth=self._registry.get_task_depth(self._agent_task_id),
+                    depth=self._task_registry.get_task_depth(self._agent_task_id),
                     event_type="registry_repropagate_completed_parent",
                     data={"parent_task_id": self._agent_task_id},
                 )
-                await self._registry.complete(self._agent_task_id, parent_task.result)
+                await self._task_registry.complete(self._agent_task_id, parent_task.result)
 
     # ------------------------------------------------------------------
     # _format_child_results() — formats child results into a JSON prompt
@@ -491,5 +491,5 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
         Returns:
             A SpawnTool that delegates to this manager's spawn() method.
         """
-        from engine.subagent.spawn import SpawnTool
+        from .spawn import SpawnTool
         return SpawnTool(self)

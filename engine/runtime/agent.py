@@ -1,4 +1,4 @@
-"""Agent core implementation with multi-level nesting support.
+"""Agent implementation with multi-level nesting support.
 
 This module provides the Agent class with async callbacks and error propagation.
 """
@@ -8,18 +8,19 @@ import json
 import uuid
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from engine.models import AgentState, ErrorCategory, AgentError, Session, ToolCall
+from .agent_models import AgentState, ErrorCategory, AgentError, Session
+from engine.providers.provider_models import ToolCall
 from engine.config import Config
-from engine.subagent.registry import SubagentRegistry
+from .task_registry import AgentTaskRegistry
 from engine.subagent.events import AgentEvent, ChildCompletionEvent
 from engine.subagent.manager import SubAgentManager
-from engine.state_machine import AgentStateMachine
+from .state import AgentStateMachine
 from engine.tools.base import ToolRegistry
-from engine.llm_provider import MockLLMProvider, LLMProviderError
+from engine.providers.llm_provider import LLMProviderError
 from engine.logging.agent_log import AgentLogHelper
 
 if TYPE_CHECKING:
-    from engine.llm_provider import LLMProvider
+    from engine.providers.llm_provider import LLMProvider
 
 
 class Agent:
@@ -34,8 +35,8 @@ class Agent:
         self,
         session: Session,
         config: Config,
-        registry: Optional[SubagentRegistry] = None,
-        llm_provider: Optional["LLMProvider"] = None,
+        llm_provider: "LLMProvider",
+        task_registry: Optional[AgentTaskRegistry] = None,
         tools: Optional[List[Any]] = None,
         tool_registry: Optional[ToolRegistry] = None,
         task_id: Optional[str] = None,
@@ -44,8 +45,8 @@ class Agent:
     ):
         self.session = session
         self.config = config
-        self.registry = registry or SubagentRegistry()
-        self.llm = llm_provider or MockLLMProvider()
+        self.task_registry = task_registry or AgentTaskRegistry()
+        self.llm = llm_provider
         self.task_id = task_id or f"task_{uuid.uuid4().hex[:8]}"
         self.parent_task_id = parent_task_id
         self.label = label or (
@@ -67,7 +68,7 @@ class Agent:
         ] = []  # Deferred event queue (native list, Swift Array equivalent)
         # SubAgentManager handles child spawning and notification
         self._subagent_mgr = SubAgentManager(
-            registry=self.registry,
+            task_registry=self.task_registry,
             event_queue=self._event_queue,
             drainable=self,
             agent_task_id=self.task_id,
@@ -119,7 +120,7 @@ class Agent:
         self,
         session: Session,
         config: Config,
-        registry: SubagentRegistry,
+        task_registry: AgentTaskRegistry,
         parent_task_id: str,
         task_id: Optional[str] = None,
         label: Optional[str] = None,
@@ -129,7 +130,7 @@ class Agent:
         Args:
             session: Child agent's session
             config: Configuration
-            registry: Registry instance
+            task_registry: AgentTaskRegistry instance
             parent_task_id: Parent's task ID
             task_id: Optional task ID for the child (auto-generated if not provided)
             label: Optional label for the child agent
@@ -138,10 +139,10 @@ class Agent:
             New Agent instance
         """
         return Agent(
-            session,
-            config,
-            registry,
-            self.llm,
+            session=session,
+            config=config,
+            llm_provider=self.llm,
+            task_registry=task_registry,
             tool_registry=self._tool_registry.clone(),
             task_id=task_id,
             parent_task_id=parent_task_id,
@@ -496,7 +497,7 @@ class Agent:
         context = {
             "session": self.session,
             "config": self.config,
-            "registry": self.registry,
+            "task_registry": self.task_registry,
             "parent_agent": self,
             "parent_task_id": self.task_id,
             "agent_factory": self._create_child_agent,
@@ -524,10 +525,10 @@ class Agent:
             return f"[ERROR] Tool '{tool_call.name}' execution failed: {type(e).__name__}: {str(e)}"
 
     def _has_pending_children(self) -> bool:
-        task = self.registry.get_task(self.task_id)
+        task = self.task_registry.get_task(self.task_id)
         if not task or not task.child_task_ids:
             return False
-        return self.registry.count_pending_children(self.task_id) > 0
+        return self.task_registry.count_pending_children(self.task_id) > 0
 
     def _classify_error(self, error: Exception) -> ErrorCategory:
         """Classify error category based on exception type."""
@@ -589,7 +590,7 @@ class Agent:
         # Step 5: Notify parent (only when actually transitioned to ERROR)
         if self.parent_task_id and transitioned_to_error:
             try:
-                await self.registry.complete(
+                await self.task_registry.complete(
                     self.task_id, self._final_result, error=True
                 )
             except Exception:
@@ -618,7 +619,7 @@ class Agent:
         self._completion_event.set()
 
         if self.parent_task_id:
-            await self.registry.complete(
+            await self.task_registry.complete(
                 self.task_id, self._final_result
             )
 

@@ -1,20 +1,20 @@
-"""Subagent Registry - Pure data CRUD with handler-based notification.
+"""Agent Task Registry - Pure data CRUD with handler-based notification.
 
-This module provides the SubagentRegistry for tracking subagent tasks.
+This module provides the AgentTaskRegistry for tracking subagent tasks.
 Extracted from engine/registry.py with gate-check and notification logic
 removed — that responsibility moves to SubAgentManager.
 """
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Set
 
 from engine.logging import get_logger
-from engine.subagent.models import CollectedChildResult, SubagentTask
+from engine.subagent.subagent_models import CollectedChildResult, SubagentTask
 
 if TYPE_CHECKING:
-    from engine.agent_core import Agent
+    from .agent import Agent
 
 
 @dataclass
@@ -26,8 +26,8 @@ class CompleteInfo:
     pending_siblings: int
 
 
-class SubagentRegistry:
-    """Subagent Registry - Support for multi-level nesting.
+class AgentTaskRegistry:
+    """Agent Task Registry - Support for multi-level nesting.
 
     Pure data CRUD operations with handler-based notification.
     Gate-check and notification logic lives in SubAgentManager.
@@ -284,4 +284,4 @@ class SubagentRegistry:
             return results
 
 
-__all__ = ["CompleteInfo", "SubagentRegistry"]
+__all__ = ["CompleteInfo", "AgentTaskRegistry"]

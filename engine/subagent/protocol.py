@@ -4,7 +4,7 @@ This module defines the protocols (structural interfaces) used by the sub-agent 
 """
 
 from typing import Optional, Protocol, runtime_checkable
-from engine.models import AgentState
+from engine.runtime.agent_models import AgentState
 
 
 @runtime_checkable

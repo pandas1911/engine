@@ -5,7 +5,7 @@ from typing import Any, Dict, TYPE_CHECKING
 from engine.tools.base import Tool
 
 if TYPE_CHECKING:
-    from engine.subagent.manager import SubAgentManager
+    from .manager import SubAgentManager
 
 
 class SpawnTool(Tool):

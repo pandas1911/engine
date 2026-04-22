@@ -10,7 +10,7 @@ from openai import AsyncOpenAI
 
 from engine.config import Config
 from engine.logging import get_logger
-from engine.models import LLMResponse, ToolCall
+from .provider_models import LLMResponse, ToolCall
 
 
 class LLMProviderError(Exception):
@@ -253,113 +253,4 @@ class LLMProvider(BaseLLMProvider):
         raise NotImplementedError("Streaming not yet implemented")
 
 
-class MockLLMProvider(BaseLLMProvider):
-    """Mock LLM provider for testing."""
-
-    def __init__(self):
-        self.call_count = 0
-
-    async def chat(
-        self,
-        messages: List[Dict],
-        tools: List[Dict],
-        agent_label: str = "Root",
-        task_id: str = "unknown",
-        depth: int = 0,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-    ) -> LLMResponse:
-        """Send a chat request (mock implementation).
-
-        Args:
-            messages: List of message dictionaries with 'role' and 'content'
-            tools: List of tool definitions available to the LLM
-            agent_label: Label for the agent making the request
-            task_id: ID of the task being executed
-            depth: Nesting depth of the calling agent
-            temperature: Optional temperature parameter for the LLM
-            max_tokens: Optional max_tokens parameter for the LLM
-
-        Returns:
-            LLMResponse with content or tool_calls
-        """
-        self.call_count += 1
-
-        last_content = messages[-1].get("content", "") if messages else ""
-        has_spawn_tool = any(
-            t.get("function", {}).get("name") == "spawn" for t in tools
-        )
-        has_subagent_result = (
-            "[子代理完成]" in last_content or "[子代理结果汇总]" in last_content
-        )
-        has_wake_notification = "[唤醒通知]" in last_content
-
-        if self.call_count == 1 and has_spawn_tool:
-            return LLMResponse(
-                tool_calls=[
-                    ToolCall(
-                        name="spawn",
-                        arguments={"task": "分析代码结构", "label": "analyzer"},
-                        call_id="call_1",
-                    )
-                ]
-            )
-
-        if has_subagent_result or has_wake_notification:
-            return LLMResponse(
-                content="综合所有子代理的结果分析：代码结构清晰，建议增加单元测试。具体发现包括：1）模块划分合理 2）依赖关系清晰 3）命名规范统一。"
-            )
-
-        if self._is_subagent(messages):
-            depth = self._get_depth(messages)
-            return LLMResponse(
-                content="[子Agent完成-深度{depth}] 分析完成：发现3个主要模块，依赖关系清晰。".format(
-                    depth=depth
-                )
-            )
-
-        return LLMResponse(content="处理完成")
-
-    def _is_subagent(self, messages: List[Dict]) -> bool:
-        """Check if messages indicate subagent context."""
-        for msg in messages:
-            if msg.get("role") == "system" and "Subagent Context" in msg.get(
-                "content", ""
-            ):
-                return True
-        return False
-
-    def _get_depth(self, messages: List[Dict]) -> int:
-        """Extract depth from system message."""
-        for msg in messages:
-            if msg.get("role") == "system":
-                content = msg.get("content", "")
-                if "Depth:" in content:
-                    try:
-                        return int(content.split("Depth:")[1].split("/")[0].strip())
-                    except (ValueError, IndexError):
-                        pass
-        return 0
-
-    async def stream_chat(
-        self,
-        messages: List[Dict],
-        tools: List[Dict],
-        agent_label: str = "Root",
-        task_id: str = "unknown",
-    ) -> None:
-        """Stream a chat request (mock implementation).
-
-        Args:
-            messages: List of message dictionaries with 'role' and 'content'
-            tools: List of tool definitions available to the LLM
-            agent_label: Label for the agent making the request
-            task_id: ID of the task being executed
-
-        Raises:
-            NotImplementedError: Streaming is not yet implemented
-        """
-        raise NotImplementedError("Streaming not yet implemented")
-
-
-__all__ = ["BaseLLMProvider", "LLMProvider", "LLMProviderError", "MockLLMProvider"]
+__all__ = ["BaseLLMProvider", "LLMProvider", "LLMProviderError"]

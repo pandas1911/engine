@@ -11,7 +11,7 @@ import asyncio
 from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
-    from engine.subagent.registry import SubagentRegistry
+    from engine.runtime.task_registry import AgentTaskRegistry
 
 
 class ConcurrencyLimiter:
@@ -70,19 +70,19 @@ class RegistrySizeMonitor:
     """Monitors registry size and identifies tasks to purge."""
 
     @staticmethod
-    def check_and_purge(registry: "SubagentRegistry", max_size: int) -> List[str]:
+    def check_and_purge(task_registry: "AgentTaskRegistry", max_size: int) -> List[str]:
         """Check if registry exceeds max_size and return task_ids to purge.
 
         Purges oldest completed tasks first (based on ended_at timestamp).
 
         Args:
-            registry: The SubagentRegistry to monitor
+            task_registry: The AgentTaskRegistry to monitor
             max_size: Maximum allowed registry size
 
         Returns:
             List of task_ids that should be purged (empty if within limits)
         """
-        current_size = len(registry._tasks)
+        current_size = len(task_registry._tasks)
 
         if current_size <= max_size:
             return []
@@ -91,7 +91,7 @@ class RegistrySizeMonitor:
 
         completed_tasks = [
             (task_id, task)
-            for task_id, task in registry._tasks.items()
+            for task_id, task in task_registry._tasks.items()
             if task.result is not None
         ]
 

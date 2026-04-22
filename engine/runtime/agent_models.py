@@ -1,17 +1,14 @@
-"""Agent system data models.
-
-This module contains all data models for the Agent system.
-"""
+"""Agent runtime data models."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
 if TYPE_CHECKING:
-    from engine.subagent.models import CollectedChildResult
+    from engine.subagent.subagent_models import CollectedChildResult
 
 
 class AgentState(Enum):
@@ -81,27 +78,6 @@ class Session:
 
 
 @dataclass
-class ToolCall:
-    """A tool call from the LLM."""
-
-    name: str
-    arguments: Dict[str, Any]
-    call_id: str
-
-
-@dataclass
-class LLMResponse:
-    """Response from an LLM provider."""
-
-    content: Optional[str] = None
-    tool_calls: List[ToolCall] = field(default_factory=list)
-
-    def has_tool_calls(self) -> bool:
-        """Check if response contains tool calls."""
-        return len(self.tool_calls) > 0
-
-
-@dataclass
 class QueueEvent:
     trigger_task_id: str  # Trigger child task_id (debug/log)
     child_results: Dict[str, CollectedChildResult]  # All child task_id → enriched result
@@ -124,9 +100,6 @@ __all__ = [
     "AgentError",
     "Message",
     "Session",
-    "ToolCall",
-    "LLMResponse",
     "QueueEvent",
     "AgentResult",
 ]
-

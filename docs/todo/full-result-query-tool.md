@@ -20,7 +20,7 @@ Deferring until real usage data confirms the need.
 ## Core Problem
 
 ```
-collect_and_cleanup()  →  child tasks deleted from registry
+collect_and_cleanup()  →  child tasks deleted from task_registry
 _format_child_results() →  results truncated
 resume_from_children()  →  full data goes out of scope → GC
 ```
@@ -81,7 +81,7 @@ Hook point: `_on_child_complete()`, between `collect_and_cleanup()` and `_format
 ```python
 async def _on_child_complete(self, task_id: str, info: CompleteInfo) -> None:
     ...
-    child_results = await self._registry.collect_and_cleanup(self._agent_task_id)
+    child_results = await self._task_registry.collect_and_cleanup(self._agent_task_id)
     
     # NEW: cache full results before truncation
     for tid, info in child_results.items():
@@ -121,7 +121,7 @@ class QueryFullResultTool(Tool):
         # Return full result or error message
 ```
 
-### 4. Tool Registration — `engine/agent_core.py`
+### 4. Tool Registration — `engine/runtime/agent.py`
 
 Conditional registration (opt-in via config):
 
@@ -151,7 +151,7 @@ class Config:
 | `engine/subagent/manager.py` | Accept `ResultCache`, populate in `_on_child_complete()` |
 | `engine/tools/builtin/query_result.py` | **New file** — `QueryFullResultTool` |
 | `engine/tools/builtin/__init__.py` | Export new tool |
-| `engine/agent_core.py` | Conditional tool registration |
+| `engine/runtime/agent.py` | Conditional tool registration |
 | `engine/config.py` | Add `enable_full_result_query`, `max_result_cache_size` |
 
 ---
@@ -160,8 +160,8 @@ class Config:
 
 1. **Single-use or reusable?** `consume()` prevents token waste but means the parent can't re-read. `get()` is more flexible but risks the LLM repeatedly pulling the same large result.
 2. **Depth restriction?** Should this tool only be available at certain depths, similar to how `SpawnTool` is gated by `max_depth`?
-3. **Validation boundary?** Should the tool verify that the queried `task_id` belongs to the requesting agent's children, or allow querying any task in the registry?
-4. **Cache shared or per-manager?** If shared across all SubAgentManagers (via the registry), deep nesting scenarios work naturally. If per-manager, simpler but only direct children are queryable.
+3. **Validation boundary?** Should the tool verify that the queried `task_id` belongs to the requesting agent's children, or allow querying any task in the task_registry?
+4. **Cache shared or per-manager?** If shared across all SubAgentManagers (via the task_registry), deep nesting scenarios work naturally. If per-manager, simpler but only direct children are queryable.
 
 ---
 

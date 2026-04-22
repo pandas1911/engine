@@ -6,15 +6,15 @@ import uuid
 from pathlib import Path
 from typing import List, Optional
 
-from engine.agent_core import Agent
+from engine.runtime.agent import Agent
 from engine.config import Config, get_config
-from engine.llm_provider import LLMProvider
+from engine.providers.llm_provider import LLMProvider
 from engine.logging import init_logger, get_logger, stop_logger
-from engine.models import AgentError, AgentResult, AgentState, ErrorCategory, Session
-from engine.subagent.registry import SubagentRegistry
+from engine.runtime.agent_models import AgentError, AgentResult, AgentState, ErrorCategory, Session
+from engine.runtime.task_registry import AgentTaskRegistry
 from engine.tools.base import Tool, FunctionTool
 
-__all__ = ["delegate", "Tool", "FunctionTool", "AgentResult", "init_logger", "get_logger", "stop_logger"]
+__all__ = ["delegate", "Tool", "FunctionTool", "AgentResult", "AgentTaskRegistry", "init_logger", "get_logger", "stop_logger"]
 
 DEFAULT_SYSTEM_PROMPT = (
     "你是主Agent，请尽可能构建子代理来并行处理任务。"
@@ -80,7 +80,7 @@ async def delegate(
         init_logger(log_dir=config.log_dir)
 
         llm_provider = LLMProvider(config)
-        registry = SubagentRegistry()
+        task_registry = AgentTaskRegistry()
 
         custom_tools = _discover_custom_tools()
         all_tools = custom_tools + (tools or [])
@@ -88,12 +88,12 @@ async def delegate(
         agent = Agent(
             session=session,
             config=config,
-            registry=registry,
+            task_registry=task_registry,
             llm_provider=llm_provider,
             tools=all_tools,
         )
 
-        await registry.register(
+        await task_registry.register(
             task_id=agent.task_id,
             session_id=session.id,
             description="root task",

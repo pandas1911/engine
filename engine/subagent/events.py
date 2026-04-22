@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Dict, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from engine.subagent.models import CollectedChildResult
+    from .subagent_models import CollectedChildResult
 
 
 @dataclass
