@@ -17,7 +17,7 @@ from engine.subagent.manager import SubAgentManager
 from .state import AgentStateMachine
 from engine.tools.base import ToolRegistry
 from engine.providers.llm_provider import LLMProviderError
-from engine.logging.agent_log import AgentLogHelper
+from engine.logging import get_logger
 
 if TYPE_CHECKING:
     from engine.providers.llm_provider import LLMProvider
@@ -57,12 +57,6 @@ class Agent:
         self._completion_event = asyncio.Event()
         self._error_info: Optional[AgentError] = None
         self.display_id = f"[{self.label}|{self.task_id}]"
-        self._log = AgentLogHelper(
-            label=self.label,
-            task_id=self.task_id,
-            state_getter=lambda: self.state_machine.current_state,
-            depth_getter=lambda: self.session.depth,
-        )
         self._event_queue: List[
             AgentEvent
         ] = []  # Deferred event queue (native list, Swift Array equivalent)
@@ -88,18 +82,22 @@ class Agent:
             spawn_tool = self._subagent_mgr.create_spawn_tool()
             self._tool_registry.register_spawn(spawn_tool)
 
-        self._log.info(
-            "agent_init",
+        get_logger().info(
+            self.label,
             "Agent instance created | session_id={}, depth={}, parent_task_id={}, spawn_enabled={}, tool_count={}, max_iterations={}".format(
                 self.session.id, self.session.depth,
                 self.parent_task_id or "None (root)",
                 self.session.depth < self.config.max_depth,
                 len(self._tool_registry), self.MAX_TOOL_ITERATIONS,
             ),
-            session_id=self.session.id,
-            parent_task_id=self.parent_task_id,
-            spawn_enabled=self.session.depth < self.config.max_depth,
-            tool_count=len(self._tool_registry),
+            task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+            event_type="agent_init",
+            data={
+                "session_id": self.session.id,
+                "parent_task_id": self.parent_task_id,
+                "spawn_enabled": self.session.depth < self.config.max_depth,
+                "tool_count": len(self._tool_registry),
+            },
         )
 
     @property
@@ -157,27 +155,37 @@ class Agent:
             prev_state = self.state
             self.state_machine.trigger(trigger)
             if trigger == "start":
-                self._log.info(
-                    "agent_run_start",
+                get_logger().info(
+                    self.label,
                     "Agent run started | incoming_message_length={}, session_message_count={}".format(
                         len(message) if message else 0,
                         len(self.session.messages),
                     ),
-                    message_length=len(message) if message else 0,
-                    session_msg_count=len(self.session.messages),
-                    log_message=message or "",
+                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                    event_type="agent_run_start",
+                    data={
+                        "message_length": len(message) if message else 0,
+                        "session_msg_count": len(self.session.messages),
+                        "log_message": message or "",
+                    },
                 )
             elif trigger == "children_settled":
-                self._log.info(
-                    "agent_resume",
+                get_logger().info(
+                    self.label,
                     "Agent resuming from children | incoming_message_length={}, session_message_count={}".format(
                         len(message) if message else 0,
                         len(self.session.messages),
                     ),
-                    message_length=len(message) if message else 0,
-                    session_msg_count=len(self.session.messages),
+                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                    event_type="agent_resume",
+                    data={
+                        "message_length": len(message) if message else 0,
+                        "session_msg_count": len(self.session.messages),
+                    },
                 )
-            self._log.state_change(prev_state.value, self.state.value, trigger, trigger_location="run()")
+            get_logger().state_change(
+                self.label, prev_state.value, self.state.value, trigger,
+                task_id=self.task_id, state=self.state.value, depth=self.session.depth)
 
         try:
             return await self._execute_cycle()
@@ -194,10 +202,12 @@ class Agent:
             iteration += 1
 
             if iteration == 1:
-                self._log.info(
-                    "tool_loop_start",
+                get_logger().info(
+                    self.label,
                     "Tool call loop starting | max_iterations={}".format(self.MAX_TOOL_ITERATIONS),
-                    max_iterations=self.MAX_TOOL_ITERATIONS,
+                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                    event_type="tool_loop_start",
+                    data={"max_iterations": self.MAX_TOOL_ITERATIONS},
                 )
 
             if self.llm is None:
@@ -210,24 +220,32 @@ class Agent:
             ):
                 self.session.add_message("user", self._build_summary_warning(iteration))
                 warning_injected = True
-                self._log.info(
-                    "summary_warning",
+                get_logger().info(
+                    self.label,
                     "Iteration limit warning injected | remaining_iterations={}".format(
                         self.config.summary_warning_reserve
                     ),
-                    remaining_iterations=self.config.summary_warning_reserve,
-                    current_iteration=iteration,
-                    max_iterations=self.MAX_TOOL_ITERATIONS,
+                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                    event_type="summary_warning",
+                    data={
+                        "remaining_iterations": self.config.summary_warning_reserve,
+                        "current_iteration": iteration,
+                        "max_iterations": self.MAX_TOOL_ITERATIONS,
+                    },
                 )
 
-            self._log.info(
-                "llm_request",
+            get_logger().info(
+                self.label,
                 "Sending request to LLM | iteration={}/{}, message_count={}".format(
                     iteration, self.MAX_TOOL_ITERATIONS, len(self.session.messages)
                 ),
-                iteration=iteration,
-                max_iterations=self.MAX_TOOL_ITERATIONS,
-                message_count=len(self.session.messages),
+                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                event_type="llm_request",
+                data={
+                    "iteration": iteration,
+                    "max_iterations": self.MAX_TOOL_ITERATIONS,
+                    "message_count": len(self.session.messages),
+                },
             )
 
             response = await self.llm.chat(
@@ -239,13 +257,17 @@ class Agent:
             )
 
             if not response.has_tool_calls():
-                self._log.info(
-                    "llm_text_response",
+                get_logger().info(
+                    self.label,
                     "LLM returned text response (no tool calls) | content_length={}".format(
                         len(response.content) if response.content else 0,
                     ),
-                    content_length=len(response.content) if response.content else 0,
-                    content=response.content or "",
+                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                    event_type="llm_text_response",
+                    data={
+                        "content_length": len(response.content) if response.content else 0,
+                        "content": response.content or "",
+                    },
                 )
                 if response.content:
                     self.session.add_message("assistant", response.content)
@@ -272,14 +294,18 @@ class Agent:
             )
 
             tool_names = [tc.name for tc in response.tool_calls]
-            self._log.info(
-                "llm_tool_calls",
+            get_logger().info(
+                self.label,
                 "LLM requested {} tool call(s) | tools={}, iteration={}/{}".format(
                     len(response.tool_calls), tool_names, iteration, self.MAX_TOOL_ITERATIONS
                 ),
-                tool_count=len(response.tool_calls),
-                tool_names=tool_names,
-                iteration=iteration,
+                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                event_type="llm_tool_calls",
+                data={
+                    "tool_count": len(response.tool_calls),
+                    "tool_names": tool_names,
+                    "iteration": iteration,
+                },
             )
 
             for tool_call in response.tool_calls:
@@ -287,13 +313,17 @@ class Agent:
                 self.session.add_message("tool", result, tool_call_id=tool_call.call_id)
 
         if iteration >= self.MAX_TOOL_ITERATIONS:
-            self._log.error(
-                "iteration_limit",
+            get_logger().error(
+                self.label,
                 "Tool call loop hit iteration limit ({}) | has_final_result={}".format(
                     self.MAX_TOOL_ITERATIONS, self._final_result is not None
                 ),
-                max_iterations=self.MAX_TOOL_ITERATIONS,
-                has_final_result=self._final_result is not None,
+                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                event_type="iteration_limit",
+                data={
+                    "max_iterations": self.MAX_TOOL_ITERATIONS,
+                    "has_final_result": self._final_result is not None,
+                },
             )
 
             if self.config.emergency_summary_enabled:
@@ -328,13 +358,17 @@ class Agent:
         Returns:
             Summary text, or fallback warning if summarization fails.
         """
-        self._log.info(
-            "emergency_summary_start",
+        get_logger().info(
+            self.label,
             "Triggering emergency summary | context_messages={}".format(
                 self.config.emergency_summary_context_messages
             ),
-            context_messages=self.config.emergency_summary_context_messages,
-            total_session_messages=len(self.session.messages),
+            task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+            event_type="emergency_summary_start",
+            data={
+                "context_messages": self.config.emergency_summary_context_messages,
+                "total_session_messages": len(self.session.messages),
+            },
         )
 
         condensed = self._build_condensed_messages(
@@ -361,11 +395,15 @@ class Agent:
 
             result = response.content or "[WARNING] Emergency summary returned empty."
 
-            self._log.info(
-                "emergency_summary_complete",
+            get_logger().info(
+                self.label,
                 "Emergency summary generated | result_length={}".format(len(result)),
-                result_length=len(result),
-                result=result,
+                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                event_type="emergency_summary_complete",
+                data={
+                    "result_length": len(result),
+                    "result": result,
+                },
             )
 
             self.session.add_message("assistant", result)
@@ -373,13 +411,17 @@ class Agent:
             return result
 
         except Exception as e:
-            self._log.error(
-                "emergency_summary_failed",
+            get_logger().error(
+                self.label,
                 "Emergency summary failed | error_type={}, error={}".format(
                     type(e).__name__, str(e)
                 ),
-                error_type=type(e).__name__,
-                error_message=str(e),
+                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                event_type="emergency_summary_failed",
+                data={
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                },
             )
             return "[WARNING] Maximum tool call iterations reached (summary generation failed)."
 
@@ -433,14 +475,18 @@ class Agent:
                 break
 
             if isinstance(event, ChildCompletionEvent):
-                self._log.info(
-                    "drain_event",
+                get_logger().info(
+                    self.label,
                     "Draining deferred event | trigger_task_id={}, child_result_count={}".format(
                         getattr(event, 'trigger_task_id', 'N/A'), len(getattr(event, 'child_results', {}))
                     ),
-                    trigger_task_id=getattr(event, 'trigger_task_id', 'N/A'),
-                    child_result_count=len(getattr(event, 'child_results', {})),
-                    error=getattr(event, 'error', False),
+                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                    event_type="drain_event",
+                    data={
+                        "trigger_task_id": getattr(event, 'trigger_task_id', 'N/A'),
+                        "child_result_count": len(getattr(event, 'child_results', {})),
+                        "error": getattr(event, 'error', False),
+                    },
                 )
                 self.session.add_message("user", event.formatted_prompt)
                 await self._process_tool_calls()
@@ -448,18 +494,24 @@ class Agent:
 
         # All events drained — decide next state using registry as single source of truth
         if self._has_pending_children():
-            self._log.info(
-                "waiting_for_children",
+            get_logger().info(
+                self.label,
                 "Spawned child agents detected, transitioning to WAITING_FOR_CHILDREN",
+                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                event_type="waiting_for_children",
             )
             prev_state = self.state
             self.state_machine.trigger("spawn_children")
-            self._log.state_change(prev_state.value, self.state.value, "spawn_children", trigger_location="_execute_cycle()")
+            get_logger().state_change(
+                self.label, prev_state.value, self.state.value, "spawn_children",
+                task_id=self.task_id, state=self.state.value, depth=self.session.depth)
             return "[Waiting for sub-agents to report back...]"
         else:
-            self._log.info(
-                "agent_direct_complete",
+            get_logger().info(
+                self.label,
                 "Agent finished without spawning children, proceeding to finalize",
+                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                event_type="agent_direct_complete",
             )
             await self._finish_and_notify()
             return self._final_result or ""
@@ -475,19 +527,24 @@ class Agent:
         """
         tool = self._tool_registry.get(tool_call.name)
 
-        self._log.tool(
-            tool_call.name,
+        get_logger().tool(
+            self.label,
             "Executing tool '{}' | call_id={}".format(tool_call.name, tool_call.call_id),
-            call_id=tool_call.call_id,
-            arguments=tool_call.arguments,
+            task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+            tool_name=tool_call.name,
+            data={"call_id": tool_call.call_id, "arguments": tool_call.arguments},
         )
 
         if not tool:
-            self._log.error(
-                "tool_not_found",
+            get_logger().error(
+                self.label,
                 "Tool '{}' not found in registry | call_id={}".format(tool_call.name, tool_call.call_id),
-                tool_name=tool_call.name,
-                call_id=tool_call.call_id,
+                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                event_type="tool_not_found",
+                data={
+                    "tool_name": tool_call.name,
+                    "call_id": tool_call.call_id,
+                },
             )
             return f"[ERROR] Tool not found: '{tool_call.name}' is not registered."
 
@@ -502,22 +559,30 @@ class Agent:
 
         try:
             result = await tool.execute(tool_call.arguments, context)
-            self._log.tool(
-                tool_call.name,
+            get_logger().tool(
+                self.label,
                 "Tool '{}' completed | result_length={}".format(tool_call.name, len(result)),
-                result_length=len(result),
-                result=result,
+                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                tool_name=tool_call.name,
+                data={
+                    "result_length": len(result),
+                    "result": result,
+                },
             )
             return result
         except Exception as e:
-            self._log.error(
-                "tool_error",
+            get_logger().error(
+                self.label,
                 "Tool '{}' execution failed | error_type={}, error=\"{}\"".format(
                     tool_call.name, type(e).__name__, str(e)
                 ),
-                tool_name=tool_call.name,
-                error_type=type(e).__name__,
-                error_message=str(e),
+                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                event_type="tool_error",
+                data={
+                    "tool_name": tool_call.name,
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                },
             )
             return f"[ERROR] Tool '{tool_call.name}' execution failed: {type(e).__name__}: {str(e)}"
 
@@ -537,13 +602,17 @@ class Agent:
         """Unified crash handler. Never throws."""
         # Step 1: Log (best effort)
         try:
-            self._log.error(
-                "agent_abort",
+            get_logger().error(
+                self.label,
                 "Agent aborted | error_type={}, error=\"{}\"".format(
                     type(error).__name__, str(error)
                 ),
-                error_type=type(error).__name__,
-                error_message=str(error),
+                task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                event_type="agent_abort",
+                data={
+                    "error_type": type(error).__name__,
+                    "error_message": str(error),
+                },
             )
         except Exception:
             pass
@@ -569,10 +638,9 @@ class Agent:
                     self.state_machine.trigger("error")
                     transitioned_to_error = True
                     try:
-                        self._log.state_change(
-                            prev_state.value, self.state.value, "error",
-                            trigger_location="_abort()",
-                        )
+                        get_logger().state_change(
+                            self.label, prev_state.value, self.state.value, "error",
+                            task_id=self.task_id, state=self.state.value, depth=self.session.depth)
                     except Exception:
                         pass
             except Exception:
@@ -598,21 +666,27 @@ class Agent:
         await self._abort(error)
 
     async def _finish_and_notify(self):
-        self._log.info(
-            "agent_finalize",
+        get_logger().info(
+            self.label,
             "Agent finalizing | result_length={}, has_parent={}, session_message_count={}".format(
                 len(self._final_result) if self._final_result else 0,
                 self.parent_task_id is not None,
                 len(self.session.messages),
             ),
-            result_length=len(self._final_result) if self._final_result else 0,
-            has_parent=self.parent_task_id is not None,
-            session_msg_count=len(self.session.messages),
-            result=self._final_result or "",
+            task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+            event_type="agent_finalize",
+            data={
+                "result_length": len(self._final_result) if self._final_result else 0,
+                "has_parent": self.parent_task_id is not None,
+                "session_msg_count": len(self.session.messages),
+                "result": self._final_result or "",
+            },
         )
         prev_state = self.state
         self.state_machine.trigger("finish")
-        self._log.state_change(prev_state.value, self.state.value, "finish", trigger_location="_finish_and_notify()")
+        get_logger().state_change(
+            self.label, prev_state.value, self.state.value, "finish",
+            task_id=self.task_id, state=self.state.value, depth=self.session.depth)
         self._completion_event.set()
 
         if self.parent_task_id:

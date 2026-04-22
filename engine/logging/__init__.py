@@ -2,8 +2,7 @@
 
 Provides:
 - Core logging infrastructure (Logger, formatters, file handler)
-- AgentLogHelper for agent-context-aware logging
-- Public API: get_logger, init_logger, stop_logger, AgentLogHelper
+- Public API: get_logger, init_logger, stop_logger
 """
 
 from engine.logging.sink import (
@@ -17,7 +16,7 @@ from engine.logging.sink import (
     init_logger,
     stop_logger,
 )
-from engine.logging.agent_log import AgentLogHelper
+
 
 __all__ = [
     "Logger",
@@ -29,5 +28,4 @@ __all__ = [
     "get_logger",
     "init_logger",
     "stop_logger",
-    "AgentLogHelper",
 ]

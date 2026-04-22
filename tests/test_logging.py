@@ -2,7 +2,6 @@
 
 from unittest.mock import MagicMock, patch
 
-from engine.logging.agent_log import AgentLogHelper
 from engine.logging.sink import LogEntry, Logger, TerminalFormatter
 
 
@@ -28,26 +27,6 @@ def test_logger_warning_creates_warning_entry():
     assert entry.state == "RUNNING"
     assert entry.depth == 1
     assert entry.event_type == "truncation"
-
-
-def test_agent_log_helper_warning_delegates():
-    """AgentLogHelper.warning() should delegate to get_logger().warning() with context."""
-    helper = AgentLogHelper(
-        label="test-agent",
-        task_id="task-123",
-        state_getter=lambda: MagicMock(value="running"),
-        depth_getter=lambda: 1,
-    )
-    with patch("engine.logging.agent_log.get_logger") as mock_get:
-        mock_logger = MagicMock()
-        mock_get.return_value = mock_logger
-        helper.warning("truncation", "Result truncated", original_len=5000, max_len=4000)
-        mock_logger.warning.assert_called_once()
-        call_args = mock_logger.warning.call_args
-        assert call_args[0][0] == "test-agent"
-        assert call_args[0][1] == "Result truncated"
-        assert call_args[1]["task_id"] == "task-123"
-        assert call_args[1]["depth"] == 1
 
 
 def test_terminal_formatter_warning_yellow():
