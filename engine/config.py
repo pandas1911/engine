@@ -84,6 +84,12 @@ class ConfigLoader:
         if log_dir:
             config.log_dir = log_dir
 
+        if config.max_concurrent_agents < 2:
+            raise ValueError(
+                f"max_concurrent_agents must be >= 2, got {config.max_concurrent_agents}. "
+                "Values less than 2 can cause deadlock in the agent execution system."
+            )
+
         return config
 
     @staticmethod
