@@ -13,7 +13,7 @@ from engine.logging import init_logger, get_logger, stop_logger
 from engine.runtime.agent_models import AgentError, AgentResult, AgentState, ErrorCategory, Session
 from engine.runtime.task_registry import AgentTaskRegistry
 from engine.tools.base import Tool, FunctionTool
-from engine.safety import ConcurrencyLimiter
+from engine.safety import ConcurrencyLimiter, TokenBucketRateLimiter
 
 __all__ = ["delegate", "Tool", "FunctionTool", "AgentResult", "AgentTaskRegistry", "init_logger", "get_logger", "stop_logger"]
 
@@ -80,7 +80,16 @@ async def delegate(
 
         init_logger(log_dir=config.log_dir)
 
-        llm_provider = LLMProvider(config)
+        # Create rate limiter if RPM is configured (> 0 means enabled)
+        rate_limiter = None
+        if config.rate_limit_rpm > 0:
+            refill_rate = config.rate_limit_rpm / 60.0  # Convert RPM to tokens/sec
+            rate_limiter = TokenBucketRateLimiter(
+                max_tokens=config.rate_limit_burst,
+                refill_rate=refill_rate,
+            )
+
+        llm_provider = LLMProvider(config, rate_limiter=rate_limiter)
         task_registry = AgentTaskRegistry()
 
         custom_tools = _discover_custom_tools()

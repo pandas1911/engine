@@ -8,6 +8,8 @@ This module provides resource limiting utilities to prevent:
 """
 
 import asyncio
+import time
+from collections import deque
 from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
@@ -52,6 +54,134 @@ class ConcurrencyLimiter:
     def max_concurrent(self) -> int:
         """Configured maximum (NOT remaining count)."""
         return self._max
+
+
+class TokenBucketRateLimiter:
+    """Token bucket rate limiter (event-driven, no busy waiting).
+
+    - FIFO fairness via explicit waiter queue (deque of Futures)
+    - No thundering herd (scheduler wakes one waiter at a time)
+    - Precise wake-up scheduling (background _scheduler task)
+    - Fast path: token available + no waiters -> immediate return
+    """
+
+    def __init__(self, max_tokens: int, refill_rate: float):
+        """Initialize token bucket rate limiter.
+
+        Args:
+            max_tokens: Maximum tokens in bucket (burst capacity).
+                        Must be >= 1.
+            refill_rate: Tokens added per second. Must be > 0.
+                         Supports fractional rates (e.g., 0.5 = 1 token per 2 seconds).
+        """
+        if max_tokens < 1:
+            raise ValueError(
+                "max_tokens must be >= 1, got {}".format(max_tokens)
+            )
+        if refill_rate <= 0:
+            raise ValueError(
+                "refill_rate must be > 0, got {}".format(refill_rate)
+            )
+        self._max_tokens = max_tokens
+        self._refill_rate = refill_rate
+
+        self._tokens = float(max_tokens)
+        self._last_refill = time.monotonic()
+
+        self._waiters: deque = deque()  # FIFO queue of Futures
+        self._lock = asyncio.Lock()
+        self._wakeup_task = None  # background scheduler
+
+    async def acquire(self) -> None:
+        """Acquire one token (FIFO, event-driven).
+
+        Fast path: if tokens available and no waiters, return immediately.
+        Slow path: enqueue a Future and wait outside the lock.
+        """
+        loop = asyncio.get_running_loop()
+
+        async with self._lock:
+            self._refill()
+
+            # Fast path: token available, no one waiting
+            if self._tokens >= 1.0 and not self._waiters:
+                self._tokens -= 1.0
+                return
+
+            # Slow path: enqueue and wait
+            fut = loop.create_future()
+            self._waiters.append(fut)
+            self._ensure_scheduler_locked()
+
+        # Wait OUTSIDE the lock — other acquire() calls can proceed
+        try:
+            await fut
+        except BaseException:
+            # Clean up on cancellation or error
+            async with self._lock:
+                if not fut.done():
+                    fut.cancel()
+                try:
+                    self._waiters.remove(fut)
+                except ValueError:
+                    pass
+            raise
+
+    def _refill(self) -> None:
+        """Add tokens based on elapsed time since last refill."""
+        now = time.monotonic()
+        elapsed = max(0.0, now - self._last_refill)
+        if elapsed > 0:
+            self._tokens = min(
+                self._max_tokens,
+                self._tokens + elapsed * self._refill_rate
+            )
+            self._last_refill = now
+
+    def _ensure_scheduler_locked(self) -> None:
+        """Start scheduler if not already running (lock must be held)."""
+        if self._wakeup_task is None or self._wakeup_task.done():
+            self._wakeup_task = asyncio.create_task(self._scheduler())
+
+    async def _scheduler(self) -> None:
+        """Background task: wake up waiters when tokens become available."""
+        while True:
+            async with self._lock:
+                self._refill()
+
+                if not self._waiters:
+                    self._wakeup_task = None
+                    return
+
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    fut = self._waiters.popleft()
+                    if not fut.done():
+                        fut.set_result(None)
+                    continue  # May be able to wake more waiters
+
+                # Calculate precise wait time for next token
+                deficit = 1.0 - self._tokens
+                wait_time = deficit / self._refill_rate
+
+            # Sleep OUTSIDE the lock
+            await asyncio.sleep(wait_time)
+
+    @property
+    def available_tokens(self) -> float:
+        """Current token count (may be fractional after refill)."""
+        self._refill()
+        return self._tokens
+
+    @property
+    def max_tokens(self) -> int:
+        """Configured maximum burst capacity."""
+        return self._max_tokens
+
+    @property
+    def refill_rate(self) -> float:
+        """Configured refill rate (tokens per second)."""
+        return self._refill_rate
 
 
 class ResultTruncator:
@@ -117,4 +247,4 @@ class RegistrySizeMonitor:
         return [task_id for task_id, _ in completed_tasks[:to_purge_count]]
 
 
-__all__ = ["ConcurrencyLimiter", "ResultTruncator", "RegistrySizeMonitor"]
+__all__ = ["ConcurrencyLimiter", "ResultTruncator", "RegistrySizeMonitor", "TokenBucketRateLimiter"]

@@ -14,7 +14,7 @@ class Config:
     max_depth: int = 4
     spawn_timeout: float = 60.0
     enable_wake_on_descendants: bool = True
-    max_concurrent_agents: int = 5
+    max_concurrent_agents: int = 8
     agent_timeout: float = 300.0
     max_registry_size: int = 1000
     max_result_length: int = 2500
@@ -23,6 +23,14 @@ class Config:
     emergency_summary_enabled: bool = True  # force a final summary call when loop exhausts
     emergency_summary_context_messages: int = 0  # messages to keep for emergency summary (0 = use full session)
     log_dir: Optional[str] = None
+
+    # Rate limiting
+    rate_limit_rpm: float = 300.0      # Requests per minute (0 = disabled)
+    rate_limit_burst: int = 3           # Max concurrent API calls (token bucket burst capacity)
+
+    # Retry
+    llm_retry_max_attempts: int = 3     # Max retry attempts (1 = no retry, just the initial call)
+    llm_retry_base_delay: float = 1.0   # Base delay in seconds for exponential backoff
 
 
 class ConfigProvider(ABC):
@@ -56,6 +64,16 @@ class ConfigLoader:
         "LOG_DIR": "log_dir",
     }
 
+    OPTIONAL_INT_KEYS = {
+        "LLM_RETRY_MAX_ATTEMPTS": "llm_retry_max_attempts",
+        "LLM_RATE_LIMIT_BURST": "rate_limit_burst",
+    }
+
+    OPTIONAL_FLOAT_KEYS = {
+        "LLM_RATE_LIMIT_RPM": "rate_limit_rpm",
+        "LLM_RETRY_BASE_DELAY": "llm_retry_base_delay",
+    }
+
     @staticmethod
     def load(provider: ConfigProvider) -> Config:
         missing_keys = []
@@ -83,6 +101,26 @@ class ConfigLoader:
         log_dir = provider.get("LOG_DIR")
         if log_dir:
             config.log_dir = log_dir
+
+        for env_key, field_name in ConfigLoader.OPTIONAL_INT_KEYS.items():
+            raw = provider.get(env_key)
+            if raw is not None and raw.strip() != "":
+                try:
+                    setattr(config, field_name, int(raw))
+                except ValueError:
+                    raise ValueError(
+                        "Invalid value for {}: expected int, got '{}'".format(env_key, raw)
+                    )
+
+        for env_key, field_name in ConfigLoader.OPTIONAL_FLOAT_KEYS.items():
+            raw = provider.get(env_key)
+            if raw is not None and raw.strip() != "":
+                try:
+                    setattr(config, field_name, float(raw))
+                except ValueError:
+                    raise ValueError(
+                        "Invalid value for {}: expected float, got '{}'".format(env_key, raw)
+                    )
 
         if config.max_concurrent_agents < 2:
             raise ValueError(
