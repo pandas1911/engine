@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 from engine.runtime.agent_models import AgentState, Session
 from engine.config import Config
 from engine.logging import get_logger
-from engine.safety import ResultTruncator
+from engine.safety import ConcurrencyLimiter, ResultTruncator
 from .events import AgentEvent, ChildCompletionEvent
 from .subagent_models import CollectedChildResult
 from engine.runtime.task_registry import CompleteInfo, AgentTaskRegistry
@@ -43,6 +43,7 @@ class SubAgentManager:
         agent_task_id: str,
         parent_label: str,
         config: Optional[Config] = None,
+        concurrency_limiter: Optional[ConcurrencyLimiter] = None,
     ):
         """
         Args:
@@ -52,6 +53,7 @@ class SubAgentManager:
             agent_task_id: THIS agent's task_id
             parent_label: Display label for logging
             config: Runtime configuration (used for result truncation limits)
+            concurrency_limiter: Optional global concurrency limiter
         """
         self._task_registry = task_registry
         self._event_queue = event_queue
@@ -59,6 +61,7 @@ class SubAgentManager:
         self._agent_task_id = agent_task_id
         self._parent_label = parent_label
         self._config = config
+        self._concurrency_limiter = concurrency_limiter
         self._child_counter = 0
         # Register handler: when any child of this agent completes,
         # task_registry routes the callback here
@@ -100,6 +103,50 @@ class SubAgentManager:
                 data={"current_depth": parent_session.depth, "max_depth": config.max_depth}
             )
             return f"[Spawn Failed] Maximum nesting depth reached (current: {parent_session.depth}/{config.max_depth}). Please complete the task at the current level — no further child agents can be spawned."
+
+        # Global concurrency gate — acquire BEFORE register
+        if self._concurrency_limiter is not None:
+            try:
+                await asyncio.wait_for(
+                    self._concurrency_limiter.acquire(),
+                    timeout=config.spawn_timeout
+                )
+            except asyncio.TimeoutError:
+                logger = get_logger()
+                logger.error(
+                    self._parent_label,
+                    "Spawn rejected: global concurrency limit reached | active={}/{}, timed out after {}s | task_desc=\"{}\"".format(
+                        self._concurrency_limiter.active_count,
+                        self._concurrency_limiter.max_concurrent,
+                        config.spawn_timeout,
+                        task_desc,
+                    ),
+                    task_id=self._agent_task_id, state="running", depth=parent_session.depth,
+                    event_type="spawn_concurrency_limit",
+                    data={
+                        "active_count": self._concurrency_limiter.active_count,
+                        "max_concurrent": self._concurrency_limiter.max_concurrent,
+                        "spawn_timeout": config.spawn_timeout,
+                        "task_description": task_desc,
+                        "label": label,
+                    }
+                )
+                return (
+                    "━━━━ Spawn Failed ━━━━\n"
+                    "Task: {task_desc}\n"
+                    "Label: {label}\n"
+                    "Reason: Global concurrency limit reached ({active}/{max}), "
+                    "timed out waiting for a slot after {timeout}s.\n"
+                    "Suggestion: Wait for existing sub-agents to complete and try again, "
+                    "or consider completing this task yourself directly — "
+                    "you have full access to all tools and context needed."
+                ).format(
+                    task_desc=task_desc,
+                    label=label,
+                    active=self._concurrency_limiter.active_count,
+                    max=self._concurrency_limiter.max_concurrent,
+                    timeout=config.spawn_timeout,
+                )
 
         task_id = f"task_{uuid.uuid4().hex[:8]}"
 
@@ -252,69 +299,73 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
             display_name: Display name for the child agent.
         """
         try:
-            logger = get_logger()
-            logger.info(
-                display_name or "Sub",
-                "Child agent starting background execution",
-                task_id=task_id, state="idle", depth=depth,
-                event_type="child_run_start",
-                data={"task_description": task_desc}
-            )
-            await agent.run(task_desc)
-        except Exception as e:
-            # Safety net — agent.run() should catch all exceptions internally via _abort()
-            # If we reach here, _abort() or run() has a bug
-            await agent.abort(e)
-            logger = get_logger()
-            logger.error(
-                display_name or "Sub",
-                "UNEXPECTED: child agent leaked exception | error_type={}, error=\"{}\"".format(
-                    type(e).__name__, str(e)),
-                task_id=task_id, state="error", depth=depth,
-                event_type="child_run_unhandled",
-                data={"error_type": type(e).__name__, "error_message": str(e)},
-            )
-            return
+            try:
+                logger = get_logger()
+                logger.info(
+                    display_name or "Sub",
+                    "Child agent starting background execution",
+                    task_id=task_id, state="idle", depth=depth,
+                    event_type="child_run_start",
+                    data={"task_description": task_desc}
+                )
+                await agent.run(task_desc)
+            except Exception as e:
+                # Safety net — agent.run() should catch all exceptions internally via _abort()
+                # If we reach here, _abort() or run() has a bug
+                await agent.abort(e)
+                logger = get_logger()
+                logger.error(
+                    display_name or "Sub",
+                    "UNEXPECTED: child agent leaked exception | error_type={}, error=\"{}\"".format(
+                        type(e).__name__, str(e)),
+                    task_id=task_id, state="error", depth=depth,
+                    event_type="child_run_unhandled",
+                    data={"error_type": type(e).__name__, "error_message": str(e)},
+                )
+                return
 
-        # Log based on final state (registry.complete handled internally by agent)
-        state = agent.state
-        if state == AgentState.COMPLETED:
-            logger = get_logger()
-            logger.info(
-                display_name or "Sub",
-                "Child agent completed | result_length={}".format(
-                    len(agent.result) if agent.result else 0),
-                task_id=task_id, state="completed", depth=depth,
-                event_type="child_run_success",
-                data={"result_length": len(agent.result) if agent.result else 0,
-                      "result": agent.result or ""},
-            )
-        elif state == AgentState.ERROR:
-            logger = get_logger()
-            logger.error(
-                display_name or "Sub",
-                "Child agent aborted | error={}".format(agent.result),
-                task_id=task_id, state="error", depth=depth,
-                event_type="child_run_abort",
-                data={"error_result": agent._final_result},
-            )
-        elif state == AgentState.WAITING_FOR_CHILDREN:
-            logger = get_logger()
-            logger.info(
-                display_name or "Sub",
-                "Child agent waiting for sub-agents | state={}".format(state.value),
-                task_id=task_id, state=state.value, depth=depth,
-                event_type="child_run_waiting",
-            )
-        else:
-            logger = get_logger()
-            logger.info(
-                display_name or "Sub",
-                "Child agent in unexpected state | state={}".format(state.value),
-                task_id=task_id, state=state.value, depth=depth,
-                event_type="child_run_unexpected_state",
-                data={"state": state.value},
-            )
+            # Log based on final state (registry.complete handled internally by agent)
+            state = agent.state
+            if state == AgentState.COMPLETED:
+                logger = get_logger()
+                logger.info(
+                    display_name or "Sub",
+                    "Child agent completed | result_length={}".format(
+                        len(agent.result) if agent.result else 0),
+                    task_id=task_id, state="completed", depth=depth,
+                    event_type="child_run_success",
+                    data={"result_length": len(agent.result) if agent.result else 0,
+                          "result": agent.result or ""},
+                )
+            elif state == AgentState.ERROR:
+                logger = get_logger()
+                logger.error(
+                    display_name or "Sub",
+                    "Child agent aborted | error={}".format(agent.result),
+                    task_id=task_id, state="error", depth=depth,
+                    event_type="child_run_abort",
+                    data={"error_result": agent._final_result},
+                )
+            elif state == AgentState.WAITING_FOR_CHILDREN:
+                logger = get_logger()
+                logger.info(
+                    display_name or "Sub",
+                    "Child agent waiting for sub-agents | state={}".format(state.value),
+                    task_id=task_id, state=state.value, depth=depth,
+                    event_type="child_run_waiting",
+                )
+            else:
+                logger = get_logger()
+                logger.info(
+                    display_name or "Sub",
+                    "Child agent in unexpected state | state={}".format(state.value),
+                    task_id=task_id, state=state.value, depth=depth,
+                    event_type="child_run_unexpected_state",
+                    data={"state": state.value},
+                )
+        finally:
+            if self._concurrency_limiter is not None:
+                self._concurrency_limiter.release()
 
     # ------------------------------------------------------------------
     # _on_child_complete() — migrated from Registry.complete() (registry.py lines 167-243)

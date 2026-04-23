@@ -18,6 +18,7 @@ from .state import AgentStateMachine
 from engine.tools.base import ToolRegistry
 from engine.providers.llm_provider import LLMProviderError
 from engine.logging import get_logger
+from engine.safety import ConcurrencyLimiter
 
 if TYPE_CHECKING:
     from engine.providers.llm_provider import LLMProvider
@@ -42,6 +43,7 @@ class Agent:
         task_id: Optional[str] = None,
         parent_task_id: Optional[str] = None,
         label: Optional[str] = None,
+        concurrency_limiter: Optional[ConcurrencyLimiter] = None,
     ):
         self.session = session
         self.config = config
@@ -57,6 +59,7 @@ class Agent:
         self._completion_event = asyncio.Event()
         self._error_info: Optional[AgentError] = None
         self.display_id = f"[{self.label}|{self.task_id}]"
+        self._concurrency_limiter = concurrency_limiter
         self._event_queue: List[
             AgentEvent
         ] = []  # Deferred event queue (native list, Swift Array equivalent)
@@ -68,6 +71,7 @@ class Agent:
             agent_task_id=self.task_id,
             parent_label=self.label,
             config=self.config,
+            concurrency_limiter=self._concurrency_limiter,
         )
         # Use provided registry or create new one
         self._tool_registry = tool_registry or ToolRegistry()
@@ -145,6 +149,7 @@ class Agent:
             task_id=task_id,
             parent_task_id=parent_task_id,
             label=label,
+            concurrency_limiter=self._concurrency_limiter,
         )
 
     async def run(self, message: Optional[str] = None, *, trigger: str = "start") -> str:

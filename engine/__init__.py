@@ -13,6 +13,7 @@ from engine.logging import init_logger, get_logger, stop_logger
 from engine.runtime.agent_models import AgentError, AgentResult, AgentState, ErrorCategory, Session
 from engine.runtime.task_registry import AgentTaskRegistry
 from engine.tools.base import Tool, FunctionTool
+from engine.safety import ConcurrencyLimiter
 
 __all__ = ["delegate", "Tool", "FunctionTool", "AgentResult", "AgentTaskRegistry", "init_logger", "get_logger", "stop_logger"]
 
@@ -85,12 +86,15 @@ async def delegate(
         custom_tools = _discover_custom_tools()
         all_tools = custom_tools + (tools or [])
 
+        concurrency_limiter = ConcurrencyLimiter(config.max_concurrent_agents)
+
         agent = Agent(
             session=session,
             config=config,
             task_registry=task_registry,
             llm_provider=llm_provider,
             tools=all_tools,
+            concurrency_limiter=concurrency_limiter,
         )
 
         await task_registry.register(
