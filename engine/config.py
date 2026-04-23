@@ -14,7 +14,7 @@ class Config:
     max_depth: int = 4
     spawn_timeout: float = 60.0
     enable_wake_on_descendants: bool = True
-    max_concurrent_agents: int = 10
+    max_concurrent_agents: int = 5
     agent_timeout: float = 300.0
     max_registry_size: int = 1000
     max_result_length: int = 2500
