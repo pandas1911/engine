@@ -18,7 +18,7 @@ from .state import AgentStateMachine
 from engine.tools.base import ToolRegistry
 from engine.providers.llm_provider import LLMProviderError
 from engine.logging import get_logger
-from engine.safety import ConcurrencyLimiter
+from engine.safety import ConcurrencyLimiter, LaneConcurrencyQueue
 
 if TYPE_CHECKING:
     from engine.providers.llm_provider import LLMProvider
@@ -44,6 +44,7 @@ class Agent:
         parent_task_id: Optional[str] = None,
         label: Optional[str] = None,
         concurrency_limiter: Optional[ConcurrencyLimiter] = None,
+        lane_queue: Optional[LaneConcurrencyQueue] = None,
     ):
         self.session = session
         self.config = config
@@ -60,6 +61,7 @@ class Agent:
         self._error_info: Optional[AgentError] = None
         self.display_id = f"[{self.label}|{self.task_id}]"
         self._concurrency_limiter = concurrency_limiter
+        self._lane_queue = lane_queue
         self._event_queue: List[
             AgentEvent
         ] = []  # Deferred event queue (native list, Swift Array equivalent)
@@ -72,6 +74,7 @@ class Agent:
             parent_label=self.label,
             config=self.config,
             concurrency_limiter=self._concurrency_limiter,
+            lane_queue=self._lane_queue,
         )
         # Use provided registry or create new one
         self._tool_registry = tool_registry or ToolRegistry()
