@@ -1,8 +1,9 @@
+import json
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dotenv import load_dotenv
 import os
-from typing import Optional
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -31,6 +32,29 @@ class Config:
     # Retry
     llm_retry_max_attempts: int = 3     # Max retry attempts (1 = no retry, just the initial call)
     llm_retry_base_delay: float = 1.0   # Base delay in seconds for exponential backoff
+
+    # Multi-provider profiles (each dict: name, api_key, base_url, model, rpm_limit, tpm_limit)
+    provider_profiles: List[Dict] = field(default_factory=list)
+
+    # Lane concurrency
+    main_lane_concurrency: int = 4
+    subagent_lane_concurrency: int = 8
+
+    # Pacing
+    pacing_enabled: bool = True
+    pacing_min_interval_ms: float = 500.0
+
+    # API queue
+    api_queue_max_size: int = 100
+    api_queue_timeout: float = 120.0
+
+    # Key rotation and fallback
+    key_rotation_enabled: bool = True
+    fallback_enabled: bool = True
+
+    # Cooldown
+    cooldown_initial_ms: float = 30000.0
+    cooldown_max_ms: float = 300000.0
 
 
 class ConfigProvider(ABC):
@@ -67,11 +91,28 @@ class ConfigLoader:
     OPTIONAL_INT_KEYS = {
         "LLM_RETRY_MAX_ATTEMPTS": "llm_retry_max_attempts",
         "LLM_RATE_LIMIT_BURST": "rate_limit_burst",
+        "LLM_MAIN_LANE_CONCURRENCY": "main_lane_concurrency",
+        "LLM_SUBAGENT_LANE_CONCURRENCY": "subagent_lane_concurrency",
+        "LLM_API_QUEUE_MAX_SIZE": "api_queue_max_size",
     }
 
     OPTIONAL_FLOAT_KEYS = {
         "LLM_RATE_LIMIT_RPM": "rate_limit_rpm",
         "LLM_RETRY_BASE_DELAY": "llm_retry_base_delay",
+        "LLM_PACING_MIN_INTERVAL_MS": "pacing_min_interval_ms",
+        "LLM_COOLDOWN_INITIAL_MS": "cooldown_initial_ms",
+        "LLM_COOLDOWN_MAX_MS": "cooldown_max_ms",
+        "LLM_API_QUEUE_TIMEOUT": "api_queue_timeout",
+    }
+
+    OPTIONAL_BOOL_KEYS = {
+        "LLM_PACING_ENABLED": "pacing_enabled",
+        "LLM_KEY_ROTATION_ENABLED": "key_rotation_enabled",
+        "LLM_FALLBACK_ENABLED": "fallback_enabled",
+    }
+
+    OPTIONAL_JSON_KEYS = {
+        "LLM_PROVIDER_PROFILES": "provider_profiles",
     }
 
     @staticmethod
@@ -121,6 +162,43 @@ class ConfigLoader:
                     raise ValueError(
                         "Invalid value for {}: expected float, got '{}'".format(env_key, raw)
                     )
+
+        for env_key, field_name in ConfigLoader.OPTIONAL_BOOL_KEYS.items():
+            raw = provider.get(env_key)
+            if raw is not None and raw.strip() != "":
+                lower_raw = raw.strip().lower()
+                if lower_raw in ("true", "1", "yes", "on"):
+                    setattr(config, field_name, True)
+                elif lower_raw in ("false", "0", "no", "off"):
+                    setattr(config, field_name, False)
+                else:
+                    raise ValueError(
+                        "Invalid value for {}: expected bool, got '{}'".format(env_key, raw)
+                    )
+
+        for env_key, field_name in ConfigLoader.OPTIONAL_JSON_KEYS.items():
+            raw = provider.get(env_key)
+            if raw is not None and raw.strip() != "":
+                try:
+                    parsed = json.loads(raw)
+                    setattr(config, field_name, parsed)
+                except json.JSONDecodeError as e:
+                    raise ValueError(
+                        "Invalid value for {}: expected JSON, got '{}'".format(env_key, raw)
+                    ) from e
+
+        # Backward compatibility: auto-create a default provider profile from legacy keys
+        if not config.provider_profiles and config.api_key and config.base_url and config.model:
+            config.provider_profiles = [
+                {
+                    "name": "default",
+                    "api_key": config.api_key,
+                    "base_url": config.base_url,
+                    "model": config.model,
+                    "rpm_limit": config.rate_limit_rpm,
+                    "tpm_limit": 0,
+                }
+            ]
 
         if config.max_concurrent_agents < 2:
             raise ValueError(
