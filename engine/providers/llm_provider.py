@@ -11,7 +11,7 @@ from openai import AsyncOpenAI
 
 from engine.config import Config
 from engine.logging import get_logger
-from engine.safety import TokenBucketRateLimiter, RetryEngine
+from engine.safety import RetryEngine
 from .provider_models import LLMResponse, ToolCall, ErrorClass
 
 
@@ -84,16 +84,12 @@ class LLMProvider(BaseLLMProvider):
     def __init__(
         self,
         config: Config,
-        rate_limiter: Optional[TokenBucketRateLimiter] = None,
         retry_engine: Optional[RetryEngine] = None,
     ):
         """Initialize LLM provider.
 
         Args:
             config: Configuration containing API credentials
-            rate_limiter: Optional rate limiter for API call throttling.
-                          When None, no rate limiting is applied (zero overhead).
-                          Deprecated: use retry_engine for retry logic instead.
             retry_engine: Optional RetryEngine for error classification and
                           retry logic. When None, a default RetryEngine is
                           created from config.
@@ -105,7 +101,6 @@ class LLMProvider(BaseLLMProvider):
         )
         self.model = config.model
         self.strip_thinking = config.strip_thinking
-        self._rate_limiter = rate_limiter
         self._retry_engine = retry_engine or RetryEngine(
             max_attempts=config.llm_retry_max_attempts,
             base_delay=config.llm_retry_base_delay,
@@ -153,10 +148,6 @@ class LLMProvider(BaseLLMProvider):
 
         for attempt in range(1, self._retry_engine.max_attempts + 1):
             try:
-                # Rate limiting — acquire token before API call
-                if self._rate_limiter is not None:
-                    await self._rate_limiter.acquire()
-
                 response = await self.client.chat.completions.create(**params)
 
                 self._extract_rate_limit_headers(response)
