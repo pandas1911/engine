@@ -2,7 +2,13 @@ import asyncio
 import pytest
 
 from engine.config import Config, ConfigLoader
-from engine.safety import ConcurrencyLimiter
+from engine.providers.provider_models import Lane
+from engine.safety import (
+    ConcurrencyLimiter,
+    LaneConcurrencyQueue,
+    LaneSlot,
+    LaneStatus,
+)
 from engine.runtime.agent_models import Session, AgentState
 from engine.runtime.task_registry import AgentTaskRegistry
 from engine.runtime.agent import Agent
@@ -271,3 +277,239 @@ async def test_no_concurrent_breach(config, task_registry, mock_drainable):
     assert peak_count[0] <= 2
     for r in results:
         assert "Spawned Task" in r
+
+
+def test_lane_queue_configure_lane_validation():
+    queue = LaneConcurrencyQueue()
+    queue.configure_lane(Lane.MAIN, max_concurrent=1)
+    queue.configure_lane(Lane.MAIN, max_concurrent=5)
+    with pytest.raises(ValueError, match="max_concurrent must be >= 1"):
+        queue.configure_lane(Lane.SUBAGENT, max_concurrent=0)
+
+
+@pytest.mark.asyncio
+async def test_lane_queue_lane_isolation():
+    queue = LaneConcurrencyQueue()
+    queue.configure_lane(Lane.MAIN, max_concurrent=1)
+    queue.configure_lane(Lane.SUBAGENT, max_concurrent=1)
+
+    async with await queue.acquire(Lane.MAIN):
+        async with await queue.acquire(Lane.SUBAGENT):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_lane_queue_sequential_execution():
+    queue = LaneConcurrencyQueue()
+    queue.configure_lane(Lane.MAIN, max_concurrent=1)
+
+    peak_active = [0]
+    timestamps = []
+
+    async def work():
+        async with await queue.acquire(Lane.MAIN):
+            status = queue.get_status()[Lane.MAIN]
+            peak_active[0] = max(peak_active[0], status.active)
+            timestamps.append(asyncio.get_running_loop().time())
+            await asyncio.sleep(0.1)
+
+    await asyncio.gather(work(), work())
+
+    assert peak_active[0] == 1
+    assert len(timestamps) == 2
+    assert timestamps[1] - timestamps[0] >= 0.05
+
+
+@pytest.mark.asyncio
+async def test_lane_queue_context_manager_auto_release():
+    queue = LaneConcurrencyQueue()
+    queue.configure_lane(Lane.MAIN, max_concurrent=1)
+
+    async with await queue.acquire(Lane.MAIN):
+        assert queue.get_status()[Lane.MAIN].active == 1
+
+    assert queue.get_status()[Lane.MAIN].active == 0
+
+
+@pytest.mark.asyncio
+async def test_lane_queue_unconfigured_lane_raises():
+    queue = LaneConcurrencyQueue()
+    with pytest.raises(ValueError, match="Lane main is not configured"):
+        await queue.acquire(Lane.MAIN)
+
+
+@pytest.mark.asyncio
+async def test_lane_queue_timeout_raises():
+    queue = LaneConcurrencyQueue()
+    queue.configure_lane(Lane.MAIN, max_concurrent=1)
+
+    async with await queue.acquire(Lane.MAIN):
+        with pytest.raises(TimeoutError, match="Timeout waiting for lane main"):
+            await queue.acquire(Lane.MAIN, timeout=0.05)
+
+
+@pytest.mark.asyncio
+async def test_lane_queue_get_status():
+    queue = LaneConcurrencyQueue()
+    queue.configure_lane(Lane.MAIN, max_concurrent=2)
+    queue.configure_lane(Lane.SUBAGENT, max_concurrent=3)
+
+    status_before = queue.get_status()
+    assert status_before[Lane.MAIN] == LaneStatus(active=0, waiting=0, max_concurrent=2)
+    assert status_before[Lane.SUBAGENT] == LaneStatus(active=0, waiting=0, max_concurrent=3)
+
+    slot = await queue.acquire(Lane.MAIN)
+    status_during = queue.get_status()
+    assert status_during[Lane.MAIN].active == 1
+    assert status_during[Lane.MAIN].waiting == 0
+    slot._queue._release_slot(Lane.MAIN)
+
+    status_after = queue.get_status()
+    assert status_after[Lane.MAIN].active == 0
+
+
+@pytest.mark.asyncio
+async def test_lane_queue_wait_for_drain():
+    queue = LaneConcurrencyQueue()
+    queue.configure_lane(Lane.MAIN, max_concurrent=1)
+
+    async def hold_slot(delay: float):
+        async with await queue.acquire(Lane.MAIN):
+            await asyncio.sleep(delay)
+
+    asyncio.create_task(hold_slot(0.1))
+    drained = await queue.wait_for_drain(timeout=1.0)
+    assert drained is True
+
+    asyncio.create_task(hold_slot(10.0))
+    drained_timeout = await queue.wait_for_drain(timeout=0.05)
+    assert drained_timeout is False
+
+
+@pytest.mark.asyncio
+async def test_spawn_with_lane_queue_uses_subagent_lane(config, task_registry, mock_drainable):
+    queue = LaneConcurrencyQueue()
+    queue.configure_lane(Lane.SUBAGENT, max_concurrent=1)
+
+    slot = await queue.acquire(Lane.SUBAGENT)
+    manager = SubAgentManager(
+        task_registry=task_registry,
+        event_queue=[],
+        drainable=mock_drainable,
+        agent_task_id="parent1",
+        parent_label="Root",
+        config=config,
+        lane_queue=queue,
+    )
+    session = Session(id="s1", depth=0)
+    result = await manager.spawn(
+        task_desc="lane test",
+        label="lane-label",
+        parent_session=session,
+        config=config,
+        agent_factory=None,
+    )
+    assert "timed out" in result.lower()
+    assert "completing this task yourself directly" in result
+    slot._queue._release_slot(Lane.SUBAGENT)
+
+
+@pytest.mark.asyncio
+async def test_spawn_with_lane_queue_queuing_under_load(config, task_registry, mock_drainable):
+    queue = LaneConcurrencyQueue()
+    queue.configure_lane(Lane.SUBAGENT, max_concurrent=2)
+
+    manager = SubAgentManager(
+        task_registry=task_registry,
+        event_queue=[],
+        drainable=mock_drainable,
+        agent_task_id="parent1",
+        parent_label="Root",
+        config=config,
+        lane_queue=queue,
+    )
+
+    done_events = [asyncio.Event() for _ in range(4)]
+    peak_active = [0]
+    idx_counter = [0]
+
+    class TrackingSlowAgent:
+        def __init__(self, event):
+            self.state = AgentState.COMPLETED
+            self.result = "done"
+            self._final_result = "done"
+            self.event = event
+
+        async def run(self, task_desc):
+            status = queue.get_status()[Lane.SUBAGENT]
+            peak_active[0] = max(peak_active[0], status.active)
+            await asyncio.sleep(0.1)
+            self.event.set()
+
+        async def abort(self, error):
+            pass
+
+    def agent_factory(session, cfg, registry, parent_task_id, task_id, label=None):
+        idx = idx_counter[0]
+        idx_counter[0] += 1
+        return TrackingSlowAgent(done_events[idx])
+
+    session = Session(id="s1", depth=0)
+    results = await asyncio.gather(
+        manager.spawn("task1", "l1", session, config, agent_factory),
+        manager.spawn("task2", "l2", session, config, agent_factory),
+        manager.spawn("task3", "l3", session, config, agent_factory),
+        manager.spawn("task4", "l4", session, config, agent_factory),
+    )
+
+    await asyncio.gather(*(e.wait() for e in done_events))
+
+    assert peak_active[0] <= 2
+    for r in results:
+        assert "Spawned Task" in r
+
+
+@pytest.mark.asyncio
+async def test_spawn_with_lane_queue_auto_release_on_completion(config, task_registry, mock_drainable, success_agent):
+    queue = LaneConcurrencyQueue()
+    queue.configure_lane(Lane.SUBAGENT, max_concurrent=1)
+
+    manager = SubAgentManager(
+        task_registry=task_registry,
+        event_queue=[],
+        drainable=mock_drainable,
+        agent_task_id="parent1",
+        parent_label="Root",
+        config=config,
+        lane_queue=queue,
+    )
+    agent = success_agent()
+    assert queue.get_status()[Lane.SUBAGENT].active == 0
+    await manager._run_child(agent, "task1", "desc", 1)
+    assert queue.get_status()[Lane.SUBAGENT].active == 0
+
+
+@pytest.mark.asyncio
+async def test_spawn_fallback_to_concurrency_limiter(config, task_registry, mock_drainable):
+    limiter = ConcurrencyLimiter(1)
+    await limiter.acquire()
+    manager = SubAgentManager(
+        task_registry=task_registry,
+        event_queue=[],
+        drainable=mock_drainable,
+        agent_task_id="parent1",
+        parent_label="Root",
+        config=config,
+        concurrency_limiter=limiter,
+        lane_queue=None,
+    )
+    session = Session(id="s1", depth=0)
+    result = await manager.spawn(
+        task_desc="fallback test",
+        label="fallback-label",
+        parent_session=session,
+        config=config,
+        agent_factory=None,
+    )
+    assert "timed out" in result.lower()
+    limiter.release()

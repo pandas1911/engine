@@ -13,7 +13,9 @@ from engine.logging import init_logger, get_logger, stop_logger
 from engine.runtime.agent_models import AgentError, AgentResult, AgentState, ErrorCategory, Session
 from engine.runtime.task_registry import AgentTaskRegistry
 from engine.tools.base import Tool, FunctionTool
-from engine.safety import ConcurrencyLimiter, TokenBucketRateLimiter
+from engine.safety import LaneConcurrencyQueue, SlidingWindowRateLimiter, AdaptivePacer, APIKeyPool, RetryEngine
+from engine.providers.fallback_provider import FallbackLLMProvider
+from engine.providers.provider_models import ProviderProfile, Lane
 
 __all__ = ["delegate", "Tool", "FunctionTool", "AgentResult", "AgentTaskRegistry", "init_logger", "get_logger", "stop_logger"]
 
@@ -80,22 +82,96 @@ async def delegate(
 
         init_logger(log_dir=config.log_dir)
 
-        # Create rate limiter if RPM is configured (> 0 means enabled)
-        rate_limiter = None
-        if config.rate_limit_rpm > 0:
-            refill_rate = config.rate_limit_rpm / 60.0  # Convert RPM to tokens/sec
-            rate_limiter = TokenBucketRateLimiter(
-                max_tokens=config.rate_limit_burst,
-                refill_rate=refill_rate,
+        # Resolve provider profiles (backward compatible)
+        profiles = []
+        if config.provider_profiles:
+            for p in config.provider_profiles:
+                profiles.append(ProviderProfile(**p))
+        else:
+            # Backward compat: create single profile from legacy .env vars
+            profiles.append(ProviderProfile(
+                name="default",
+                api_key=config.api_key,
+                base_url=config.base_url,
+                model=config.model,
+                rpm_limit=config.rate_limit_rpm,
+                tpm_limit=0,
+            ))
+
+        # Create per-profile infrastructure
+        providers = {}       # profile_name -> LLMProvider
+        rate_limiters = {}   # profile_name -> SlidingWindowRateLimiter
+        pacers = {}          # profile_name -> AdaptivePacer
+
+        for profile in profiles:
+            # Create a Config object for each profile's LLMProvider
+            from engine.config import Config as ConfigClass
+            provider_config = ConfigClass(
+                api_key=profile.api_key,
+                base_url=profile.base_url,
+                model=profile.model,
+                llm_retry_max_attempts=config.llm_retry_max_attempts,
+                llm_retry_base_delay=config.llm_retry_base_delay,
             )
 
-        llm_provider = LLMProvider(config, rate_limiter=rate_limiter)
+            # Rate limiter (RPM + TPM)
+            limiter = None
+            if profile.rpm_limit > 0 or profile.tpm_limit > 0:
+                limiter = SlidingWindowRateLimiter(
+                    rpm_limit=profile.rpm_limit,
+                    tpm_limit=profile.tpm_limit,
+                    profile_name=profile.name,
+                )
+            rate_limiters[profile.name] = limiter
+
+            # Adaptive pacer
+            pacer = None
+            if config.pacing_enabled:
+                pacer = AdaptivePacer(
+                    min_interval_ms=config.pacing_min_interval_ms,
+                    enabled=True,
+                )
+            pacers[profile.name] = pacer
+
+            # LLM Provider
+            providers[profile.name] = LLMProvider(
+                provider_config,
+                retry_engine=RetryEngine(
+                    max_attempts=config.llm_retry_max_attempts,
+                    base_delay=config.llm_retry_base_delay,
+                ),
+            )
+
+        # Create shared components
+        key_pool = APIKeyPool(
+            profiles,
+            cooldown_initial_ms=config.cooldown_initial_ms,
+            cooldown_max_ms=config.cooldown_max_ms,
+        )
+
+        shared_retry_engine = RetryEngine(
+            max_attempts=config.llm_retry_max_attempts,
+            base_delay=config.llm_retry_base_delay,
+        )
+
+        # Create FallbackProvider
+        llm_provider = FallbackLLMProvider(
+            providers=providers,
+            key_pool=key_pool,
+            rate_limiters=rate_limiters,
+            pacers=pacers,
+            retry_engine=shared_retry_engine,
+        )
+
         task_registry = AgentTaskRegistry()
 
         custom_tools = _discover_custom_tools()
         all_tools = custom_tools + (tools or [])
 
-        concurrency_limiter = ConcurrencyLimiter(config.max_concurrent_agents)
+        # Create Lane Concurrency Queue
+        lane_queue = LaneConcurrencyQueue()
+        lane_queue.configure_lane(Lane.MAIN, max_concurrent=config.main_lane_concurrency)
+        lane_queue.configure_lane(Lane.SUBAGENT, max_concurrent=config.subagent_lane_concurrency)
 
         agent = Agent(
             session=session,
@@ -103,7 +179,7 @@ async def delegate(
             task_registry=task_registry,
             llm_provider=llm_provider,
             tools=all_tools,
-            concurrency_limiter=concurrency_limiter,
+            lane_queue=lane_queue,
         )
 
         await task_registry.register(
