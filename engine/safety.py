@@ -923,6 +923,7 @@ class AdaptivePacer:
         self._remaining_fraction = 1.0
         self._last_call_timestamp: Optional[float] = None
         self._pace_level = PaceLevel.HEALTHY
+        self._lock = asyncio.Lock()
 
     def update_from_snapshot(self, snapshot: RateLimitSnapshot) -> None:
         """Update pace level from a RateLimitSnapshot.
@@ -1034,31 +1035,32 @@ class AdaptivePacer:
         if not self._enabled:
             return
 
-        now = time.monotonic()
-        actual_delay_ms = 0.0
+        async with self._lock:
+            now = time.monotonic()
+            actual_delay_ms = 0.0
 
-        if self._last_call_timestamp is not None:
-            elapsed_ms = (now - self._last_call_timestamp) * 1000.0
-            remaining_ms = max(0.0, self._min_interval_ms - elapsed_ms)
-            actual_delay_ms += remaining_ms
-        actual_delay_ms += self.get_recommended_delay()
+            if self._last_call_timestamp is not None:
+                elapsed_ms = (now - self._last_call_timestamp) * 1000.0
+                remaining_ms = max(0.0, self._min_interval_ms - elapsed_ms)
+                actual_delay_ms += remaining_ms
+            actual_delay_ms += self.get_recommended_delay()
 
-        if actual_delay_ms > 0:
-            await asyncio.sleep(actual_delay_ms / 1000.0)
-            get_logger().info(
-                "RateControl",
-                "pace_wait | delay_ms={:.1f} level={}".format(
-                    actual_delay_ms,
-                    self._pace_level.value,
-                ),
-                event_type="pace_wait",
-                data={
-                    "delay_ms": actual_delay_ms,
-                    "pace_level": self._pace_level.value,
-                },
-            )
+            if actual_delay_ms > 0:
+                await asyncio.sleep(actual_delay_ms / 1000.0)
+                get_logger().info(
+                    "RateControl",
+                    "pace_wait | delay_ms={:.1f} level={}".format(
+                        actual_delay_ms,
+                        self._pace_level.value,
+                    ),
+                    event_type="pace_wait",
+                    data={
+                        "delay_ms": actual_delay_ms,
+                        "pace_level": self._pace_level.value,
+                    },
+                )
 
-        self._last_call_timestamp = time.monotonic()
+            self._last_call_timestamp = time.monotonic()
 
 
 __all__ = [
