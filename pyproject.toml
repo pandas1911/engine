@@ -3,15 +3,20 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-system"
+name = "engine"
 version = "0.1.0"
 description = "Agent system for AI automation"
 requires-python = ">=3.8"
 dependencies = [
+    "httpx",
     "openai",
     "python-dotenv",
     "pytest>=7.0",
+    "pytest-asyncio",
 ]
 
-[tool.setuptools]
-package-dir = {"" = "src"}
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["engine*"]

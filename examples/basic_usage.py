@@ -3,13 +3,13 @@ import asyncio
 import sys
 import uuid
 
-from src.agent_core import Agent
-from src.config import ConfigLoader
-from src.llm_provider import LLMProvider
-from src.models import AgentState, Session
-from src.registry import SubagentRegistry
+from engine.runtime.agent import Agent
+from engine.config import ConfigLoader
+from engine.providers.llm_provider import LLMProvider
+from engine.runtime.agent_models import AgentState, Session
+from engine.runtime.task_registry import AgentTaskRegistry
 
-from src.tools.custom.mock import MockTool
+from engine.tools.custom.mock import MockTool
 
 
 DEFAULT_PROMPT = """ 
@@ -40,8 +40,8 @@ async def run_agent_system(prompt: str) -> str:
     llm_provider = LLMProvider(config)
     print(f"      Provider: {config.model}")
 
-    print("[3/4] Creating subagent registry...")
-    registry = SubagentRegistry()
+    print("[3/4] Creating agent task registry...")
+    task_registry = AgentTaskRegistry()
 
     print("[4/4] Creating agent session...")
     session_id = f"root_{uuid.uuid4().hex[:8]}"
@@ -58,14 +58,14 @@ async def run_agent_system(prompt: str) -> str:
     agent = Agent(
         session=session,
         config=config,
-        registry=registry,
+        task_registry=task_registry,
         llm_provider=llm_provider,
         tools=[MockTool()],
     )
     print(f"      Agent: [{agent.label}|{agent.task_id}]")
 
-    # Register root agent in SubagentRegistry
-    await registry.register(
+    # Register root agent in AgentTaskRegistry
+    await task_registry.register(
         task_id=agent.task_id,
         session_id=session.id,
         description="root task",

@@ -1,12 +1,14 @@
-"""Agent system data models.
+"""Agent runtime data models."""
 
-This module contains all data models for the Agent system.
-"""
+from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from dataclasses import dataclass, field
+
+if TYPE_CHECKING:
+    from engine.subagent.subagent_models import CollectedChildResult
 
 
 class AgentState(Enum):
@@ -17,6 +19,25 @@ class AgentState(Enum):
     WAITING_FOR_CHILDREN = "waiting_for_children"
     COMPLETED = "completed"
     ERROR = "error"
+
+
+class ErrorCategory(Enum):
+    """Error categories — extend as needed."""
+    LLM_ERROR = "llm_error"
+    INTERNAL_ERROR = "internal_error"
+
+
+@dataclass
+class AgentError:
+    """Structured error information for programmatic consumers."""
+    category: ErrorCategory
+    message: str
+    exception_type: Optional[str] = None
+
+    def __str__(self) -> str:
+        if self.exception_type:
+            return "[{}] {} - {}".format(self.category.value, self.exception_type, self.message)
+        return "[{}] {}".format(self.category.value, self.message)
 
 
 @dataclass
@@ -57,46 +78,9 @@ class Session:
 
 
 @dataclass
-class ToolCall:
-    """A tool call from the LLM."""
-
-    name: str
-    arguments: Dict[str, Any]
-    call_id: str
-
-
-@dataclass
-class LLMResponse:
-    """Response from an LLM provider."""
-
-    content: Optional[str] = None
-    tool_calls: List[ToolCall] = field(default_factory=list)
-
-    def has_tool_calls(self) -> bool:
-        """Check if response contains tool calls."""
-        return len(self.tool_calls) > 0
-
-
-@dataclass
-class SubagentTask:
-    """A task for a subagent execution."""
-
-    task_id: str
-    session_id: str
-    task_description: str
-    parent_agent: Any  # Forward reference to Agent
-    parent_task_id: Optional[str] = None
-    result: Optional[str] = None
-    depth: int = 0
-    child_task_ids: Set[str] = field(default_factory=set)
-    ended_at: Optional[float] = None
-    agent: Optional[Any] = None  # Reference to the agent instance for this task
-
-
-@dataclass
 class QueueEvent:
     trigger_task_id: str  # Trigger child task_id (debug/log)
-    child_results: Dict[str, str]  # All child task_id → result aggregation
+    child_results: Dict[str, CollectedChildResult]  # All child task_id → enriched result
     error: bool
 
 
@@ -107,16 +91,15 @@ class AgentResult:
     content: str
     session: Session
     success: bool
-    error: Optional[str] = None
+    error: Optional[AgentError] = None
 
 
 __all__ = [
     "AgentState",
+    "ErrorCategory",
+    "AgentError",
     "Message",
     "Session",
-    "ToolCall",
-    "LLMResponse",
-    "SubagentTask",
     "QueueEvent",
     "AgentResult",
 ]
