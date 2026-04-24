@@ -211,6 +211,9 @@ class LLMProvider(BaseLLMProvider):
                 if error_class == ErrorClass.NON_RETRYABLE:
                     raise LLMProviderError(e) from e
 
+                if error_class == ErrorClass.RATE_LIMITED:
+                    raise LLMProviderError(e) from e
+
                 if attempt < self._retry_engine.max_attempts:
                     retry_after = self._retry_engine.extract_retry_after(e)
                     delay = self._retry_engine.compute_delay(attempt, retry_after)
