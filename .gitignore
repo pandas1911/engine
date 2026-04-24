@@ -1,5 +1,6 @@
 # Environment variables
 .env
+engine.json
 
 # Project specific files
 # AGENTS.md

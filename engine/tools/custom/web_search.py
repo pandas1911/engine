@@ -3,6 +3,10 @@
 import os
 
 import httpx
+from dotenv import load_dotenv
+
+# Load BOCHA_API_KEY from .env since core engine no longer calls load_dotenv
+load_dotenv(override=False)
 
 from engine.safety import ResultTruncator
 from engine.tools.base import Tool
@@ -51,7 +55,7 @@ class WebSearchTool(Tool):
         """
         api_key = os.getenv("BOCHA_API_KEY")
         if not api_key:
-            return "Web search unavailable: BOCHA_API_KEY not configured in .env"
+            return "Web search unavailable: BOCHA_API_KEY not configured"
 
         query = arguments.get("query", "")
         if not query or not query.strip():

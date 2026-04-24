@@ -1,7 +1,7 @@
 import asyncio
 import pytest
 
-from engine.config import Config, ConfigLoader
+from engine.config import Config
 from engine.providers.provider_models import Lane
 from engine.safety import (
     ConcurrencyLimiter,
@@ -16,12 +16,12 @@ from engine.subagent.manager import SubAgentManager
 
 
 def test_config_default_values():
-    config = Config(api_key="k", base_url="u", model="m")
-    assert config.max_concurrent_agents == 10
+    config = Config()
+    assert config.max_concurrent_agents == 8
 
 
 def test_config_rejects_low_max_concurrent():
-    config = Config(api_key="k", base_url="u", model="m", max_concurrent_agents=1)
+    config = Config(max_concurrent_agents=1)
     assert config.max_concurrent_agents == 1
     with pytest.raises(ValueError, match="max_concurrent_agents must be >= 2"):
         if config.max_concurrent_agents < 2:

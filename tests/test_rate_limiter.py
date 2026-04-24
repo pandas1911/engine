@@ -135,9 +135,6 @@ class TestLLMProviderRetry:
     def _make_config(self, **overrides):
         """Create a mock Config for testing."""
         config = MagicMock()
-        config.api_key = "test-key"
-        config.base_url = "https://api.test.com/v1"
-        config.model = "test-model"
         config.strip_thinking = True
         config.llm_retry_max_attempts = overrides.get("max_attempts", 3)
         config.llm_retry_base_delay = overrides.get("base_delay", 0.01)  # Fast for tests
@@ -147,7 +144,12 @@ class TestLLMProviderRetry:
     async def test_success_first_attempt(self):
         """Successful call returns immediately, no retry."""
         config = self._make_config()
-        provider = LLMProvider(config)
+        provider = LLMProvider(
+            api_key="test-key",
+            base_url="https://api.test.com/v1",
+            model="test-model",
+            config=config,
+        )
 
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
@@ -171,7 +173,12 @@ class TestLLMProviderRetry:
     async def test_retry_on_error_then_succeed(self):
         """Retry on transient error, succeed on 2nd attempt."""
         config = self._make_config(max_attempts=3, base_delay=0.01)
-        provider = LLMProvider(config)
+        provider = LLMProvider(
+            api_key="test-key",
+            base_url="https://api.test.com/v1",
+            model="test-model",
+            config=config,
+        )
 
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
@@ -196,7 +203,12 @@ class TestLLMProviderRetry:
     async def test_retry_exhausted_raises_llm_provider_error(self):
         """All retries exhausted raises LLMProviderError."""
         config = self._make_config(max_attempts=3, base_delay=0.01)
-        provider = LLMProvider(config)
+        provider = LLMProvider(
+            api_key="test-key",
+            base_url="https://api.test.com/v1",
+            model="test-model",
+            config=config,
+        )
 
         provider.client.chat.completions.create = AsyncMock(
             side_effect=ConnectionError("persistent failure")
@@ -217,7 +229,12 @@ class TestLLMProviderRetry:
     async def test_cancelled_error_propagates(self):
         """CancelledError is NOT caught by retry logic."""
         config = self._make_config(max_attempts=3, base_delay=0.01)
-        provider = LLMProvider(config)
+        provider = LLMProvider(
+            api_key="test-key",
+            base_url="https://api.test.com/v1",
+            model="test-model",
+            config=config,
+        )
 
         provider.client.chat.completions.create = AsyncMock(
             side_effect=asyncio.CancelledError()
@@ -240,9 +257,6 @@ class TestLLMProviderHeaderExtraction:
     def _make_config(self, **overrides):
         """Create a mock Config for testing."""
         config = MagicMock()
-        config.api_key = "test-key"
-        config.base_url = "https://api.test.com/v1"
-        config.model = "test-model"
         config.strip_thinking = True
         config.llm_retry_max_attempts = overrides.get("max_attempts", 3)
         config.llm_retry_base_delay = overrides.get("base_delay", 0.01)
@@ -252,7 +266,12 @@ class TestLLMProviderHeaderExtraction:
     async def test_header_extraction_standard_headers(self):
         """Extract rate limit info from standard OpenAI headers."""
         config = self._make_config()
-        provider = LLMProvider(config)
+        provider = LLMProvider(
+            api_key="test-key",
+            base_url="https://api.test.com/v1",
+            model="test-model",
+            config=config,
+        )
 
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
@@ -286,7 +305,12 @@ class TestLLMProviderHeaderExtraction:
     async def test_header_extraction_no_headers(self):
         """Gracefully handle responses with no rate limit headers (e.g., DashScope)."""
         config = self._make_config()
-        provider = LLMProvider(config)
+        provider = LLMProvider(
+            api_key="test-key",
+            base_url="https://api.test.com/v1",
+            model="test-model",
+            config=config,
+        )
 
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
@@ -310,7 +334,12 @@ class TestLLMProviderHeaderExtraction:
     async def test_header_extraction_alternate_headers(self):
         """Extract rate limit info from alternate header names."""
         config = self._make_config()
-        provider = LLMProvider(config)
+        provider = LLMProvider(
+            api_key="test-key",
+            base_url="https://api.test.com/v1",
+            model="test-model",
+            config=config,
+        )
 
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
@@ -340,7 +369,12 @@ class TestLLMProviderHeaderExtraction:
     async def test_usage_extraction(self):
         """Extract token usage from response."""
         config = self._make_config()
-        provider = LLMProvider(config)
+        provider = LLMProvider(
+            api_key="test-key",
+            base_url="https://api.test.com/v1",
+            model="test-model",
+            config=config,
+        )
 
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]

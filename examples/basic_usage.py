@@ -29,16 +29,22 @@ async def run_agent_system(prompt: str) -> str:
 
     print("[1/4] Loading configuration...")
     try:
-        config = ConfigLoader.load_from_env()
-        print(f"      Model: {config.model}")
+        config = ConfigLoader.load_from_json()
+        primary = config.provider_profiles[0]
+        print(f"      Model: {primary['model']}")
         print(f"      Max Depth: {config.max_depth}")
     except ValueError as e:
         print(f"[Error] Configuration error: {e}")
         sys.exit(1)
 
     print("[2/4] Initializing LLM provider...")
-    llm_provider = LLMProvider(config)
-    print(f"      Provider: {config.model}")
+    llm_provider = LLMProvider(
+        api_key=primary["api_key"],
+        base_url=primary["base_url"],
+        model=primary["model"],
+        config=config,
+    )
+    print(f"      Provider: {primary['model']}")
 
     print("[3/4] Creating agent task registry...")
     task_registry = AgentTaskRegistry()

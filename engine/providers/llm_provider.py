@@ -83,23 +83,27 @@ class LLMProvider(BaseLLMProvider):
 
     def __init__(
         self,
+        api_key: str,
+        base_url: str,
+        model: str,
         config: Config,
         retry_engine: Optional[RetryEngine] = None,
     ):
         """Initialize LLM provider.
 
         Args:
-            config: Configuration containing API credentials
-            retry_engine: Optional RetryEngine for error classification and
-                          retry logic. When None, a default RetryEngine is
-                          created from config.
+            api_key: API key for the LLM service
+            base_url: Base URL for the API endpoint
+            model: Model name to use
+            config: Configuration for global settings (strip_thinking, retry, etc.)
+            retry_engine: Optional RetryEngine. When None, created from config.
         """
         self.client = AsyncOpenAI(
-            api_key=config.api_key,
-            base_url=config.base_url,
+            api_key=api_key,
+            base_url=base_url,
             max_retries=0,  # Disable SDK built-in retry — we handle retry ourselves
         )
-        self.model = config.model
+        self.model = model
         self.strip_thinking = config.strip_thinking
         self._retry_engine = retry_engine or RetryEngine(
             max_attempts=config.llm_retry_max_attempts,

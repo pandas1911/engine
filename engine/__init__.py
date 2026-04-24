@@ -82,21 +82,7 @@ async def delegate(
 
         init_logger(log_dir=config.log_dir)
 
-        # Resolve provider profiles (backward compatible)
-        profiles = []
-        if config.provider_profiles:
-            for p in config.provider_profiles:
-                profiles.append(ProviderProfile(**p))
-        else:
-            # Backward compat: create single profile from legacy .env vars
-            profiles.append(ProviderProfile(
-                name="default",
-                api_key=config.api_key,
-                base_url=config.base_url,
-                model=config.model,
-                rpm_limit=config.rate_limit_rpm,
-                tpm_limit=0,
-            ))
+        profiles = [ProviderProfile(**p) for p in config.provider_profiles]
 
         # Create per-profile infrastructure
         providers = {}       # profile_name -> LLMProvider
@@ -104,16 +90,6 @@ async def delegate(
         pacers = {}          # profile_name -> AdaptivePacer
 
         for profile in profiles:
-            # Create a Config object for each profile's LLMProvider
-            from engine.config import Config as ConfigClass
-            provider_config = ConfigClass(
-                api_key=profile.api_key,
-                base_url=profile.base_url,
-                model=profile.model,
-                llm_retry_max_attempts=config.llm_retry_max_attempts,
-                llm_retry_base_delay=config.llm_retry_base_delay,
-            )
-
             # Rate limiter (RPM + TPM)
             limiter = None
             if profile.rpm_limit > 0 or profile.tpm_limit > 0:
@@ -135,7 +111,10 @@ async def delegate(
 
             # LLM Provider
             providers[profile.name] = LLMProvider(
-                provider_config,
+                api_key=profile.api_key,
+                base_url=profile.base_url,
+                model=profile.model,
+                config=config,
                 retry_engine=RetryEngine(
                     max_attempts=config.llm_retry_max_attempts,
                     base_delay=config.llm_retry_base_delay,

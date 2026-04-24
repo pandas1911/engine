@@ -2,7 +2,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 import pytest
 
-from engine.config import Config, ConfigProvider, ConfigLoader
+from engine.config import Config
 from engine.safety import ConcurrencyLimiter
 from engine.runtime.agent_models import Session, AgentState
 from engine.runtime.task_registry import AgentTaskRegistry
@@ -11,9 +11,6 @@ from engine.runtime.task_registry import AgentTaskRegistry
 @pytest.fixture
 def config():
     return Config(
-        api_key="test-key",
-        base_url="http://test.example.com",
-        model="test-model",
         max_concurrent_agents=3,
         spawn_timeout=0.5,
     )
@@ -45,23 +42,6 @@ def mock_drainable():
     drainable = MagicMock()
     drainable.state = AgentState.RUNNING
     return drainable
-
-
-class MockConfigProvider(ConfigProvider):
-    def __init__(self, values=None):
-        self.values = values or {
-            "LLM_API_KEY": "test-key",
-            "LLM_BASE_URL": "http://test.example.com",
-            "LLM_MODEL": "test-model",
-        }
-
-    def get(self, key):
-        return self.values.get(key)
-
-
-@pytest.fixture
-def mock_config_provider():
-    return MockConfigProvider()
 
 
 class SuccessAgent:
