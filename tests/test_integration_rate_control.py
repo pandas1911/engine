@@ -424,3 +424,54 @@ class TestIntegrationRateControl:
         assert final_status[Lane.MAIN].waiting == 0
         assert final_status[Lane.SUBAGENT].active == 0
         assert final_status[Lane.SUBAGENT].waiting == 0
+
+    @pytest.mark.asyncio
+    async def test_rate_limited_no_internal_retry_rotates_immediately(self):
+        """429 raises immediately from LLMProvider (no internal retry),
+        so FallbackLLMProvider rotates to the next key on first 429."""
+        profiles = _make_profiles(["p1", "p2"])
+
+        mock_p1 = _make_mock_provider(
+            raise_error=Exception("429 rate limit exceeded")
+        )
+        mock_p2 = _make_mock_provider(response_content="Fallback OK")
+
+        key_pool = APIKeyPool(profiles)
+        rate_limiters = {
+            "p1": SlidingWindowRateLimiter(
+                rpm_limit=60.0, tpm_limit=100000.0, profile_name="p1"
+            ),
+            "p2": SlidingWindowRateLimiter(
+                rpm_limit=60.0, tpm_limit=100000.0, profile_name="p2"
+            ),
+        }
+        pacers = {
+            "p1": AdaptivePacer(min_interval_ms=10, enabled=True),
+            "p2": AdaptivePacer(min_interval_ms=10, enabled=True),
+        }
+        retry_engine = RetryEngine(max_attempts=2, base_delay=0.01)
+
+        fallback = FallbackLLMProvider(
+            providers={"p1": mock_p1, "p2": mock_p2},
+            key_pool=key_pool,
+            rate_limiters=rate_limiters,
+            pacers=pacers,
+            retry_engine=retry_engine,
+            max_profile_rotations=1,
+        )
+
+        with patch("engine.safety.time.monotonic", return_value=1000.0):
+            result = await fallback.chat(
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[],
+                agent_label="Test",
+                task_id="t1",
+            )
+
+        assert result.content == "Fallback OK"
+        assert mock_p1.chat.await_count == 1, (
+            "p1 should be called exactly once (no internal retry), got {}".format(
+                mock_p1.chat.await_count
+            )
+        )
+        assert mock_p2.chat.await_count == 1

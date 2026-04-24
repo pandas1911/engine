@@ -251,6 +251,32 @@ class TestLLMProviderRetry:
         # Should only have been called once — no retry on CancelledError
         assert provider.client.chat.completions.create.call_count == 1
 
+    @pytest.mark.asyncio
+    async def test_rate_limited_raises_immediately(self):
+        """RATE_LIMITED errors raise immediately without retrying."""
+        config = self._make_config(max_attempts=3, base_delay=0.01)
+        provider = LLMProvider(
+            api_key="test-key",
+            base_url="https://api.test.com/v1",
+            model="test-model",
+            config=config,
+        )
+
+        provider.client.chat.completions.create = AsyncMock(
+            side_effect=Exception("429 rate limit exceeded")
+        )
+
+        with pytest.raises(LLMProviderError) as exc_info:
+            await provider.chat(
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[],
+                agent_label="Test",
+                task_id="test-rl-1",
+            )
+
+        assert "429" in str(exc_info.value.original_error)
+        assert provider.client.chat.completions.create.call_count == 1
+
 class TestLLMProviderHeaderExtraction:
     """Tests for rate limit header and usage extraction."""
 
@@ -1426,3 +1452,23 @@ class TestAdaptivePacer:
         pacer = AdaptivePacer(min_interval_ms=100, enabled=False)
         assert pacer._min_interval_ms == 100
         assert pacer._enabled is False
+
+
+@pytest.mark.asyncio
+async def test_concurrent_wait_if_needed_serialized():
+    """Concurrent callers are serialized by the asyncio.Lock, ensuring
+    each caller respects min_interval_ms."""
+    pacer = AdaptivePacer(min_interval_ms=100, enabled=True)
+    timestamps = []
+
+    async def worker():
+        await pacer.wait_if_needed()
+        timestamps.append(time.monotonic())
+
+    tasks = [asyncio.create_task(worker()) for _ in range(5)]
+    await asyncio.gather(*tasks)
+
+    assert len(timestamps) == 5
+    for i in range(1, len(timestamps)):
+        gap_ms = (timestamps[i] - timestamps[i - 1]) * 1000.0
+        assert gap_ms >= 90.0, "Agents {} and {} only {:.1f}ms apart".format(i - 1, i, gap_ms)
