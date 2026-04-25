@@ -20,6 +20,7 @@ from engine.safety import ConcurrencyLimiter, LaneConcurrencyQueue, ResultTrunca
 from .events import AgentEvent, ChildCompletionEvent
 from .subagent_models import CollectedChildResult
 from engine.runtime.task_registry import CompleteInfo, AgentTaskRegistry
+from engine.time import TimeProvider
 
 if TYPE_CHECKING:
     from .spawn import SpawnTool
@@ -66,6 +67,9 @@ class SubAgentManager:
         self._config = config
         self._concurrency_limiter = concurrency_limiter
         self._lane_queue = lane_queue
+        self._time_provider = TimeProvider(
+            timezone_override=config.user_timezone if config else None
+        )
         self._child_counter = 0
         # Register handler: when any child of this agent completes,
         # task_registry routes the callback here
@@ -269,7 +273,10 @@ A one-line summary at the top is encouraged when the result is complex — skip 
 ## Session Context
 - Label: {label}
 - Depth: {child_session.depth}/{config.max_depth}
-- Your task ID: {task_id}"""
+        - Your task ID: {task_id}"""
+
+        env_block = self._time_provider.format_system_env_block()
+        system_prompt = f"{system_prompt}\n\n{env_block}"
 
         child_session.add_message("system", system_prompt)
 

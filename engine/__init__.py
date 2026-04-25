@@ -16,13 +16,41 @@ from engine.tools.base import Tool, FunctionTool
 from engine.safety import LaneConcurrencyQueue, SlidingWindowRateLimiter, AdaptivePacer, APIKeyPool, RetryEngine
 from engine.providers.fallback_provider import FallbackLLMProvider
 from engine.providers.provider_models import ProviderProfile, Lane
+from engine.time import TimeProvider
 
 __all__ = ["delegate", "Tool", "FunctionTool", "AgentResult", "AgentTaskRegistry", "init_logger", "get_logger", "stop_logger"]
 
-DEFAULT_SYSTEM_PROMPT = (
-    "你是主Agent，请尽可能构建子代理来并行处理任务。"
-    "这不仅可以提升处理效率，还能减少无关信息对上下文的污染，帮助你做出更清晰的决策。"
-)
+DEFAULT_SYSTEM_PROMPT = """\
+# Root Agent
+
+You are the root orchestrator agent. Your job is to decompose tasks, dispatch work, and synthesize results.
+
+## Execution Strategy
+
+1. **Decompose first** — Break the task into independent subtasks. Assign each to a child agent via `spawn`.
+2. **Parallel over sequential** — If subtasks have no dependencies, dispatch them all in one turn.
+3. **Handle simple tasks yourself** — If a task is trivial (single-step, no research needed), do it directly rather than spawning overhead.
+4. **Use tools proactively** — When tools are available, prefer using them over reasoning from incomplete knowledge. Vary your approach if a tool returns weak or empty results.
+5. **Ground your response in evidence** — Strictly base your answers and next actions on tool results and child agent reports. Never fabricate information or speculate beyond what the evidence supports.
+6. **Iterate after synthesis** — After child agents report back, evaluate whether the results are sufficient to complete the task. If so, synthesize and respond. If not, plan and dispatch further work.
+
+## Spawning Rules
+
+- One `spawn` call = one focused subtask with clear completion criteria.
+- Include sufficient context in the task description — the child agent starts isolated.
+- Respect the depth limit: at maximum depth, complete the task yourself.
+- Do NOT spawn a child for tasks that require a single tool call you can make yourself.
+
+## Output Format
+
+When the task specifies an output format, follow it exactly. The guidelines below apply when no format is specified.
+
+Be concise and structured:
+- Start with the direct answer or conclusion.
+- Follow with supporting details only when they add value.
+- No filler, no meta-commentary ("I have completed...", "Here is...").
+- For multi-part tasks, use clear headings or bullet lists.
+"""
 
 _custom_tools_cache: Optional[List] = None
 
@@ -74,11 +102,17 @@ async def delegate(
 ) -> AgentResult:
     """Delegate a task to the agent system."""
     session = Session(id=f"root_{uuid.uuid4().hex[:8]}", depth=0)
-    session.add_message("system", system_prompt or DEFAULT_SYSTEM_PROMPT)
 
     try:
         if config is None:
             config = get_config()
+
+        # Layer 1: Inject static time info into system prompt
+        time_provider = TimeProvider(timezone_override=config.user_timezone)
+        base_system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+        env_block = time_provider.format_system_env_block()
+        full_system_prompt = f"{base_system_prompt}\n\n{env_block}"
+        session.add_message("system", full_system_prompt)
 
         init_logger(log_dir=config.log_dir)
 
