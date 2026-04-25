@@ -917,13 +917,20 @@ class AdaptivePacer:
     between calls and adds recommended delays at higher pace levels.
     """
 
-    def __init__(self, min_interval_ms: float = 500, enabled: bool = True):
+    def __init__(self, min_interval_ms: float = 500, enabled: bool = True, rpm_limit: float = 0):
         self._min_interval_ms = min_interval_ms
         self._enabled = enabled
         self._remaining_fraction = 1.0
         self._last_call_timestamp: Optional[float] = None
         self._pace_level = PaceLevel.HEALTHY
         self._lock = asyncio.Lock()
+
+        # Effective min interval: never exceed RPM limit rate.
+        if rpm_limit > 0:
+            rpm_derived_ms = 60000.0 / rpm_limit
+            self._effective_min_interval_ms = max(min_interval_ms, rpm_derived_ms)
+        else:
+            self._effective_min_interval_ms = min_interval_ms
 
     def update_from_snapshot(self, snapshot: RateLimitSnapshot) -> None:
         """Update pace level from a RateLimitSnapshot.
@@ -1041,7 +1048,7 @@ class AdaptivePacer:
 
             if self._last_call_timestamp is not None:
                 elapsed_ms = (now - self._last_call_timestamp) * 1000.0
-                remaining_ms = max(0.0, self._min_interval_ms - elapsed_ms)
+                remaining_ms = max(0.0, self._effective_min_interval_ms - elapsed_ms)
                 actual_delay_ms += remaining_ms
             actual_delay_ms += self.get_recommended_delay()
 

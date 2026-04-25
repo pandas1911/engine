@@ -106,6 +106,7 @@ async def delegate(
                 pacer = AdaptivePacer(
                     min_interval_ms=config.pacing_min_interval_ms,
                     enabled=True,
+                    rpm_limit=profile.rpm_limit,
                 )
             pacers[profile.name] = pacer
 
