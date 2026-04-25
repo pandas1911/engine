@@ -121,8 +121,9 @@ class FallbackLLMProvider(BaseLLMProvider):
 
             # 2. Apply rate limiting if configured for this profile
             limiter = self._rate_limiters.get(profile_name)
+            reservation_id = 0
             if limiter is not None:
-                await limiter.acquire(estimated_tokens=estimated_tokens)
+                reservation_id = await limiter.acquire(estimated_tokens=estimated_tokens)
 
             # 3. Apply pacing if configured for this profile
             pacer = self._pacers.get(profile_name)
@@ -151,7 +152,7 @@ class FallbackLLMProvider(BaseLLMProvider):
                     if usage is not None:
                         prompt_tokens, completion_tokens = usage
                         total_tokens = prompt_tokens + completion_tokens
-                        limiter.record_usage(total_tokens)
+                        await limiter.record_usage(total_tokens, reservation_id=reservation_id)
 
                 # Update pacer with rate limit snapshot from provider
                 if pacer is not None:
@@ -170,6 +171,11 @@ class FallbackLLMProvider(BaseLLMProvider):
                 )
 
                 return result
+
+            except asyncio.CancelledError:
+                if limiter is not None and reservation_id > 0:
+                    await limiter.release_reserved(reservation_id)
+                raise
 
             except Exception as e:
                 error_class = self._retry_engine.classify_error(e)
@@ -191,6 +197,8 @@ class FallbackLLMProvider(BaseLLMProvider):
                             "error_message": str(e)[:500],
                         },
                     )
+                    if limiter is not None and reservation_id > 0:
+                        await limiter.release_reserved(reservation_id)
                     raise LLMProviderError(e) from e
 
                 if error_class == ErrorClass.RETRYABLE:
@@ -210,12 +218,16 @@ class FallbackLLMProvider(BaseLLMProvider):
                             "error_message": str(e)[:500],
                         },
                     )
+                    if limiter is not None and reservation_id > 0:
+                        await limiter.release_reserved(reservation_id)
                     raise
 
                 if error_class == ErrorClass.RATE_LIMITED:
                     # 6. Rate limited: report and rotate
                     retry_after = self._retry_engine.extract_retry_after(e)
                     self._key_pool.report_rate_limited(profile_name, retry_after)
+                    if limiter is not None and reservation_id > 0:
+                        await limiter.release_reserved(reservation_id)
                     self._rotation_count += 1
 
                     self._logger.warning(
