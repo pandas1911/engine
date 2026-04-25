@@ -637,3 +637,127 @@ class TestFallbackProviderSuccessResets:
         status = fallback._key_pool.get_cooldown_status()["p1"]
         assert status.consecutive_errors == 0
         assert status.cooldown_until is None
+
+
+class TestTPMReservationFlow:
+    """Tests for reservation-based TPM accounting (TDD RED phase).
+
+    These tests define the expected API for acquire/release/record_usage
+    with reservation IDs. They will FAIL until production code is updated.
+    """
+
+    @pytest.mark.asyncio
+    async def test_success_path_uses_reservation(self):
+        """Full lifecycle: acquire → reserve → chat → record_usage replaces."""
+        profiles = _make_profiles(["p1"])
+        mock_provider = _make_mock_provider(response_content="OK", usage=(10, 20))
+        fallback = _make_fallback_provider({"p1": mock_provider}, profiles)
+
+        await fallback.chat(
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[],
+            agent_label="Test",
+            task_id="t1",
+        )
+
+        limiter = fallback._rate_limiters["p1"]
+        assert len(limiter._tpm_entries) == 1
+        entry = limiter._tpm_entries[0]
+        assert entry[1] == 30  # actual tokens: 10 + 20
+        assert entry[2] is None  # confirmed (not tentative)
+
+    @pytest.mark.asyncio
+    async def test_rate_limited_path_releases_reservation(self):
+        """Rate-limited request releases reservation on failing profile."""
+        profiles = _make_profiles(["p1", "p2"])
+        mock_p1 = _make_mock_provider(
+            raise_error=Exception("429 rate limit exceeded")
+        )
+        mock_p2 = _make_mock_provider(response_content="OK", usage=(5, 5))
+        fallback = _make_fallback_provider(
+            {"p1": mock_p1, "p2": mock_p2}, profiles
+        )
+
+        with patch("engine.safety.time.monotonic", return_value=1000.0):
+            await fallback.chat(
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[],
+                agent_label="Test",
+                task_id="t1",
+            )
+
+        # p1's limiter should have no tentative entries (all released)
+        limiter_p1 = fallback._rate_limiters["p1"]
+        tentative = [e for e in limiter_p1._tpm_entries if e[2] is not None]
+        assert len(tentative) == 0
+
+        # p2's limiter should have the reconciled entry
+        limiter_p2 = fallback._rate_limiters["p2"]
+        assert len(limiter_p2._tpm_entries) == 1
+        assert limiter_p2._tpm_entries[0][2] is None
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_path_releases_reservation(self):
+        """Non-retryable error releases reservation."""
+        profiles = _make_profiles(["p1"])
+        mock_p1 = _make_mock_provider(
+            raise_error=Exception("401 unauthorized: invalid api key")
+        )
+        fallback = _make_fallback_provider({"p1": mock_p1}, profiles)
+
+        with pytest.raises(LLMProviderError):
+            await fallback.chat(
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[],
+                agent_label="Test",
+                task_id="t1",
+            )
+
+        limiter = fallback._rate_limiters["p1"]
+        tentative = [e for e in limiter._tpm_entries if e[2] is not None]
+        assert len(tentative) == 0
+
+    @pytest.mark.asyncio
+    async def test_retryable_path_releases_reservation(self):
+        """Retryable error releases reservation."""
+        profiles = _make_profiles(["p1"])
+        mock_p1 = _make_mock_provider(
+            raise_error=Exception("500 internal server error")
+        )
+        fallback = _make_fallback_provider({"p1": mock_p1}, profiles)
+
+        with pytest.raises(Exception, match="500"):
+            await fallback.chat(
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[],
+                agent_label="Test",
+                task_id="t1",
+            )
+
+        limiter = fallback._rate_limiters["p1"]
+        tentative = [e for e in limiter._tpm_entries if e[2] is not None]
+        assert len(tentative) == 0
+
+    @pytest.mark.asyncio
+    async def test_reservation_lifecycle_full_integration(self):
+        """End-to-end: estimated→actual transition works."""
+        profiles = _make_profiles(["p1"])
+        mock_provider = _make_mock_provider(response_content="OK", usage=(100, 200))
+        fallback = _make_fallback_provider({"p1": mock_provider}, profiles)
+
+        limiter = fallback._rate_limiters["p1"]
+
+        # Before chat, TPM should be 0
+        assert limiter._current_tpm() == 0
+
+        await fallback.chat(
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[],
+            agent_label="Test",
+            task_id="t1",
+        )
+
+        # After chat, TPM should reflect actual tokens (300), not estimated
+        assert limiter._current_tpm() == 300
+        assert len(limiter._tpm_entries) == 1
+        assert limiter._tpm_entries[0][2] is None  # confirmed

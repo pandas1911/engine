@@ -890,7 +890,7 @@ class TestSlidingWindowRateLimiterTPM:
         )
 
         assert limiter.get_remaining_fraction() == 1.0
-        limiter.record_usage(50)
+        await limiter.record_usage(50)
         assert limiter.get_remaining_fraction() == 0.5
 
     @pytest.mark.asyncio
@@ -900,7 +900,7 @@ class TestSlidingWindowRateLimiterTPM:
             rpm_limit=10.0, tpm_limit=100.0, window_seconds=0.1
         )
 
-        limiter.record_usage(100)
+        await limiter.record_usage(100)
 
         start = time.monotonic()
         await limiter.acquire(estimated_tokens=0)
@@ -1297,7 +1297,7 @@ class TestSlidingWindowRateLimiterSnapshot:
 
         for _ in range(5):
             await limiter.acquire()
-        limiter.record_usage(25)
+        await limiter.record_usage(25)
 
         fraction = limiter.get_remaining_fraction()
         assert fraction == min(0.5, 0.75)
@@ -1472,3 +1472,113 @@ async def test_concurrent_wait_if_needed_serialized():
     for i in range(1, len(timestamps)):
         gap_ms = (timestamps[i] - timestamps[i - 1]) * 1000.0
         assert gap_ms >= 90.0, "Agents {} and {} only {:.1f}ms apart".format(i - 1, i, gap_ms)
+
+
+class TestTPMReservation:
+    """Tests for SlidingWindowRateLimiter pre-reservation (TPM reservation system).
+
+    These tests define the EXPECTED API for reservation-based token accounting.
+    They are expected to FAIL because the API does not exist yet (TDD RED phase).
+    """
+
+    @pytest.mark.asyncio
+    async def test_acquire_returns_reservation_id(self):
+        limiter = SlidingWindowRateLimiter(rpm_limit=10, tpm_limit=1000)
+        rid = await limiter.acquire(estimated_tokens=100)
+        assert isinstance(rid, int)
+        assert rid > 0
+        assert len(limiter._tpm_entries) == 1
+        ts, tokens, reservation_id = limiter._tpm_entries[0]
+        assert tokens == 100
+        assert reservation_id == rid
+
+    @pytest.mark.asyncio
+    async def test_acquire_with_zero_tokens_returns_zero(self):
+        limiter = SlidingWindowRateLimiter(rpm_limit=10, tpm_limit=1000)
+        rid = await limiter.acquire(estimated_tokens=0)
+        assert rid == 0
+        assert len(limiter._tpm_entries) == 0
+
+    @pytest.mark.asyncio
+    async def test_record_usage_replaces_reservation(self):
+        limiter = SlidingWindowRateLimiter(rpm_limit=10, tpm_limit=1000)
+        rid = await limiter.acquire(estimated_tokens=100)
+        assert limiter._current_tpm() == 100
+        await limiter.record_usage(80, reservation_id=rid)
+        assert limiter._current_tpm() == 80
+        entry = limiter._tpm_entries[0]
+        assert entry[1] == 80
+        assert entry[2] is None  # confirmed, not tentative
+
+    @pytest.mark.asyncio
+    async def test_record_usage_backward_compat(self):
+        limiter = SlidingWindowRateLimiter(rpm_limit=10, tpm_limit=1000)
+        await limiter.record_usage(50)
+        assert len(limiter._tpm_entries) == 1
+        ts, tokens, reservation_id = limiter._tpm_entries[0]
+        assert tokens == 50
+        assert reservation_id is None
+
+    @pytest.mark.asyncio
+    async def test_release_reserved_removes_entry(self):
+        limiter = SlidingWindowRateLimiter(rpm_limit=10, tpm_limit=1000)
+        rid = await limiter.acquire(estimated_tokens=100)
+        assert limiter._current_tpm() == 100
+        await limiter.release_reserved(rid)
+        assert limiter._current_tpm() == 0
+        assert len(limiter._tpm_entries) == 0
+
+    @pytest.mark.asyncio
+    async def test_release_reserved_idempotent(self):
+        limiter = SlidingWindowRateLimiter(rpm_limit=10, tpm_limit=1000)
+        rid = await limiter.acquire(estimated_tokens=100)
+        await limiter.release_reserved(rid)
+        await limiter.release_reserved(rid)  # no exception
+        assert limiter._current_tpm() == 0
+
+    @pytest.mark.asyncio
+    async def test_release_reserved_expired_entry_noop(self):
+        limiter = SlidingWindowRateLimiter(rpm_limit=10, tpm_limit=1000, window_seconds=0.05)
+        rid = await limiter.acquire(estimated_tokens=100)
+        await asyncio.sleep(0.06)
+        await limiter.release_reserved(rid)  # no exception
+
+    @pytest.mark.asyncio
+    async def test_concurrent_tpm_no_exceeds_limit(self):
+        limiter = SlidingWindowRateLimiter(rpm_limit=100, tpm_limit=300, window_seconds=0.05)
+        max_tpm_seen = [0]
+        results = []
+
+        async def worker():
+            rid = await limiter.acquire(estimated_tokens=100)
+            current = limiter._current_tpm()
+            max_tpm_seen[0] = max(max_tpm_seen[0], current)
+            results.append(rid)
+
+        tasks = [asyncio.create_task(worker()) for _ in range(5)]
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=5.0)
+
+        assert len(results) == 5
+        assert max_tpm_seen[0] <= 300
+        assert all(isinstance(r, int) for r in results)
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_schedule_releases_reservation(self):
+        limiter = SlidingWindowRateLimiter(rpm_limit=1, tpm_limit=0, window_seconds=1.0)
+        await limiter.acquire()  # fills RPM
+        task = asyncio.create_task(limiter.acquire(estimated_tokens=50))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_scheduler_creates_reservation_for_waiter(self):
+        limiter = SlidingWindowRateLimiter(rpm_limit=1, tpm_limit=100, window_seconds=0.05)
+        await limiter.acquire(estimated_tokens=50)  # fills RPM
+        rid = await limiter.acquire(estimated_tokens=30)  # blocks then resolves
+        assert isinstance(rid, int)
+        assert rid > 0
+        # Find entry with estimated_tokens=30 for this reservation
+        found = any(e[1] == 30 and e[2] == rid for e in limiter._tpm_entries)
+        assert found
