@@ -46,6 +46,9 @@ class Config:
     cooldown_initial_ms: float = 30000.0
     cooldown_max_ms: float = 300000.0
 
+    # Timezone
+    user_timezone: Optional[str] = None
+
 
 class ConfigLoader:
     REQUIRED_PROFILE_KEYS = {"name", "api_key", "base_url", "model"}
@@ -134,10 +137,16 @@ class ConfigLoader:
             "fallback_enabled",
             "cooldown_initial_ms",
             "cooldown_max_ms",
+            "user_timezone",
         }
 
         kwargs = {k: v for k, v in data.items() if k in known_fields}
         config = Config(**kwargs)
+
+        # Env var override for timezone (takes precedence over JSON)
+        user_tz_env = os.environ.get("USER_TIMEZONE")
+        if user_tz_env:
+            config.user_timezone = user_tz_env
 
         return config
 
