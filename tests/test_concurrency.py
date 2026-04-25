@@ -1,7 +1,6 @@
 import asyncio
 import pytest
 
-from engine.config import Config
 from engine.providers.provider_models import Lane
 from engine.safety import (
     ConcurrencyLimiter,
@@ -13,22 +12,6 @@ from engine.runtime.agent_models import Session, AgentState
 from engine.runtime.task_registry import AgentTaskRegistry
 from engine.runtime.agent import Agent
 from engine.subagent.manager import SubAgentManager
-
-
-def test_config_default_values():
-    config = Config()
-    assert config.max_concurrent_agents == 8
-
-
-def test_config_rejects_low_max_concurrent():
-    config = Config(max_concurrent_agents=1)
-    assert config.max_concurrent_agents == 1
-    with pytest.raises(ValueError, match="max_concurrent_agents must be >= 2"):
-        if config.max_concurrent_agents < 2:
-            raise ValueError(
-                f"max_concurrent_agents must be >= 2, got {config.max_concurrent_agents}. "
-                "Values less than 2 can cause deadlock in the agent execution system."
-            )
 
 
 @pytest.mark.asyncio

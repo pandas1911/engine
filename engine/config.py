@@ -14,13 +14,9 @@ class Config:
     strip_thinking: bool = True
 
     # Agent hierarchy
-    max_depth: int = 4
+    max_depth: int = 3
     spawn_timeout: float = 60.0
-    enable_wake_on_descendants: bool = True
-    max_concurrent_agents: int = 8
-    agent_timeout: float = 300.0
-    max_registry_size: int = 1000
-    max_result_length: int = 2500
+    max_result_length: int = 3000
 
     # Iteration guard
     summary_warning_reserve: int = 2
@@ -30,25 +26,17 @@ class Config:
     # Logging
     log_dir: Optional[str] = None
 
-    # Rate limiting (applied per-provider-profile)
-    rate_limit_rpm: float = 300.0
-    rate_limit_burst: int = 3
-
     # Retry
     llm_retry_max_attempts: int = 3
     llm_retry_base_delay: float = 1.0
 
     # Lane concurrency
     main_lane_concurrency: int = 4
-    subagent_lane_concurrency: int = 8
+    subagent_lane_concurrency: int = 5
 
     # Adaptive pacing
     pacing_enabled: bool = True
     pacing_min_interval_ms: float = 500.0
-
-    # API queue
-    api_queue_max_size: int = 100
-    api_queue_timeout: float = 120.0
 
     # Key rotation and fallback
     key_rotation_enabled: bool = True
@@ -131,25 +119,17 @@ class ConfigLoader:
             "strip_thinking",
             "max_depth",
             "spawn_timeout",
-            "enable_wake_on_descendants",
-            "max_concurrent_agents",
-            "agent_timeout",
-            "max_registry_size",
             "max_result_length",
             "summary_warning_reserve",
             "emergency_summary_enabled",
             "emergency_summary_context_messages",
             "log_dir",
-            "rate_limit_rpm",
-            "rate_limit_burst",
             "llm_retry_max_attempts",
             "llm_retry_base_delay",
             "main_lane_concurrency",
             "subagent_lane_concurrency",
             "pacing_enabled",
             "pacing_min_interval_ms",
-            "api_queue_max_size",
-            "api_queue_timeout",
             "key_rotation_enabled",
             "fallback_enabled",
             "cooldown_initial_ms",
@@ -158,12 +138,6 @@ class ConfigLoader:
 
         kwargs = {k: v for k, v in data.items() if k in known_fields}
         config = Config(**kwargs)
-
-        if config.max_concurrent_agents < 2:
-            raise ValueError(
-                f"max_concurrent_agents must be >= 2, got {config.max_concurrent_agents}. "
-                "Values less than 2 can cause deadlock in the agent execution system."
-            )
 
         return config
 

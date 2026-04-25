@@ -11,7 +11,6 @@ from engine.runtime.task_registry import AgentTaskRegistry
 @pytest.fixture
 def config():
     return Config(
-        max_concurrent_agents=3,
         spawn_timeout=0.5,
     )
 

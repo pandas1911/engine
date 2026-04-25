@@ -188,23 +188,6 @@ def test_profile_missing_model_raises_value_error():
 
 
 # ──────────────────────────────────────────────────────────────
-# 8. max_concurrent_agents < 2 raises ValueError
-# ──────────────────────────────────────────────────────────────
-
-def test_max_concurrent_agents_less_than_two_raises_value_error():
-    data = _valid_config_data({"max_concurrent_agents": 1})
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
-        json.dump(data, f)
-        path = f.name
-
-    try:
-        with pytest.raises(ValueError, match="max_concurrent_agents"):
-            ConfigLoader.load_from_json(path)
-    finally:
-        os.unlink(path)
-
-
-# ──────────────────────────────────────────────────────────────
 # 9. Config default values preserved
 # ──────────────────────────────────────────────────────────────
 
@@ -212,27 +195,19 @@ def test_config_default_values():
     config = Config()
     assert config.provider_profiles == []
     assert config.strip_thinking is True
-    assert config.max_depth == 4
+    assert config.max_depth == 3
     assert config.spawn_timeout == 60.0
-    assert config.enable_wake_on_descendants is True
-    assert config.max_concurrent_agents == 8
-    assert config.agent_timeout == 300.0
-    assert config.max_registry_size == 1000
-    assert config.max_result_length == 2500
+    assert config.max_result_length == 3000
     assert config.summary_warning_reserve == 2
     assert config.emergency_summary_enabled is True
     assert config.emergency_summary_context_messages == 0
     assert config.log_dir is None
-    assert config.rate_limit_rpm == 300.0
-    assert config.rate_limit_burst == 3
     assert config.llm_retry_max_attempts == 3
     assert config.llm_retry_base_delay == 1.0
     assert config.main_lane_concurrency == 4
-    assert config.subagent_lane_concurrency == 8
+    assert config.subagent_lane_concurrency == 5
     assert config.pacing_enabled is True
     assert config.pacing_min_interval_ms == 500.0
-    assert config.api_queue_max_size == 100
-    assert config.api_queue_timeout == 120.0
     assert config.key_rotation_enabled is True
     assert config.fallback_enabled is True
     assert config.cooldown_initial_ms == 30000.0
@@ -253,7 +228,6 @@ def test_optional_fields_overridden_from_json():
         "strip_thinking": False,
         "max_depth": 10,
         "spawn_timeout": 120.0,
-        "max_concurrent_agents": 16,
         "main_lane_concurrency": 8,
         "subagent_lane_concurrency": 16,
         "pacing_enabled": False,
@@ -268,7 +242,6 @@ def test_optional_fields_overridden_from_json():
         assert config.strip_thinking is False
         assert config.max_depth == 10
         assert config.spawn_timeout == 120.0
-        assert config.max_concurrent_agents == 16
         assert config.main_lane_concurrency == 8
         assert config.subagent_lane_concurrency == 16
         assert config.pacing_enabled is False
