@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from .agent_models import AgentState, ErrorCategory, AgentError, Session
 from engine.providers.provider_models import ToolCall
 from engine.config import Config
+from engine.time import TimeProvider
 from .task_registry import AgentTaskRegistry
 from engine.subagent.events import AgentEvent, ChildCompletionEvent
 from engine.subagent.manager import SubAgentManager
@@ -62,6 +63,7 @@ class Agent:
         self.display_id = f"[{self.label}|{self.task_id}]"
         self._concurrency_limiter = concurrency_limiter
         self._lane_queue = lane_queue
+        self._time_provider = TimeProvider(timezone_override=config.user_timezone)
         self._event_queue: List[
             AgentEvent
         ] = []  # Deferred event queue (native list, Swift Array equivalent)
@@ -157,6 +159,7 @@ class Agent:
 
     async def run(self, message: Optional[str] = None, *, trigger: str = "start") -> str:
         if message:
+            message = self._time_provider.inject_timestamp(message)
             self.session.add_message("user", message)
 
         if self.state_machine.can_trigger(trigger):
@@ -496,7 +499,8 @@ class Agent:
                         "error": getattr(event, 'error', False),
                     },
                 )
-                self.session.add_message("user", event.formatted_prompt)
+                formatted = self._time_provider.inject_timestamp(event.formatted_prompt)
+                self.session.add_message("user", formatted)
                 await self._process_tool_calls()
                 # Loop continues — processes any events queued during _process_tool_calls
 
