@@ -280,11 +280,12 @@ class SlidingWindowRateLimiter:
         self._profile_name = profile_name
 
         self._rpm_entries: deque = deque()  # (timestamp, 0)
-        self._tpm_entries: deque = deque()  # (timestamp, token_count)
+        self._tpm_entries: deque = deque()  # (timestamp, token_count, reservation_id_or_None)
 
         self._waiters: deque = deque()  # FIFO queue of (Future, estimated_tokens)
         self._lock = asyncio.Lock()
         self._scheduler_task = None  # background scheduler
+        self._next_reservation_id: int = 1  # 0 is sentinel for "no reservation"
 
     def _prune_stale(self) -> None:
         """Remove entries older than window_seconds from both deques."""
@@ -297,7 +298,7 @@ class SlidingWindowRateLimiter:
 
     def _current_tpm(self) -> float:
         """Sum of token counts in the TPM window."""
-        return sum(tokens for _, tokens in self._tpm_entries)
+        return sum(tokens for _, tokens, _ in self._tpm_entries)
 
     def _can_acquire(self, estimated_tokens: int = 0) -> bool:
         """Check if a request with estimated_tokens can proceed."""
@@ -310,7 +311,7 @@ class SlidingWindowRateLimiter:
         )
         return tpm_ok
 
-    async def acquire(self, estimated_tokens: int = 0) -> None:
+    async def acquire(self, estimated_tokens: int = 0) -> int:
         """Acquire rate limit slot (FIFO, event-driven).
 
         Fast path: if capacity available and no waiters, return immediately.
@@ -324,7 +325,12 @@ class SlidingWindowRateLimiter:
             # Fast path: capacity available, no one waiting
             if self._can_acquire(estimated_tokens) and not self._waiters:
                 self._rpm_entries.append((time.monotonic(), 0))
-                return
+                if estimated_tokens > 0:
+                    rid = self._next_reservation_id
+                    self._next_reservation_id += 1
+                    self._tpm_entries.append((time.monotonic(), estimated_tokens, rid))
+                    return rid
+                return 0  # No reservation for estimated_tokens=0
 
             # Slow path: enqueue and wait
             fut = loop.create_future()
@@ -354,41 +360,100 @@ class SlidingWindowRateLimiter:
 
         # Wait OUTSIDE the lock -- other acquire() calls can proceed
         try:
-            await fut
+            return await fut
         except BaseException:
-            # Clean up on cancellation or error
             async with self._lock:
                 if not fut.done():
                     fut.cancel()
+                else:
+                    try:
+                        rid = fut.result()
+                    except BaseException:
+                        rid = None
+                    if rid and rid > 0:
+                        for i in range(len(self._tpm_entries) - 1, -1, -1):
+                            if self._tpm_entries[i][2] == rid:
+                                del self._tpm_entries[i]
+                                break
                 try:
                     self._waiters.remove((fut, estimated_tokens))
                 except ValueError:
                     pass
             raise
 
-    def record_usage(self, tokens: int) -> None:
+    async def record_usage(self, tokens: int, reservation_id: Optional[int] = None) -> None:
         """Record actual token usage after a request completes.
 
-        Appends (timestamp, tokens) to the TPM window.
+        If reservation_id is provided, replaces the tentative entry with actual usage.
+        If reservation_id is None or not found, appends as backward-compatible entry.
         """
-        now = time.monotonic()
-        self._tpm_entries.append((now, tokens))
-        get_logger().info(
-            "RateControl",
-            "Rate limit usage recorded | profile={}, tokens={}, tpm={}/{}".format(
-                self._profile_name,
-                tokens,
-                self._current_tpm(),
-                self._tpm_limit,
-            ),
-            event_type="rate_limit_usage",
-            data={
-                "profile": self._profile_name,
-                "tokens": tokens,
-                "tpm": self._current_tpm(),
-                "tpm_limit": self._tpm_limit,
-            },
-        )
+        async with self._lock:
+            if reservation_id is not None and reservation_id > 0:
+                for i in range(len(self._tpm_entries) - 1, -1, -1):
+                    entry = self._tpm_entries[i]
+                    if entry[2] == reservation_id:
+                        self._tpm_entries[i] = (entry[0], tokens, None)
+                        get_logger().info(
+                            "RateControl",
+                            "Rate limit usage recorded (replaced reservation) | profile={}, tokens={}, reservation_id={}, tpm={}/{}".format(
+                                self._profile_name,
+                                tokens,
+                                reservation_id,
+                                self._current_tpm(),
+                                self._tpm_limit,
+                            ),
+                            event_type="rate_limit_usage",
+                            data={
+                                "profile": self._profile_name,
+                                "tokens": tokens,
+                                "reservation_id": reservation_id,
+                                "tpm": self._current_tpm(),
+                                "tpm_limit": self._tpm_limit,
+                            },
+                        )
+                        return
+            self._tpm_entries.append((time.monotonic(), tokens, None))
+            get_logger().info(
+                "RateControl",
+                "Rate limit usage recorded | profile={}, tokens={}, tpm={}/{}".format(
+                    self._profile_name,
+                    tokens,
+                    self._current_tpm(),
+                    self._tpm_limit,
+                ),
+                event_type="rate_limit_usage",
+                data={
+                    "profile": self._profile_name,
+                    "tokens": tokens,
+                    "tpm": self._current_tpm(),
+                    "tpm_limit": self._tpm_limit,
+                },
+            )
+
+    async def release_reserved(self, reservation_id: int) -> None:
+        """Release a tentative TPM reservation.
+
+        Idempotent: no-op if reservation_id not found or already released.
+        """
+        if reservation_id <= 0:
+            return
+        async with self._lock:
+            for i in range(len(self._tpm_entries) - 1, -1, -1):
+                if self._tpm_entries[i][2] == reservation_id:
+                    del self._tpm_entries[i]
+                    get_logger().info(
+                        "RateControl",
+                        "Rate limit reservation released | profile={}, reservation_id={}".format(
+                            self._profile_name,
+                            reservation_id,
+                        ),
+                        event_type="rate_limit_reservation_released",
+                        data={
+                            "profile": self._profile_name,
+                            "reservation_id": reservation_id,
+                        },
+                    )
+                    return
 
     def _ensure_scheduler_locked(self) -> None:
         """Start scheduler if not already running (lock must be held)."""
@@ -410,7 +475,12 @@ class SlidingWindowRateLimiter:
                     self._waiters.popleft()
                     self._rpm_entries.append((time.monotonic(), 0))
                     if not fut.done():
-                        fut.set_result(None)
+                        rid = 0
+                        if estimated_tokens > 0:
+                            rid = self._next_reservation_id
+                            self._next_reservation_id += 1
+                            self._tpm_entries.append((time.monotonic(), estimated_tokens, rid))
+                        fut.set_result(rid)
                         get_logger().info(
                             "RateControl",
                             "Rate limit unblocked | profile={}, waiters_remaining={}".format(
