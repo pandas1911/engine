@@ -43,7 +43,7 @@ engine/
 │   │   ├── base.py            # Tool ABC, FunctionTool, ToolRegistry
 │   │   ├── builtin/           # Built-in tools (empty, reserved)
 │   │   │   └── __init__.py
-│   │   └── custom/            # Auto-discovered custom tools
+│   │   └── custom/            # Auto-discovered custom tools (DuckDuckGo web search)
 │   │       └── __init__.py
 │   └── logging/               # Structured logging
 │       ├── __init__.py
@@ -411,7 +411,7 @@ Thin `Tool` wrapper that delegates to `SubAgentManager.spawn()`. Registered in t
 
 #### `custom/`
 
-Auto-discovered custom tools directory. Place `Tool` subclasses here and they will be automatically loaded by `_discover_custom_tools()`.
+Auto-discovered custom tools directory. Place `Tool` subclasses here and they will be automatically loaded by `_discover_custom_tools()`. Currently contains `web_search` — a DuckDuckGo HTML search tool that provides web search without API keys.
 
 ---
 
@@ -509,6 +509,6 @@ delegate() (engine/runner.py)
 | Package | Purpose |
 |---|---|
 | `openai` | OpenAI-compatible API client (used by LLMProvider) |
-| `httpx` | Async HTTP client (reserved for custom tools) |
+| `httpx` | Async HTTP client (used by DuckDuckGo web search tool) |
 | `python-dotenv` | Environment variable loading from `.env` |
 | `pytest` + `pytest-asyncio` | Test framework with async support |
