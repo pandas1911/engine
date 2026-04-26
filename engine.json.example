@@ -1,0 +1,38 @@
+{
+  "provider_profiles": [
+    {
+      "name": "primary",
+      "api_key": "your-api-key-here",
+      "base_url": "https://api.openai.com/v1",
+      "model": "gpt-4",
+      "rpm_limit": 300,
+      "tpm_limit": 100000
+    },
+    {
+      "name": "fallback",
+      "api_key": "your-fallback-api-key-here",
+      "base_url": "https://api.anthropic.com/v1",
+      "model": "claude-3-opus-20240229",
+      "rpm_limit": 100,
+      "tpm_limit": 50000
+    }
+  ],
+  "strip_thinking": true,
+  "max_depth": 3,
+  "spawn_timeout": 60.0,
+  "max_result_length": 3000,
+  "summary_warning_reserve": 2,
+  "emergency_summary_enabled": true,
+  "emergency_summary_context_messages": 0,
+  "log_dir": null,
+  "llm_retry_max_attempts": 3,
+  "llm_retry_base_delay": 1.0,
+  "main_lane_concurrency": 4,
+  "subagent_lane_concurrency": 5,
+  "pacing_enabled": true,
+  "pacing_min_interval_ms": 500.0,
+  "key_rotation_enabled": true,
+  "fallback_enabled": true,
+  "cooldown_initial_ms": 30000.0,
+  "cooldown_max_ms": 300000.0
+}

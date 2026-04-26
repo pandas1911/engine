@@ -1,142 +1,188 @@
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from dotenv import load_dotenv
+import json
 import os
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 
 @dataclass
 class Config:
-    api_key: str
-    base_url: str
-    model: str
+    # Provider profiles — each entry: {name, api_key, base_url, model, rpm_limit, tpm_limit, weight?}
+    # Must contain at least one profile (validated at load time)
+    provider_profiles: List[Dict] = field(default_factory=list)
+
+    # LLM response processing
     strip_thinking: bool = True
-    max_depth: int = 4
+
+    # Agent hierarchy
+    max_depth: int = 3
     spawn_timeout: float = 60.0
-    enable_wake_on_descendants: bool = True
-    max_concurrent_agents: int = 8
-    agent_timeout: float = 300.0
-    max_registry_size: int = 1000
-    max_result_length: int = 2500
-    # Iteration guard configuration
-    summary_warning_reserve: int = 2  # iterations remaining when warning is injected (0 = disabled)
-    emergency_summary_enabled: bool = True  # force a final summary call when loop exhausts
-    emergency_summary_context_messages: int = 0  # messages to keep for emergency summary (0 = use full session)
+    max_result_length: int = 3000
+
+    # Iteration guard
+    summary_warning_reserve: int = 2
+    emergency_summary_enabled: bool = True
+    emergency_summary_context_messages: int = 0
+
+    # Logging
     log_dir: Optional[str] = None
 
-    # Rate limiting
-    rate_limit_rpm: float = 300.0      # Requests per minute (0 = disabled)
-    rate_limit_burst: int = 3           # Max concurrent API calls (token bucket burst capacity)
-
     # Retry
-    llm_retry_max_attempts: int = 3     # Max retry attempts (1 = no retry, just the initial call)
-    llm_retry_base_delay: float = 1.0   # Base delay in seconds for exponential backoff
+    llm_retry_max_attempts: int = 3
+    llm_retry_base_delay: float = 1.0
 
+    # Lane concurrency
+    main_lane_concurrency: int = 4
+    subagent_lane_concurrency: int = 5
 
-class ConfigProvider(ABC):
-    @abstractmethod
-    def get(self, key: str) -> Optional[str]:
-        pass
+    # Adaptive pacing
+    pacing_enabled: bool = True
+    pacing_min_interval_ms: float = 500.0
 
+    # Key rotation and fallback
+    key_rotation_enabled: bool = True
+    fallback_enabled: bool = True
 
-class DotEnvProvider(ConfigProvider):
-    def __init__(self, path: Optional[str] = None):
-        target = path or os.path.join(os.getcwd(), ".env")
-        if os.path.isfile(target):
-            load_dotenv(target, override=False)
+    # Cooldown
+    cooldown_initial_ms: float = 30000.0
+    cooldown_max_ms: float = 300000.0
 
-    def get(self, key: str) -> Optional[str]:
-        return os.getenv(key)
-
-
-class EnvVarProvider(ConfigProvider):
-    def get(self, key: str) -> Optional[str]:
-        return os.getenv(key)
+    # Timezone
+    user_timezone: Optional[str] = None
 
 
 class ConfigLoader:
-    REQUIRED_KEYS = ["LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"]
-
-    MAPPING = {
-        "LLM_API_KEY": "api_key",
-        "LLM_BASE_URL": "base_url",
-        "LLM_MODEL": "model",
-        "LOG_DIR": "log_dir",
-    }
-
-    OPTIONAL_INT_KEYS = {
-        "LLM_RETRY_MAX_ATTEMPTS": "llm_retry_max_attempts",
-        "LLM_RATE_LIMIT_BURST": "rate_limit_burst",
-    }
-
-    OPTIONAL_FLOAT_KEYS = {
-        "LLM_RATE_LIMIT_RPM": "rate_limit_rpm",
-        "LLM_RETRY_BASE_DELAY": "llm_retry_base_delay",
-    }
+    REQUIRED_PROFILE_KEYS = {"name", "api_key", "base_url", "model"}
 
     @staticmethod
-    def load(provider: ConfigProvider) -> Config:
-        missing_keys = []
-        config_values = {}
+    def find_config_file(start_dir: Optional[str] = None) -> str:
+        """Auto-discover engine.json: CWD → upward to pyproject.toml directory.
 
-        for key in ConfigLoader.REQUIRED_KEYS:
-            value = provider.get(key)
-            if value is None or value.strip() == "":
-                missing_keys.append(key)
-            else:
-                config_values[ConfigLoader.MAPPING[key]] = value
+        Search strategy:
+        1. If start_dir is provided, start there
+        2. Otherwise start from CWD
+        3. Look for engine.json in current directory
+        4. Walk upward looking for pyproject.toml, then check that directory for engine.json
+        5. Return absolute path if found, raise FileNotFoundError otherwise
+        """
+        current = os.path.abspath(start_dir) if start_dir else os.getcwd()
 
-        if missing_keys:
-            raise ValueError(
-                f"Missing required configuration keys: {', '.join(missing_keys)}. "
-                f"Please ensure these are set in your .env file or environment."
-            )
+        # Check current directory first
+        engine_json = os.path.join(current, "engine.json")
+        if os.path.isfile(engine_json):
+            return engine_json
 
-        config = Config(
-            api_key=config_values["api_key"],
-            base_url=config_values["base_url"],
-            model=config_values["model"],
+        # Walk upward looking for pyproject.toml
+        search_root = current
+        while True:
+            parent = os.path.dirname(search_root)
+            if parent == search_root:
+                break
+            search_root = parent
+
+            if os.path.isfile(os.path.join(search_root, "pyproject.toml")):
+                engine_json = os.path.join(search_root, "engine.json")
+                if os.path.isfile(engine_json):
+                    return engine_json
+
+        raise FileNotFoundError(
+            f"No engine.json found starting from {current}"
         )
 
-        log_dir = provider.get("LOG_DIR")
-        if log_dir:
-            config.log_dir = log_dir
+    @staticmethod
+    def load_from_json(path: Optional[str] = None) -> Config:
+        """Load Config from JSON file.
 
-        for env_key, field_name in ConfigLoader.OPTIONAL_INT_KEYS.items():
-            raw = provider.get(env_key)
-            if raw is not None and raw.strip() != "":
-                try:
-                    setattr(config, field_name, int(raw))
-                except ValueError:
-                    raise ValueError(
-                        "Invalid value for {}: expected int, got '{}'".format(env_key, raw)
-                    )
+        Args:
+            path: Explicit path to JSON file. If None, auto-discover.
 
-        for env_key, field_name in ConfigLoader.OPTIONAL_FLOAT_KEYS.items():
-            raw = provider.get(env_key)
-            if raw is not None and raw.strip() != "":
-                try:
-                    setattr(config, field_name, float(raw))
-                except ValueError:
-                    raise ValueError(
-                        "Invalid value for {}: expected float, got '{}'".format(env_key, raw)
-                    )
+        Returns:
+            Config instance with values from JSON
 
-        if config.max_concurrent_agents < 2:
-            raise ValueError(
-                f"max_concurrent_agents must be >= 2, got {config.max_concurrent_agents}. "
-                "Values less than 2 can cause deadlock in the agent execution system."
-            )
+        Raises:
+            FileNotFoundError: If no config file found
+            ValueError: If validation fails (malformed JSON, missing fields, etc.)
+            PermissionError: If file is not readable
+        """
+        if path is None:
+            path = ConfigLoader.find_config_file()
+
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in {path}: {e}") from e
+        except PermissionError as e:
+            raise PermissionError(f"Cannot read config file {path}: {e}") from e
+
+        ConfigLoader._validate_profiles(data, path)
+
+        # Build kwargs for Config from known fields only (unknown keys ignored)
+        known_fields = {
+            "provider_profiles",
+            "strip_thinking",
+            "max_depth",
+            "spawn_timeout",
+            "max_result_length",
+            "summary_warning_reserve",
+            "emergency_summary_enabled",
+            "emergency_summary_context_messages",
+            "log_dir",
+            "llm_retry_max_attempts",
+            "llm_retry_base_delay",
+            "main_lane_concurrency",
+            "subagent_lane_concurrency",
+            "pacing_enabled",
+            "pacing_min_interval_ms",
+            "key_rotation_enabled",
+            "fallback_enabled",
+            "cooldown_initial_ms",
+            "cooldown_max_ms",
+            "user_timezone",
+        }
+
+        kwargs = {k: v for k, v in data.items() if k in known_fields}
+        config = Config(**kwargs)
+
+        # Env var override for timezone (takes precedence over JSON)
+        user_tz_env = os.environ.get("USER_TIMEZONE")
+        if user_tz_env:
+            config.user_timezone = user_tz_env
 
         return config
 
     @staticmethod
-    def load_from_env(dotenv_path: Optional[str] = None) -> Config:
-        if dotenv_path or os.getenv("LLM_API_KEY") is None:
-            provider = DotEnvProvider(path=dotenv_path)
-        else:
-            provider = EnvVarProvider()
-        return ConfigLoader.load(provider)
+    def _validate_profiles(data: dict, path: str) -> None:
+        """Validate provider_profiles structure.
+
+        Checks:
+        - provider_profiles key exists
+        - provider_profiles is a list
+        - provider_profiles is non-empty
+        - Each profile has all required keys (name, api_key, base_url, model)
+
+        Args:
+            data: Parsed JSON data
+            path: File path (for error messages)
+
+        Raises:
+            ValueError: If any validation fails
+        """
+        if "provider_profiles" not in data:
+            raise ValueError(f"Missing required key 'provider_profiles' in {path}")
+
+        profiles = data["provider_profiles"]
+        if not isinstance(profiles, list):
+            raise ValueError(f"'provider_profiles' must be a list in {path}")
+
+        if len(profiles) == 0:
+            raise ValueError(f"'provider_profiles' must not be empty in {path}")
+
+        for i, profile in enumerate(profiles):
+            missing = ConfigLoader.REQUIRED_PROFILE_KEYS - set(profile.keys())
+            if missing:
+                raise ValueError(
+                    f"Profile at index {i} missing required keys {sorted(missing)} in {path}"
+                )
 
 
 _config: Optional[Config] = None
@@ -145,5 +191,5 @@ _config: Optional[Config] = None
 def get_config() -> Config:
     global _config
     if _config is None:
-        _config = ConfigLoader.load_from_env()
+        _config = ConfigLoader.load_from_json()
     return _config

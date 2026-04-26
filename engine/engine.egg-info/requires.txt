@@ -1,4 +1,0 @@
-openai
-python-dotenv
-pytest>=7.0
-pytest-asyncio

@@ -13,14 +13,44 @@ from engine.logging import init_logger, get_logger, stop_logger
 from engine.runtime.agent_models import AgentError, AgentResult, AgentState, ErrorCategory, Session
 from engine.runtime.task_registry import AgentTaskRegistry
 from engine.tools.base import Tool, FunctionTool
-from engine.safety import ConcurrencyLimiter, TokenBucketRateLimiter
+from engine.safety import LaneConcurrencyQueue, SlidingWindowRateLimiter, AdaptivePacer, APIKeyPool, RetryEngine
+from engine.providers.fallback_provider import FallbackLLMProvider
+from engine.providers.provider_models import ProviderProfile, Lane
+from engine.time import TimeProvider
 
 __all__ = ["delegate", "Tool", "FunctionTool", "AgentResult", "AgentTaskRegistry", "init_logger", "get_logger", "stop_logger"]
 
-DEFAULT_SYSTEM_PROMPT = (
-    "你是主Agent，请尽可能构建子代理来并行处理任务。"
-    "这不仅可以提升处理效率，还能减少无关信息对上下文的污染，帮助你做出更清晰的决策。"
-)
+DEFAULT_SYSTEM_PROMPT = """\
+# Root Agent
+
+You are the root orchestrator agent. Your job is to decompose tasks, dispatch work, and synthesize results.
+
+## Execution Strategy
+
+1. **Decompose first** — Break the task into independent subtasks. Assign each to a child agent via `spawn`.
+2. **Parallel over sequential** — If subtasks have no dependencies, dispatch them all in one turn.
+3. **Handle simple tasks yourself** — If a task is trivial (single-step, no research needed), do it directly rather than spawning overhead.
+4. **Use tools proactively** — When tools are available, prefer using them over reasoning from incomplete knowledge. Vary your approach if a tool returns weak or empty results.
+5. **Ground your response in evidence** — Strictly base your answers and next actions on tool results and child agent reports. Never fabricate information or speculate beyond what the evidence supports.
+6. **Iterate after synthesis** — After child agents report back, evaluate whether the results are sufficient to complete the task. If so, synthesize and respond. If not, plan and dispatch further work.
+
+## Spawning Rules
+
+- One `spawn` call = one focused subtask with clear completion criteria.
+- Include sufficient context in the task description — the child agent starts isolated.
+- Respect the depth limit: at maximum depth, complete the task yourself.
+- Do NOT spawn a child for tasks that require a single tool call you can make yourself.
+
+## Output Format
+
+When the task specifies an output format, follow it exactly. The guidelines below apply when no format is specified.
+
+Be concise and structured:
+- Start with the direct answer or conclusion.
+- Follow with supporting details only when they add value.
+- No filler, no meta-commentary ("I have completed...", "Here is...").
+- For multi-part tasks, use clear headings or bullet lists.
+"""
 
 _custom_tools_cache: Optional[List] = None
 
@@ -72,30 +102,90 @@ async def delegate(
 ) -> AgentResult:
     """Delegate a task to the agent system."""
     session = Session(id=f"root_{uuid.uuid4().hex[:8]}", depth=0)
-    session.add_message("system", system_prompt or DEFAULT_SYSTEM_PROMPT)
 
     try:
         if config is None:
             config = get_config()
 
+        # Layer 1: Inject static time info into system prompt
+        time_provider = TimeProvider(timezone_override=config.user_timezone)
+        base_system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+        env_block = time_provider.format_system_env_block()
+        full_system_prompt = f"{base_system_prompt}\n\n{env_block}"
+        session.add_message("system", full_system_prompt)
+
         init_logger(log_dir=config.log_dir)
 
-        # Create rate limiter if RPM is configured (> 0 means enabled)
-        rate_limiter = None
-        if config.rate_limit_rpm > 0:
-            refill_rate = config.rate_limit_rpm / 60.0  # Convert RPM to tokens/sec
-            rate_limiter = TokenBucketRateLimiter(
-                max_tokens=config.rate_limit_burst,
-                refill_rate=refill_rate,
+        profiles = [ProviderProfile(**p) for p in config.provider_profiles]
+
+        # Create per-profile infrastructure
+        providers = {}       # profile_name -> LLMProvider
+        rate_limiters = {}   # profile_name -> SlidingWindowRateLimiter
+        pacers = {}          # profile_name -> AdaptivePacer
+
+        for profile in profiles:
+            # Rate limiter (RPM + TPM)
+            limiter = None
+            if profile.rpm_limit > 0 or profile.tpm_limit > 0:
+                limiter = SlidingWindowRateLimiter(
+                    rpm_limit=profile.rpm_limit,
+                    tpm_limit=profile.tpm_limit,
+                    profile_name=profile.name,
+                )
+            rate_limiters[profile.name] = limiter
+
+            # Adaptive pacer
+            pacer = None
+            if config.pacing_enabled:
+                pacer = AdaptivePacer(
+                    min_interval_ms=config.pacing_min_interval_ms,
+                    enabled=True,
+                    rpm_limit=profile.rpm_limit,
+                )
+            pacers[profile.name] = pacer
+
+            # LLM Provider
+            providers[profile.name] = LLMProvider(
+                api_key=profile.api_key,
+                base_url=profile.base_url,
+                model=profile.model,
+                config=config,
+                retry_engine=RetryEngine(
+                    max_attempts=config.llm_retry_max_attempts,
+                    base_delay=config.llm_retry_base_delay,
+                ),
             )
 
-        llm_provider = LLMProvider(config, rate_limiter=rate_limiter)
+        # Create shared components
+        key_pool = APIKeyPool(
+            profiles,
+            cooldown_initial_ms=config.cooldown_initial_ms,
+            cooldown_max_ms=config.cooldown_max_ms,
+        )
+
+        shared_retry_engine = RetryEngine(
+            max_attempts=config.llm_retry_max_attempts,
+            base_delay=config.llm_retry_base_delay,
+        )
+
+        # Create FallbackProvider
+        llm_provider = FallbackLLMProvider(
+            providers=providers,
+            key_pool=key_pool,
+            rate_limiters=rate_limiters,
+            pacers=pacers,
+            retry_engine=shared_retry_engine,
+        )
+
         task_registry = AgentTaskRegistry()
 
         custom_tools = _discover_custom_tools()
         all_tools = custom_tools + (tools or [])
 
-        concurrency_limiter = ConcurrencyLimiter(config.max_concurrent_agents)
+        # Create Lane Concurrency Queue
+        lane_queue = LaneConcurrencyQueue()
+        lane_queue.configure_lane(Lane.MAIN, max_concurrent=config.main_lane_concurrency)
+        lane_queue.configure_lane(Lane.SUBAGENT, max_concurrent=config.subagent_lane_concurrency)
 
         agent = Agent(
             session=session,
@@ -103,7 +193,7 @@ async def delegate(
             task_registry=task_registry,
             llm_provider=llm_provider,
             tools=all_tools,
-            concurrency_limiter=concurrency_limiter,
+            lane_queue=lane_queue,
         )
 
         await task_registry.register(
