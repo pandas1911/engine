@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 
+from engine.logging import get_logger
 from engine.safety import ResultTruncator
 from engine.tools.base import Tool
 
@@ -173,10 +174,10 @@ class _DuckDuckGoHTMLParser(HTMLParser):
 
 
 class _RateLimiter:
-    """Minimum-interval gate (3 s) between requests."""
+    """Minimum-interval gate between requests."""
 
     _last_request_time: float = 0.0
-    MIN_INTERVAL: float = 3.0
+    MIN_INTERVAL: float = 4.0
     _lock: asyncio.Lock = asyncio.Lock()
 
     @classmethod
@@ -201,7 +202,8 @@ class WebSearchTool(Tool):
         "Search the web for up-to-date information. Use this tool when you need "
         "to find current facts, news, recent events, or any topic that requires "
         "real-time internet data. Returns a list of web results with titles, URLs, "
-        "and snippets."
+        "and snippets. To retrieve the full content of any URL found in the results, "
+        "use the web_fetch tool."
     )
     parameters = {
         "type": "object",
@@ -230,8 +232,8 @@ class WebSearchTool(Tool):
     _BASE_URL: str = "https://html.duckduckgo.com/html"
     _REGION: str = "wt-wt"
     _SAFE_SEARCH: str = "-2"
-    _MAX_RETRIES: int = 2
-    _RETRY_BASE_DELAYS: List[float] = [5.0, 10.0]
+    _MAX_RETRIES: int = 3
+    _RETRY_BASE_DELAYS: List[float] = [5.0, 12.0, 20.0]
 
     async def execute(self, arguments: dict, context: dict) -> str:
         query = arguments.get("query", "")
@@ -275,6 +277,14 @@ class WebSearchTool(Tool):
             if attempt < self._MAX_RETRIES:
                 if response.status_code == 202:
                     delay = self._RETRY_BASE_DELAYS[attempt] + (random.random() * 1.0 - 0.5)
+                    get_logger().warning(
+                        "WebSearch",
+                        "Retry {}/{} after HTTP 202 | query={:.50s} | delay={:.1f}s".format(
+                            attempt + 1, self._MAX_RETRIES, query, delay
+                        ),
+                        event_type="tool_retry",
+                        data={"attempt": attempt + 1, "status": 202, "query": query, "delay": delay},
+                    )
                     await asyncio.sleep(delay)
                 elif response.status_code == 403:
                     headers["User-Agent"] = random.choice(_USER_AGENTS)

@@ -9,6 +9,7 @@ description = "Agent system for AI automation"
 requires-python = ">=3.8"
 dependencies = [
     "httpx",
+    "markdownify",
     "openai",
     "python-dotenv",
     "pytest>=7.0",

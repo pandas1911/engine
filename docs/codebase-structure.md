@@ -43,8 +43,9 @@ engine/
 │   │   ├── base.py            # Tool ABC, FunctionTool, ToolRegistry
 │   │   ├── builtin/           # Built-in tools (empty, reserved)
 │   │   │   └── __init__.py
-│   │   └── custom/            # Auto-discovered custom tools (DuckDuckGo web search)
-│   │       └── __init__.py
+│   │   └── custom/            # Auto-discovered custom tools (web search, web fetch)
+│   │       ├── __init__.py
+│   │       └── web_fetch.py   # URL content fetching with HTML→Markdown/Text conversion
 │   └── logging/               # Structured logging
 │       ├── __init__.py
 │       └── sink.py            # Logger, formatters, async file handler
@@ -411,7 +412,10 @@ Thin `Tool` wrapper that delegates to `SubAgentManager.spawn()`. Registered in t
 
 #### `custom/`
 
-Auto-discovered custom tools directory. Place `Tool` subclasses here and they will be automatically loaded by `_discover_custom_tools()`. Currently contains `web_search` — a DuckDuckGo HTML search tool that provides web search without API keys.
+Auto-discovered custom tools directory. Place `Tool` subclasses here and they will be automatically loaded by `_discover_custom_tools()`. Currently contains:
+
+- **`web_search`** (`web_search.py`) — DuckDuckGo HTML search tool with retry-backoff for HTTP 202 rate-limit responses, request pacing, and retry logging.
+- **`web_fetch`** (`web_fetch.py`) — URL content fetching tool with configurable format (class variable `DEFAULT_FORMAT`, default: markdown), transient-error retry, Cloudflare handling, and response size limits.
 
 ---
 
@@ -509,6 +513,7 @@ delegate() (engine/runner.py)
 | Package | Purpose |
 |---|---|
 | `openai` | OpenAI-compatible API client (used by LLMProvider) |
-| `httpx` | Async HTTP client (used by DuckDuckGo web search tool) |
+| `httpx` | Async HTTP client (used by web search and web fetch tools) |
+| `markdownify` | HTML-to-Markdown conversion (used by web fetch tool) |
 | `python-dotenv` | Environment variable loading from `.env` |
 | `pytest` + `pytest-asyncio` | Test framework with async support |
