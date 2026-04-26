@@ -15,7 +15,7 @@
    Do not use Chinese or any other language in inline comments, docstrings, or documentation within the codebase.
 
 4. **Keep `docs/codebase-structure.md` in sync with the actual codebase.**
-   After any code change — and again before committing — verify that the structure document still accurately reflects the current code. If anything has changed (modules added/removed, class signatures updated, data flow shifted, etc.), update the document accordingly.
+   **After any code change** — and **mandatory before committing** — verify that the structure document still accurately reflects the current code. If anything has changed (modules added/removed, class signatures updated, data flow shifted, etc.), update the document accordingly. **Do not commit if `docs/codebase-structure.md` is out of sync with the actual code structure.**
 
 # Notes
 
