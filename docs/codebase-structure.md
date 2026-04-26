@@ -1,6 +1,6 @@
 # Engine Codebase Structure
 
-> A multi-agent orchestration framework that supports nested sub-agent spawning, multi-provider LLM routing with automatic fallback, and per-profile rate limiting.
+> A multi-agent orchestration framework that supports nested sub-agent spawning, multi-provider LLM routing with primary/fallback ordering, and per-provider rate limiting.
 
 ---
 
@@ -106,9 +106,9 @@ The main entry point containing `delegate()` and all startup orchestration logic
 1. Load config via `get_config()` (auto-discovers `engine.json`)
 2. Create `TimeProvider`, inject timezone info into system prompt
 3. Initialize logger with configured log directory
-4. Parse `ProviderProfile` entries from config
-5. Create per-profile: `LLMProvider`, `SlidingWindowRateLimiter`, `AdaptivePacer`
-6. Create shared: `APIKeyPool`, `RetryEngine`, `FallbackLLMProvider`
+4. Iterate `config.providers` dict — for each provider, create `SlidingWindowRateLimiter` and `AdaptivePacer`; for each model under that provider, create an `LLMProvider` keyed by `"provider/model"`
+5. Build ordered key list from `config.primary` + `config.fallback`
+6. Create shared: `APIKeyPool` (with ordered composite key names), `RetryEngine`, `FallbackLLMProvider`
 7. Create `LaneConcurrencyQueue` (MAIN + SUBAGENT lanes)
 8. Discover and merge custom tools
 9. Create root `Agent`, register in `AgentTaskRegistry`
@@ -124,14 +124,16 @@ Loads runtime configuration from `engine.json`.
 
 | Class | Description |
 |---|---|
-| `Config` | Dataclass holding all configuration values (provider profiles, retry settings, concurrency limits, pacing, etc.) |
-| `ConfigLoader` | Static methods for discovering and loading `engine.json` |
+| `Config` | Dataclass holding all configuration values (providers dict, primary/fallback model refs, retry settings, concurrency limits, pacing, etc.) |
+| `ConfigLoader` | Static methods for discovering and loading `engine.json`. Validates `providers` dict structure, `primary`/`fallback` references, and per-model `model_params` for reserved keys. |
 
 **Config fields:**
 
 | Field | Default | Description |
 |---|---|---|
-| `provider_profiles` | `[]` | List of LLM provider configs (name, api_key, base_url, model, rpm_limit, tpm_limit, weight) |
+| `providers` | `{}` | `Dict[str, ProviderConfig]` — nested dict keyed by provider name. Each entry defines api_key, base_url, rpm_limit, tpm_limit, and a `models` dict of model_name → model_params |
+| `primary` | `""` | Required. Primary model reference in `"provider/model"` format |
+| `fallback` | `[]` | Optional list of fallback model references in `"provider/model"` format |
 | `strip_thinking` | `True` | Remove `<think/>` tags from LLM responses |
 | `max_depth` | `3` | Maximum sub-agent nesting depth |
 | `spawn_timeout` | `60.0` | Seconds to wait for a concurrency slot before rejecting spawn |
@@ -189,9 +191,17 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 
 | Class | Description |
 |---|---|
-| `APIKeyPool` | Multi-key management with staircase cooldown (30s → 60s → 300s) and weight-based selection |
+| `APIKeyPool` | Multi-key management with staircase cooldown (30s → 60s → 300s). Accepts `names: List[str]` (composite keys like `"provider/model"`). Selection prefers keys with lowest `consecutive_errors` among those not in cooldown. |
 
-**Key flow:** `acquire_key()` selects by highest weight, then fewest errors. On rate limit, applies staircase cooldown. On success, resets cooldown.
+**Key methods:**
+
+| Method | Description |
+|---|---|
+| `acquire_key()` | Returns best available key name (fewest errors, respects insertion order) |
+| `report_rate_limited(name)` | Increments errors, applies staircase cooldown |
+| `report_success(name)` | Resets error count and cooldown |
+| `is_all_in_cooldown()` | Checks if all keys are in cooldown |
+| `get_active_names()` | Returns key names not currently in cooldown |
 
 #### `retry.py` — Retry Engine
 
@@ -306,12 +316,21 @@ CRUD for `SubagentTask` entries with handler-based notification.
 | `LLMProvider` | OpenAI-compatible implementation using `AsyncOpenAI` |
 | `LLMProviderError` | Unified exception wrapper for all LLM errors |
 
+**LLMProvider constructor:**
+
+`LLMProvider(provider_params: ProviderParams, runtime_config: Config, model_params: Optional[Dict[str, Any]] = None)`
+
+- `provider_params` — resolved connection parameters (api_key, base_url, model)
+- `runtime_config` — global Config for retry/behavior settings
+- `model_params` — optional dict of model-specific kwargs merged into each API call (e.g. temperature, max_tokens)
+
 **LLMProvider features:**
 
-- Retries with configurable max attempts and exponential backoff
+- Per-call retry with configurable max attempts and exponential backoff
 - Thinking tag stripping (`<think/>` removal)
 - Rate limit header extraction (`x-ratelimit-*`)
 - Token usage tracking (prompt_tokens, completion_tokens)
+- `model_params` merged into every `chat()` call (reserved keys `model`, `messages`, `tools` are forbidden)
 
 #### `provider_models.py`
 
@@ -322,13 +341,19 @@ CRUD for `SubagentTask` entries with handler-based notification.
 | `PaceLevel` | Enum: `HEALTHY`, `PRESSING`, `CRITICAL` |
 | `Lane` | Enum: `MAIN`, `SUBAGENT` |
 | `ErrorClass` | Enum: `RETRYABLE`, `NON_RETRYABLE`, `RATE_LIMITED` |
-| `ProviderProfile` | Config: name, api_key, base_url, model, rpm_limit, tpm_limit, weight |
+| `ProviderConfig` | Provider entry: name, api_key, base_url, rpm_limit (default 100), tpm_limit (default 100000), models dict (model_name → model_params dict) |
+| `ProviderParams` | Resolved call params: api_key, base_url, model |
+| `resolve_model_ref()` | Splits `"provider/model"` string on first `/` into `(provider, model)` tuple |
 | `RateLimitSnapshot` | Remaining/limit for RPM and TPM |
 | `ProviderHealth` | Per-key health: consecutive errors, cooldown, pace level |
 
 #### `fallback_provider.py`
 
-`FallbackLLMProvider` wraps multiple `LLMProvider` instances with automatic key rotation and provider fallback (ping-pong).
+`FallbackLLMProvider` wraps multiple `LLMProvider` instances with automatic key rotation and sequential provider fallback.
+
+**Constructor:** `FallbackLLMProvider(providers: Dict[str, LLMProvider], key_pool: APIKeyPool, rate_limiters: Dict[str, SlidingWindowRateLimiter], pacers: Dict[str, AdaptivePacer], retry_engine: RetryEngine)`
+
+Providers are ordered by the insertion order of the `providers` dict (primary first, then fallbacks). No weight-based selection — ordering is deterministic from config.
 
 **Flow:**
 
@@ -461,7 +486,7 @@ User
   ▼
 delegate() (engine/runner.py)
   ├── Config loading (engine.json)
-  ├── Provider initialization (profiles → providers → fallback)
+  ├── Provider initialization (providers dict → LLMProviders → primary+fallback ordering)
   ├── Lane queue setup (MAIN:4, SUBAGENT:5)
   ├── Tool discovery (custom tools auto-loaded)
   └── Agent creation & registration

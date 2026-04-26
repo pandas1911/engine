@@ -1,30 +1,32 @@
 {
   "providers": {
-    "primary": {
-      "api_key": "your-primary-api-key-here",
-      "base_url": "https://your-primary-base-url/v1",
-      "rpm_limit": 300,
+    "aliyun": {
+      "api_key": "your_aliyun_api_key",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "rpm_limit": 150,
       "tpm_limit": 100000,
       "models": {
-        "your-primary-model": {}
+        "deepseek-v4-pro": {},
+        "deepseek-r1": {
+          "temperature": 0.7,
+          "reasoning_effort": "low"
+        }
       }
     },
-    "fallback": {
-      "api_key": "your-fallback-api-key-here",
-      "base_url": "https://your-fallback-base-url/v1",
-      "rpm_limit": 100,
-      "tpm_limit": 50000,
+    "minimax": {
+      "api_key": "your_minimax_api_key",
+      "base_url": "https://api.minimaxi.com/v1",
+      "rpm_limit": 50,
+      "tpm_limit": 20000,
       "models": {
-        "your-fallback-model": {}
+        "MiniMax-M2.7": {}
       }
     }
   },
-  "primary": "primary/your-primary-model",
-  "fallback": [
-    "fallback/your-fallback-model"
-  ],
+  "primary": "aliyun/deepseek-v4-pro",
+  "fallback": ["minimax/MiniMax-M2.7"],
   "strip_thinking": true,
-  "max_depth": 3,
+  "max_depth": 1,
   "spawn_timeout": 60.0,
   "max_result_length": 3000,
   "summary_warning_reserve": 2,
@@ -34,7 +36,7 @@
   "llm_retry_max_attempts": 3,
   "llm_retry_base_delay": 1.0,
   "main_lane_concurrency": 4,
-  "subagent_lane_concurrency": 5,
+  "subagent_lane_concurrency": 4,
   "pacing_enabled": true,
   "pacing_min_interval_ms": 500.0,
   "key_rotation_enabled": true,

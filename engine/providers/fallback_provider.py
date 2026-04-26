@@ -33,16 +33,6 @@ class FallbackLLMProvider(BaseLLMProvider):
         retry_engine: RetryEngine,
         max_profile_rotations: int = 3,
     ):
-        """Initialize the fallback provider.
-
-        Args:
-            providers: Mapping from profile_name to LLMProvider instance.
-            key_pool: APIKeyPool managing multiple API keys and cooldowns.
-            rate_limiters: Per-profile sliding window rate limiters.
-            pacers: Per-profile adaptive pacers for request throttling.
-            retry_engine: RetryEngine for error classification.
-            max_profile_rotations: Maximum key rotations before provider fallback.
-        """
         self._providers = providers
         self._key_pool = key_pool
         self._rate_limiters = rate_limiters
@@ -55,17 +45,6 @@ class FallbackLLMProvider(BaseLLMProvider):
 
     @staticmethod
     def _estimate_tokens(messages: List[Dict], tools: Optional[List[Dict]]) -> int:
-        """Estimate token count from messages and tools.
-
-        Uses a simple heuristic of characters divided by 3.
-
-        Args:
-            messages: List of message dictionaries.
-            tools: Optional list of tool definitions.
-
-        Returns:
-            Estimated token count (at least 1).
-        """
         total_chars = sum(len(str(m)) for m in messages)
         total_chars += sum(len(str(t)) for t in (tools or []))
         return max(1, total_chars // 3)
@@ -77,30 +56,7 @@ class FallbackLLMProvider(BaseLLMProvider):
         agent_label: str = "Root",
         task_id: str = "unknown",
         depth: int = 0,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
     ) -> LLMResponse:
-        """Send a chat request with key rotation and provider fallback.
-
-        Attempts to call the current provider. On rate limit, rotates to
-        the next available key. When all keys are exhausted, falls back
-        to other providers (ping-pong behavior).
-
-        Args:
-            messages: List of message dictionaries with 'role' and 'content'.
-            tools: List of tool definitions available to the LLM.
-            agent_label: Label for the agent making the request.
-            task_id: ID of the task being executed.
-            depth: Nesting depth of the calling agent.
-            temperature: Optional temperature parameter for the LLM.
-            max_tokens: Optional max_tokens parameter for the LLM.
-
-        Returns:
-            LLMResponse with content or tool_calls.
-
-        Raises:
-            LLMProviderError: On non-retryable errors or when all providers fail.
-        """
         estimated_tokens = self._estimate_tokens(messages, tools)
         max_iterations = max(
             50,
@@ -108,9 +64,7 @@ class FallbackLLMProvider(BaseLLMProvider):
         )
 
         for iteration in range(max_iterations):
-            # 1. Get active profile from key pool
-            profile = self._key_pool.acquire_key()
-            profile_name = profile.name
+            profile_name = self._key_pool.acquire_key()
             self._current_profile = profile_name
 
             provider = self._providers.get(profile_name)
@@ -119,34 +73,32 @@ class FallbackLLMProvider(BaseLLMProvider):
                     "No provider found for profile: {}".format(profile_name)
                 )
 
-            # 2. Apply rate limiting if configured for this profile
-            limiter = self._rate_limiters.get(profile_name)
+            # Extract provider name from composite key for limiter/pacer lookup.
+            # Rate limiters and pacers are keyed by provider name (e.g., "aliyun"),
+            # while profile_name is a composite key (e.g., "aliyun/deepseek-v4-pro").
+            provider_name = profile_name.split("/", 1)[0]
+
+            limiter = self._rate_limiters.get(provider_name)
             reservation_id = 0
             if limiter is not None:
                 reservation_id = await limiter.acquire(estimated_tokens=estimated_tokens)
 
-            # 3. Apply pacing if configured for this profile
-            pacer = self._pacers.get(profile_name)
+            pacer = self._pacers.get(provider_name)
             if pacer is not None:
                 await pacer.wait_if_needed()
 
             try:
-                # 4. Execute the chat request
                 result = await provider.chat(
                     messages=messages,
                     tools=tools,
                     agent_label=agent_label,
                     task_id=task_id,
                     depth=depth,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
                 )
 
-                # 5. Success path
                 self._key_pool.report_success(profile_name)
                 self._rotation_count = 0
 
-                # Record usage if limiter and usage data are available
                 if limiter is not None:
                     usage = provider.get_last_usage()
                     if usage is not None:
@@ -154,7 +106,6 @@ class FallbackLLMProvider(BaseLLMProvider):
                         total_tokens = prompt_tokens + completion_tokens
                         await limiter.record_usage(total_tokens, reservation_id=reservation_id)
 
-                # Update pacer with rate limit snapshot from provider
                 if pacer is not None:
                     snapshot = provider.get_rate_limit_snapshot()
                     if snapshot is not None:
@@ -181,7 +132,6 @@ class FallbackLLMProvider(BaseLLMProvider):
                 error_class = self._retry_engine.classify_error(e)
 
                 if error_class == ErrorClass.NON_RETRYABLE:
-                    # 7. Non-retryable errors raise immediately
                     self._logger.warning(
                         agent_label,
                         "Non-retryable error from provider | profile={} error={}".format(
@@ -202,7 +152,6 @@ class FallbackLLMProvider(BaseLLMProvider):
                     raise LLMProviderError(e) from e
 
                 if error_class == ErrorClass.RETRYABLE:
-                    # 8. Retryable (non-rate-limit) errors raise for caller to handle
                     self._logger.warning(
                         agent_label,
                         "Retryable error from provider | profile={} error={}".format(
@@ -223,7 +172,6 @@ class FallbackLLMProvider(BaseLLMProvider):
                     raise
 
                 if error_class == ErrorClass.RATE_LIMITED:
-                    # 6. Rate limited: report and rotate
                     retry_after = self._retry_engine.extract_retry_after(e)
                     self._key_pool.report_rate_limited(profile_name, retry_after)
                     if limiter is not None and reservation_id > 0:
@@ -246,7 +194,6 @@ class FallbackLLMProvider(BaseLLMProvider):
                         },
                     )
 
-                    # Check if we should do provider fallback (ping-pong)
                     if self._rotation_count > self._max_profile_rotations:
                         self._rotation_count = 0
                         self._logger.warning(
@@ -263,7 +210,6 @@ class FallbackLLMProvider(BaseLLMProvider):
 
                     continue
 
-        # 9. Safety net: infinite loop protection
         raise LLMProviderError(
             RuntimeError(
                 "Fallback provider exceeded maximum iterations ({})".format(
@@ -279,18 +225,7 @@ class FallbackLLMProvider(BaseLLMProvider):
         agent_label: str = "Root",
         task_id: str = "unknown",
     ) -> None:
-        """Stream a chat request to the active provider.
-
-        Delegates to the current provider's stream_chat method.
-
-        Args:
-            messages: List of message dictionaries with 'role' and 'content'.
-            tools: List of tool definitions available to the LLM.
-            agent_label: Label for the agent making the request.
-            task_id: ID of the task being executed.
-        """
-        profile = self._key_pool.acquire_key()
-        profile_name = profile.name
+        profile_name = self._key_pool.acquire_key()
         self._current_profile = profile_name
 
         provider = self._providers.get(profile_name)
@@ -307,11 +242,6 @@ class FallbackLLMProvider(BaseLLMProvider):
         )
 
     def get_active_provider_info(self) -> Dict:
-        """Return information about the current provider and pool status.
-
-        Returns:
-            Dictionary containing current profile name and pool cooldown status.
-        """
         return {
             "current_profile": self._current_profile,
             "pool_status": self._key_pool.get_cooldown_status(),

@@ -8,7 +8,7 @@ import pytest
 from engine import delegate
 
 TEST_PROMPT = """
-    查一下下周上海天气怎么样，适合穿什么样的衣服
+    帮我搜集一下美伊战争的最新进展情况，并说一下对世界有什么影响
 """
 
 

@@ -12,7 +12,7 @@ from openai import AsyncOpenAI
 from engine.config import Config
 from engine.logging import get_logger
 from engine.safety import RetryEngine
-from .provider_models import LLMResponse, ToolCall, ErrorClass
+from .provider_models import LLMResponse, ToolCall, ErrorClass, ProviderParams
 
 
 class LLMProviderError(Exception):
@@ -37,8 +37,6 @@ class BaseLLMProvider(ABC):
         agent_label: str = "Root",
         task_id: str = "unknown",
         depth: int = 0,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
     ) -> LLMResponse:
         """Send a chat request to the LLM.
 
@@ -48,8 +46,6 @@ class BaseLLMProvider(ABC):
             agent_label: Label for the agent making the request
             task_id: ID of the task being executed
             depth: Nesting depth of the calling agent
-            temperature: Optional temperature parameter for the LLM
-            max_tokens: Optional max_tokens parameter for the LLM
 
         Returns:
             LLMResponse with content or tool_calls
@@ -83,31 +79,28 @@ class LLMProvider(BaseLLMProvider):
 
     def __init__(
         self,
-        api_key: str,
-        base_url: str,
-        model: str,
-        config: Config,
-        retry_engine: Optional[RetryEngine] = None,
+        provider_params: ProviderParams,
+        runtime_config: Config,
+        model_params: Optional[Dict[str, Any]] = None,
     ):
         """Initialize LLM provider.
 
         Args:
-            api_key: API key for the LLM service
-            base_url: Base URL for the API endpoint
-            model: Model name to use
-            config: Configuration for global settings (strip_thinking, retry, etc.)
-            retry_engine: Optional RetryEngine. When None, created from config.
+            provider_params: Resolved provider connection parameters
+            runtime_config: Global configuration for retry and behavior settings
+            model_params: Optional dict of model-specific kwargs merged into API calls
         """
         self.client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            max_retries=0,  # Disable SDK built-in retry — we handle retry ourselves
+            api_key=provider_params.api_key,
+            base_url=provider_params.base_url,
+            max_retries=0,
         )
-        self.model = model
-        self.strip_thinking = config.strip_thinking
-        self._retry_engine = retry_engine or RetryEngine(
-            max_attempts=config.llm_retry_max_attempts,
-            base_delay=config.llm_retry_base_delay,
+        self.model = provider_params.model
+        self._model_params = model_params or {}
+        self.strip_thinking = runtime_config.strip_thinking
+        self._retry_engine = RetryEngine(
+            max_attempts=runtime_config.llm_retry_max_attempts,
+            base_delay=runtime_config.llm_retry_base_delay,
         )
         self._last_snapshot = None
         self._last_usage = None
@@ -119,8 +112,6 @@ class LLMProvider(BaseLLMProvider):
         agent_label: str = "Root",
         task_id: str = "unknown",
         depth: int = 0,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
     ) -> LLMResponse:
         """Send a chat request to the LLM with rate limiting and retry."""
         params: Dict[str, Any] = {
@@ -129,10 +120,7 @@ class LLMProvider(BaseLLMProvider):
         }
         if tools:
             params["tools"] = tools
-        if temperature is not None:
-            params["temperature"] = temperature
-        if max_tokens is not None:
-            params["max_tokens"] = max_tokens
+        params.update(self._model_params)
 
         logger = get_logger()
         msg_roles = [m.get("role", "?") for m in messages]

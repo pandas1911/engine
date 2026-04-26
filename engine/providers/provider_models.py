@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 
@@ -52,16 +52,38 @@ class ErrorClass(Enum):
 
 
 @dataclass
-class ProviderProfile:
-    """Configuration profile for an LLM provider."""
+class ProviderConfig:
+    """Configuration for an LLM provider instance."""
 
     name: str
     api_key: str
     base_url: str
+    rpm_limit: float = 100
+    tpm_limit: float = 100000
+    models: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass
+class ProviderParams:
+    """Resolved parameters needed to call an LLM provider."""
+
+    api_key: str
+    base_url: str
     model: str
-    rpm_limit: float
-    tpm_limit: float
-    weight: int = 1
+
+
+def resolve_model_ref(ref: str) -> Tuple[str, str]:
+    """Split a 'provider/model' reference into (provider, model).
+
+    Raises:
+        ValueError: If the reference does not contain a '/' separator.
+    """
+    if "/" not in ref:
+        raise ValueError(
+            f"Invalid model reference '{ref}': expected 'provider/model' format"
+        )
+    provider, model = ref.split("/", 1)
+    return provider, model
 
 
 @dataclass
@@ -92,7 +114,9 @@ __all__ = [
     "PaceLevel",
     "Lane",
     "ErrorClass",
-    "ProviderProfile",
+    "ProviderConfig",
+    "ProviderParams",
+    "resolve_model_ref",
     "RateLimitSnapshot",
     "ProviderHealth",
 ]
