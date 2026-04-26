@@ -9,10 +9,17 @@
 ```
 engine/
 ├── engine/                    # Core package
-│   ├── __init__.py            # Package entry — delegate(), custom tool discovery
+│   ├── __init__.py            # Thin re-export layer (re-exports from runner.py and submodules)
+│   ├── runner.py              # delegate(), DEFAULT_SYSTEM_PROMPT, custom tool discovery
 │   ├── config.py              # Configuration loading (engine.json)
-│   ├── safety.py              # Rate limiting, concurrency, retry, pacing
 │   ├── time.py                # Timezone-aware time utilities
+│   ├── safety/                # Rate limiting, concurrency, retry, pacing
+│   │   ├── __init__.py        # Re-export layer for all safety classes
+│   │   ├── concurrency.py     # ConcurrencyLimiter, LaneConcurrencyQueue, LaneSlot, LaneStatus
+│   │   ├── rate_limit.py      # SlidingWindowRateLimiter
+│   │   ├── key_pool.py        # APIKeyPool
+│   │   ├── retry.py           # RetryEngine
+│   │   └── pacing.py          # AdaptivePacer, ResultTruncator, RegistrySizeMonitor
 │   ├── runtime/               # Agent execution core
 │   │   ├── __init__.py
 │   │   ├── agent.py           # Agent class — main execution loop
@@ -58,9 +65,28 @@ engine/
 
 ## Module Details
 
-### 1. `engine/__init__.py` — Package Entry Point
+### 1. `engine/__init__.py` — Thin Re-export Layer
 
-The top-level module that wires everything together. Its primary public API is the `delegate()` function.
+A minimal re-export module (12 lines) that re-exports the public API from `runner.py` and submodules. All implementation logic was extracted to `runner.py`.
+
+**Re-exports:**
+
+| Symbol | Source |
+|---|---|
+| `delegate` | `engine.runner` |
+| `DEFAULT_SYSTEM_PROMPT` | `engine.runner` |
+| `_discover_custom_tools` | `engine.runner` |
+| `_refresh_custom_tools` | `engine.runner` |
+| `Tool`, `FunctionTool` | `engine.tools.base` |
+| `AgentResult` | `engine.runtime.agent_models` |
+| `AgentTaskRegistry` | `engine.runtime.task_registry` |
+| `init_logger`, `get_logger`, `stop_logger` | `engine.logging` |
+
+---
+
+### 2. `engine/runner.py` — Delegation Runner
+
+The main entry point containing `delegate()` and all startup orchestration logic. Extracted from the original `engine/__init__.py`.
 
 **Key functions:**
 
@@ -89,7 +115,7 @@ The top-level module that wires everything together. Its primary public API is t
 
 ---
 
-### 2. `engine/config.py` — Configuration
+### 3. `engine/config.py` — Configuration
 
 Loads runtime configuration from `engine.json`.
 
@@ -132,32 +158,60 @@ Loads runtime configuration from `engine.json`.
 
 ---
 
-### 3. `engine/safety.py` — Rate Limiting & Safety Guards
+### 4. `engine/safety/` — Rate Limiting & Safety Guards
 
-A comprehensive module providing resource protection mechanisms for the agent system.
+A package providing resource protection mechanisms for the agent system. Split into focused sub-modules, with `__init__.py` re-exporting all public classes for backward compatibility.
 
-**Classes:**
+#### `__init__.py` — Re-export Layer
+
+Re-exports all classes from sub-modules so that `from engine.safety import ...` continues to work without changes.
+
+#### `concurrency.py` — Concurrency Control
 
 | Class | Description |
 |---|---|
 | `ConcurrencyLimiter` | Asyncio.Semaphore wrapper with observable active count |
 | `LaneConcurrencyQueue` | Per-lane (MAIN/SUBAGENT) concurrency control with FIFO queuing via `asyncio.Condition` |
+| `LaneSlot` | Async context manager representing a concurrency slot |
+| `LaneStatus` | Data class for lane status queries |
+| `_LaneState` | Internal state per lane |
+
+#### `rate_limit.py` — Sliding Window Rate Limiter
+
+| Class | Description |
+|---|---|
 | `SlidingWindowRateLimiter` | Dual RPM/TPM sliding window with event-driven scheduler (no busy waiting) |
+
+**Key flow:** Fast path (capacity available, no waiters) → immediate return. Slow path → enqueue Future, background `_scheduler` task wakes waiters when capacity frees up.
+
+#### `key_pool.py` — API Key Pool
+
+| Class | Description |
+|---|---|
 | `APIKeyPool` | Multi-key management with staircase cooldown (30s → 60s → 300s) and weight-based selection |
+
+**Key flow:** `acquire_key()` selects by highest weight, then fewest errors. On rate limit, applies staircase cooldown. On success, resets cooldown.
+
+#### `retry.py` — Retry Engine
+
+| Class | Description |
+|---|---|
 | `RetryEngine` | Error classification (RATE_LIMITED/RETRYABLE/NON_RETRYABLE) with exponential backoff + jitter |
+| `T` | TypeVar used for generic retry return type |
+
+#### `pacing.py` — Adaptive Pacing
+
+| Class | Description |
+|---|---|
 | `AdaptivePacer` | Dynamic throttling transitioning between HEALTHY/PRESSING/CRITICAL pace levels |
 | `ResultTruncator` | Static utility for truncating oversized results |
 | `RegistrySizeMonitor` | Monitors task registry size and identifies completed tasks to purge |
 
-**Key flows:**
-
-- **SlidingWindowRateLimiter**: Fast path (capacity available, no waiters) → immediate return. Slow path → enqueue Future, background `_scheduler` task wakes waiters when capacity frees up.
-- **APIKeyPool**: `acquire_key()` selects by highest weight, then fewest errors. On rate limit, applies staircase cooldown. On success, resets cooldown.
-- **AdaptivePacer**: HEALTHY (>50% remaining) → 0ms extra delay. PRESSING (20-50%) → 200ms. CRITICAL (<20%) → 1000ms.
+**Pace levels:** HEALTHY (>50% remaining) → 0ms extra delay. PRESSING (20-50%) → 200ms. CRITICAL (<20%) → 1000ms.
 
 ---
 
-### 4. `engine/time.py` — Time Utilities
+### 5. `engine/time.py` — Time Utilities
 
 Timezone-aware time formatting for the agent framework.
 
@@ -176,7 +230,7 @@ Timezone-aware time formatting for the agent framework.
 
 ---
 
-### 5. `engine/runtime/` — Agent Execution Core
+### 6. `engine/runtime/` — Agent Execution Core
 
 #### `agent.py` — Agent Class
 
@@ -241,7 +295,7 @@ CRUD for `SubagentTask` entries with handler-based notification.
 
 ---
 
-### 6. `engine/providers/` — LLM Provider Layer
+### 7. `engine/providers/` — LLM Provider Layer
 
 #### `llm_provider.py`
 
@@ -288,7 +342,7 @@ CRUD for `SubagentTask` entries with handler-based notification.
 
 ---
 
-### 7. `engine/subagent/` — Sub-Agent System
+### 8. `engine/subagent/` — Sub-Agent System
 
 #### `manager.py` — SubAgentManager
 
@@ -338,7 +392,7 @@ Thin `Tool` wrapper that delegates to `SubAgentManager.spawn()`. Registered in t
 
 ---
 
-### 8. `engine/tools/` — Tool System
+### 9. `engine/tools/` — Tool System
 
 #### `base.py`
 
@@ -361,7 +415,7 @@ Auto-discovered custom tools directory. Place `Tool` subclasses here and they wi
 
 ---
 
-### 9. `engine/logging/` — Logging
+### 10. `engine/logging/` — Logging
 
 #### `sink.py`
 
@@ -384,7 +438,7 @@ Auto-discovered custom tools directory. Place `Tool` subclasses here and they wi
 
 ---
 
-### 10. `tests/` — Test Suite
+### 11. `tests/` — Test Suite
 
 | File | Description |
 |---|---|
@@ -401,7 +455,7 @@ Both tests use `pytest-asyncio` and call the real `delegate()` function (require
 User
   │
   ▼
-delegate()
+delegate() (engine/runner.py)
   ├── Config loading (engine.json)
   ├── Provider initialization (profiles → providers → fallback)
   ├── Lane queue setup (MAIN:4, SUBAGENT:5)
@@ -446,7 +500,7 @@ delegate()
 
 5. **Self-draining events**: Agents drain their own event queue iteratively, processing `ChildCompletionEvent`s one at a time without recursion.
 
-6. **Tool auto-discovery**: Custom tools in `engine/tools/custom/` are automatically discovered and registered by the package `__init__.py`.
+6. **Tool auto-discovery**: Custom tools in `engine/tools/custom/` are automatically discovered and registered by `engine/runner.py`.
 
 ---
 
