@@ -230,10 +230,12 @@ class WebSearchTool(Tool):
     _MAX_RESULTS: int = 5
     _MAX_FIELD_LENGTH: int = 1000
     _BASE_URL: str = "https://html.duckduckgo.com/html"
+    # Common regions: "wt-wt" (worldwide), "us-en" (USA), "cn-zh" (China)
     _REGION: str = "wt-wt"
     _SAFE_SEARCH: str = "-2"
-    _MAX_RETRIES: int = 3
-    _RETRY_BASE_DELAYS: List[float] = [5.0, 12.0, 20.0]
+    _MAX_RETRIES: int = 4
+    _RETRY_BASE_DELAY: float = 5.0
+    _RETRY_DELAY_CAP: float = 60.0
 
     async def execute(self, arguments: dict, context: dict) -> str:
         query = arguments.get("query", "")
@@ -276,7 +278,7 @@ class WebSearchTool(Tool):
 
             if attempt < self._MAX_RETRIES:
                 if response.status_code == 202:
-                    delay = self._RETRY_BASE_DELAYS[attempt] + (random.random() * 1.0 - 0.5)
+                    delay = min(self._RETRY_BASE_DELAY * (2.0 ** attempt), self._RETRY_DELAY_CAP) + (random.random() * 1.0 - 0.5)
                     get_logger().warning(
                         "WebSearch",
                         "Retry {}/{} after HTTP 202 | query={:.50s} | delay={:.1f}s".format(
