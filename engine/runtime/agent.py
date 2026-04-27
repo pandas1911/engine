@@ -321,7 +321,9 @@ class Agent:
 
             for tool_call in response.tool_calls:
                 result = await self._execute_tool(tool_call)
-                self.session.add_message("tool", result, tool_call_id=tool_call.call_id)
+                # Prevent empty content — some LLM APIs reject content="" with 422
+                safe_result = result or "[Tool returned empty content]"
+                self.session.add_message("tool", safe_result, tool_call_id=tool_call.call_id)
 
         if iteration >= self.MAX_TOOL_ITERATIONS:
             get_logger().error(

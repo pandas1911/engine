@@ -279,4 +279,7 @@ class WebFetchTool(Tool):
         else:
             output = content
 
+        if not output or not output.strip():
+            return "[Empty page] The URL returned no extractable content — the page may require JavaScript rendering."
+
         return ResultTruncator.truncate(output, self._MAX_CONTENT_LENGTH)
