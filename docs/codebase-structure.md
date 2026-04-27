@@ -463,7 +463,7 @@ Thin `Tool` wrapper that delegates to `SubAgentManager.spawn()`. Registered in t
 
 Auto-discovered custom tools directory. Place `Tool` subclasses here and they will be automatically loaded by `_discover_custom_tools()`. Currently contains:
 
-- **`web_search`** (`web_search.py`) — DuckDuckGo HTML search tool with retry-backoff for HTTP 202 rate-limit responses, request pacing, and retry logging.
+- **`web_search`** (`web_search.py`) — Web search tool using the `ddgs` metasearch library. Aggregates results from multiple search engines (DuckDuckGo, Bing, Brave, Google, etc.) with automatic failover via `backend="auto"`. Uses `asyncio.to_thread()` to wrap the synchronous `DDGS.text()` call. Lazy singleton DDGS instance for connection reuse.
 - **`web_fetch`** (`web_fetch.py`) — URL content fetching tool with configurable format (class variable `DEFAULT_FORMAT`, default: markdown), transient-error retry, Cloudflare handling, and response size limits.
 
 ---
@@ -563,7 +563,7 @@ delegate() (engine/runner.py)
 | Package | Purpose |
 |---|---|
 | `openai` | OpenAI-compatible API client (used by LLMProvider) |
-| `httpx` | Async HTTP client (used by web search and web fetch tools) |
+| `httpx` | Async HTTP client (used by web fetch tool) |
 | `markdownify` | HTML-to-Markdown conversion (used by web fetch tool) |
-| `python-dotenv` | Environment variable loading from `.env` |
+| `ddgs` | Metasearch library aggregating 9+ search engines with automatic failover (used by web search tool) |
 | `pytest` + `pytest-asyncio` | Test framework with async support |
