@@ -233,7 +233,7 @@ class WebSearchTool(Tool):
     # Common regions: "wt-wt" (worldwide), "us-en" (USA), "cn-zh" (China)
     _REGION: str = "wt-wt"
     _SAFE_SEARCH: str = "-2"
-    _MAX_RETRIES: int = 4
+    _MAX_RETRIES: int = 3
     _RETRY_BASE_DELAY: float = 5.0
     _RETRY_DELAY_CAP: float = 60.0
 

@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 from engine.providers.llm_provider import BaseLLMProvider, LLMProvider, LLMProviderError
 from engine.providers.provider_models import LLMResponse, ErrorClass
 from engine.safety import APIKeyPool, SlidingWindowRateLimiter, AdaptivePacer, RetryEngine
+from engine.safety.token_estimator import EmaTokenEstimator
 from engine.logging import get_logger
 
 
@@ -42,12 +43,10 @@ class FallbackLLMProvider(BaseLLMProvider):
         self._current_profile: Optional[str] = None
         self._rotation_count = 0
         self._logger = get_logger()
+        self._token_estimator = EmaTokenEstimator()
 
-    @staticmethod
-    def _estimate_tokens(messages: List[Dict], tools: Optional[List[Dict]]) -> int:
-        total_chars = sum(len(str(m)) for m in messages)
-        total_chars += sum(len(str(t)) for t in (tools or []))
-        return max(1, total_chars // 3)
+    def _estimate_tokens(self, messages: List[Dict], tools: Optional[List[Dict]]) -> int:
+        return self._token_estimator.estimate(messages, tools)
 
     async def chat(
         self,
@@ -105,6 +104,7 @@ class FallbackLLMProvider(BaseLLMProvider):
                         prompt_tokens, completion_tokens = usage
                         total_tokens = prompt_tokens + completion_tokens
                         await limiter.record_usage(total_tokens, reservation_id=reservation_id)
+                        self._token_estimator.feedback(estimated_tokens, total_tokens)
 
                 if pacer is not None:
                     snapshot = provider.get_rate_limit_snapshot()

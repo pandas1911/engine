@@ -17,6 +17,7 @@ engine/
 │   │   ├── __init__.py        # Re-export layer for all safety classes
 │   │   ├── concurrency.py     # ConcurrencyLimiter, LaneConcurrencyQueue, LaneSlot, LaneStatus
 │   │   ├── rate_limit.py      # SlidingWindowRateLimiter
+│   │   ├── token_estimator.py # EmaTokenEstimator — adaptive chars→tokens estimator
 │   │   ├── key_pool.py        # APIKeyPool
 │   │   ├── retry.py           # RetryEngine
 │   │   └── pacing.py          # AdaptivePacer, ResultTruncator, RegistrySizeMonitor
@@ -187,6 +188,27 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 
 **Key flow:** Fast path (capacity available, no waiters) → immediate return. Slow path → enqueue Future, background `_scheduler` task wakes waiters when capacity frees up.
 
+**Deadlock prevention:**
+
+- `acquire()` caps `estimated_tokens` to `tpm_limit` so a single oversized request cannot block forever when estimated > capacity.
+- `_scheduler()` includes deadlock detection: when the sliding window is empty but a waiter still cannot proceed (because its estimated request exceeds the full capacity), the scheduler force-releases the waiter to prevent permanent stall.
+- `acquire()` wait is bounded by a configurable timeout derived from `2 * window_seconds`, raising `asyncio.TimeoutError` on expiry.
+- Private helper `_remove_tpm_entry_by_rid()` consolidates TPM entry cleanup logic.
+
+#### `token_estimator.py` — EMA Token Estimator
+
+| Class | Description |
+|---|---|
+| `EmaTokenEstimator` | Adaptive chars→tokens estimator using exponential moving average. Replaces fixed chars//3 formula with a self-correcting coefficient (default 3.0, bounds [1.0, 5.0], EMA alpha 0.2). |
+
+**Key methods:**
+
+| Method | Description |
+|---|---|
+| `estimate(messages, tools)` | Estimate token count using current coefficient |
+| `feedback(estimated_tokens, actual_tokens)` | Update coefficient via EMA after observing actual usage |
+| `coefficient` (property) | Current coefficient value |
+
 #### `key_pool.py` — API Key Pool
 
 | Class | Description |
@@ -355,13 +377,15 @@ CRUD for `SubagentTask` entries with handler-based notification.
 
 Providers are ordered by the insertion order of the `providers` dict (primary first, then fallbacks). No weight-based selection — ordering is deterministic from config.
 
+**Token estimation:** `_estimate_tokens` proxies to an `EmaTokenEstimator` instance instead of using a fixed chars//3 formula, producing adaptive estimates. After each successful LLM call, `feedback()` updates the estimator with actual token usage so subsequent estimates self-correct.
+
 **Flow:**
 
 1. Acquire key from `APIKeyPool`
-2. Apply rate limiting (sliding window)
+2. Apply rate limiting (sliding window) — estimated_tokens is capped to prevent deadlock
 3. Apply adaptive pacing
 4. Execute chat request
-5. On success → record usage, update pacer, report success
+5. On success → record usage, update pacer, report success, feed actual tokens back to estimator
 6. On rate limit → report rate limited, rotate key, retry
 7. On retryable error → release reservation, propagate
 8. On non-retryable error → release reservation, raise
@@ -473,8 +497,9 @@ Auto-discovered custom tools directory. Place `Tool` subclasses here and they wi
 |---|---|
 | `test_easy_task.py` | Tests `delegate()` with a Chinese-language research prompt |
 | `test_multilayer_subagent.py` | Tests 3-child × 2-grandchild nesting with random number aggregation |
+| `test_rate_limit_safety.py` | Unit tests for rate limiter deadlock prevention, timeout, and EMA token estimator (13 tests) |
 
-Both tests use `pytest-asyncio` and call the real `delegate()` function (requires valid `engine.json`).
+Both integration tests use `pytest-asyncio` and call the real `delegate()` function (requires valid `engine.json`).
 
 ---
 
@@ -498,7 +523,7 @@ delegate() (engine/runner.py)
     │     ├── _process_tool_calls() ─── LLM chat loop (max 20 iterations)
     │     │     ├── LLMProvider.chat() ──→ FallbackLLMProvider.chat()
     │     │     │                               ├── APIKeyPool.acquire_key()
-    │     │     │                               ├── SlidingWindowRateLimiter.acquire()
+    │     │     │                               ├── SlidingWindowRateLimiter.acquire() ← estimated_tokens capped to tpm_limit
     │     │     │                               ├── AdaptivePacer.wait_if_needed()
     │     │     │                               └── LLMProvider.chat() (OpenAI SDK)
     │     │     ├── Tool execution (ToolRegistry → Tool.execute())

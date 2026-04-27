@@ -4,6 +4,7 @@ Provides RPM/TPM rate limiting with event-driven scheduling.
 """
 
 import asyncio
+import sys
 import time
 from collections import deque
 from typing import Optional
@@ -82,6 +83,17 @@ class SlidingWindowRateLimiter:
         )
         return tpm_ok
 
+    def _remove_tpm_entry_by_rid(self, reservation_id: int) -> bool:
+        """Remove TPM entry by reservation_id. Caller MUST hold self._lock.
+        Returns True if found and removed, False otherwise."""
+        if reservation_id <= 0:
+            return False
+        for i in range(len(self._tpm_entries) - 1, -1, -1):
+            if self._tpm_entries[i][2] == reservation_id:
+                del self._tpm_entries[i]
+                return True
+        return False
+
     async def acquire(self, estimated_tokens: int = 0) -> int:
         """Acquire rate limit slot (FIFO, event-driven).
 
@@ -92,6 +104,11 @@ class SlidingWindowRateLimiter:
 
         async with self._lock:
             self._prune_stale()
+
+            # Prevent deadlock: cap estimated_tokens so it never exceeds tpm_limit
+            # When window is empty, this ensures _can_acquire() can always return True
+            if self._tpm_limit > 0:
+                estimated_tokens = min(estimated_tokens, max(1, int(self._tpm_limit) - 1))
 
             # Fast path: capacity available, no one waiting
             if self._can_acquire(estimated_tokens) and not self._waiters:
@@ -130,8 +147,9 @@ class SlidingWindowRateLimiter:
             )
 
         # Wait OUTSIDE the lock -- other acquire() calls can proceed
+        timeout_seconds = self._window_seconds * 2  # 2 full window rotations
         try:
-            return await fut
+            return await asyncio.wait_for(fut, timeout=timeout_seconds)
         except BaseException:
             async with self._lock:
                 if not fut.done():
@@ -142,14 +160,20 @@ class SlidingWindowRateLimiter:
                     except BaseException:
                         rid = None
                     if rid and rid > 0:
-                        for i in range(len(self._tpm_entries) - 1, -1, -1):
-                            if self._tpm_entries[i][2] == rid:
-                                del self._tpm_entries[i]
-                                break
+                        self._remove_tpm_entry_by_rid(rid)
                 try:
                     self._waiters.remove((fut, estimated_tokens))
                 except ValueError:
                     pass
+            if isinstance(sys.exc_info()[1], asyncio.TimeoutError):
+                get_logger().error(
+                    "RateControl",
+                    "Rate limiter acquire timed out | profile={}, timeout={}s".format(
+                        self._profile_name, timeout_seconds
+                    ),
+                    event_type="rate_limit_acquire_timeout",
+                    data={"profile": self._profile_name, "timeout_seconds": timeout_seconds},
+                )
             raise
 
     async def record_usage(self, tokens: int, reservation_id: Optional[int] = None) -> None:
@@ -209,22 +233,20 @@ class SlidingWindowRateLimiter:
         if reservation_id <= 0:
             return
         async with self._lock:
-            for i in range(len(self._tpm_entries) - 1, -1, -1):
-                if self._tpm_entries[i][2] == reservation_id:
-                    del self._tpm_entries[i]
-                    get_logger().info(
-                        "RateControl",
-                        "Rate limit reservation released | profile={}, reservation_id={}".format(
-                            self._profile_name,
-                            reservation_id,
-                        ),
-                        event_type="rate_limit_reservation_released",
-                        data={
-                            "profile": self._profile_name,
-                            "reservation_id": reservation_id,
-                        },
-                    )
-                    return
+            if self._remove_tpm_entry_by_rid(reservation_id):
+                get_logger().info(
+                    "RateControl",
+                    "Rate limit reservation released | profile={}, reservation_id={}".format(
+                        self._profile_name,
+                        reservation_id,
+                    ),
+                    event_type="rate_limit_reservation_released",
+                    data={
+                        "profile": self._profile_name,
+                        "reservation_id": reservation_id,
+                    },
+                )
+                return
 
     def _ensure_scheduler_locked(self) -> None:
         """Start scheduler if not already running (lock must be held)."""
@@ -265,6 +287,29 @@ class SlidingWindowRateLimiter:
                             },
                         )
                     continue  # May be able to wake more waiters
+
+                # Deadlock detection: window is empty but waiter can't be released
+                # This means estimated_tokens > tpm_limit (after Layer 1 cap, should never happen)
+                # Force-release as safety net
+                if not self._rpm_entries and not self._tpm_entries:
+                    get_logger().error(
+                        "RateControl",
+                        "Rate limiter deadlock detected | profile={}, estimated_tokens={}, tpm_limit={}, waiters={}".format(
+                            self._profile_name, estimated_tokens, self._tpm_limit, len(self._waiters)
+                        ),
+                        event_type="rate_limit_deadlock",
+                        data={
+                            "profile": self._profile_name,
+                            "estimated_tokens": estimated_tokens,
+                            "tpm_limit": self._tpm_limit,
+                            "waiters": len(self._waiters),
+                        },
+                    )
+                    self._waiters.popleft()
+                    self._rpm_entries.append((time.monotonic(), 0))
+                    if not fut.done():
+                        fut.set_result(0)  # No TPM reservation for force-released
+                    continue
 
                 # Calculate precise wait time until oldest entry expires
                 oldest_ts = float("inf")
