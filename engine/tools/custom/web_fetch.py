@@ -18,7 +18,7 @@ from engine.logging import get_logger
 from engine.safety import ResultTruncator
 from engine.tools.base import Tool
 
-# Module-level shared httpx.AsyncClient (same pattern as web_search.py)
+# Module-level shared httpx.AsyncClient for connection pooling.
 
 _shared_client: httpx.AsyncClient | None = None
 _client_lock: asyncio.Lock = asyncio.Lock()
