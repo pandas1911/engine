@@ -6,39 +6,44 @@ Provides multi-key rotation with staircase cooldown.
 import time
 from typing import Dict, List, Optional
 
-from engine.providers.provider_models import ProviderProfile, ProviderHealth
+from engine.providers.provider_models import ProviderHealth
 from engine.logging import get_logger
 
 
 class APIKeyPool:
     """Multi-key management with staircase cooldown and automatic rotation.
 
-    Manages a pool of provider API keys, tracking health state per key.
+    Manages a pool of provider key names, tracking health state per key.
     On rate limit, keys enter a staircase cooldown (30s -> 60s -> 300s).
     Successful requests reset cooldown and error counts.
+
+    Keys are identified by composite strings (e.g., "aliyun/deepseek-v4-pro").
+    Selection prefers keys with the lowest consecutive_errors among those
+    not in cooldown, providing sequential primary -> fallback ordering.
     """
 
     def __init__(
         self,
-        profiles: List[ProviderProfile],
+        names: List[str],
         cooldown_initial_ms: float = 30000.0,
         cooldown_max_ms: float = 300000.0,
     ):
-        if not profiles:
-            raise ValueError("at least one profile is required")
-        self._profiles: Dict[str, ProviderProfile] = {p.name: p for p in profiles}
+        if not names:
+            raise ValueError("at least one name is required")
+        self._names: List[str] = list(names)
         self._health: Dict[str, ProviderHealth] = {
-            p.name: ProviderHealth(profile_name=p.name) for p in profiles
+            name: ProviderHealth(profile_name=name) for name in names
         }
         self._cooldown_initial_ms = cooldown_initial_ms
         self._cooldown_max_ms = cooldown_max_ms
 
-    def acquire_key(self) -> ProviderProfile:
+    def acquire_key(self) -> str:
         """Select the best available key.
 
         Filters out keys in cooldown. If none available, returns the
         least-recently-cooled key (sorted by cooldown_until ascending).
-        Among available keys, prefers higher weight, then fewer errors.
+        Among available keys, prefers fewer consecutive_errors, preserving
+        the original insertion order (primary first, then fallbacks).
         """
         now = time.monotonic()
 
@@ -49,14 +54,12 @@ class APIKeyPool:
         ]
 
         if not candidates:
-            all_profiles = list(self._health.items())
-            all_profiles.sort(key=lambda x: x[1].cooldown_until or 0.0)
-            return self._profiles[all_profiles[0][0]]
+            all_entries = list(self._health.items())
+            all_entries.sort(key=lambda x: x[1].cooldown_until or 0.0)
+            return all_entries[0][0]
 
-        candidates.sort(
-            key=lambda x: (-self._profiles[x[0]].weight, x[1].consecutive_errors)
-        )
-        return self._profiles[candidates[0][0]]
+        candidates.sort(key=lambda x: x[1].consecutive_errors)
+        return candidates[0][0]
 
     def report_rate_limited(
         self, profile_name: str, retry_after_ms: Optional[float] = None
@@ -97,7 +100,7 @@ class APIKeyPool:
                 "RateControl",
                 "Key pool exhausted | all_profiles_in_cooldown",
                 event_type="key_pool_exhausted",
-                data={"pool_size": len(self._profiles)},
+                data={"pool_size": len(self._names)},
             )
 
     def report_success(self, profile_name: str) -> None:
@@ -141,11 +144,11 @@ class APIKeyPool:
             for name, h in self._health.items()
         }
 
-    def get_active_profiles(self) -> List[ProviderProfile]:
-        """Return profiles not currently in cooldown."""
+    def get_active_names(self) -> List[str]:
+        """Return key names not currently in cooldown."""
         now = time.monotonic()
         return [
-            self._profiles[name]
+            name
             for name, health in self._health.items()
             if health.cooldown_until is None or health.cooldown_until <= now
         ]

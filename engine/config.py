@@ -3,12 +3,26 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from engine.providers.provider_models import ProviderConfig, resolve_model_ref
+
+
+# Keys that must not appear in model params (reserved for LLM call construction)
+RESERVED_MODEL_PARAM_KEYS = {"model", "messages", "tools"}
+
+# Keys required for each provider entry in the "providers" dict
+REQUIRED_PROVIDER_KEYS = {"api_key", "base_url"}
+
 
 @dataclass
 class Config:
-    # Provider profiles — each entry: {name, api_key, base_url, model, rpm_limit, tpm_limit, weight?}
-    # Must contain at least one profile (validated at load time)
-    provider_profiles: List[Dict] = field(default_factory=list)
+    # Provider configuration — dict of provider name → ProviderConfig
+    providers: Dict[str, ProviderConfig] = field(default_factory=dict)
+
+    # Primary model reference in "provider/model" format (required)
+    primary: str = ""
+
+    # Fallback model references in "provider/model" format (optional, defaults to [])
+    fallback: List[str] = field(default_factory=list)
 
     # LLM response processing
     strip_thinking: bool = True
@@ -51,7 +65,6 @@ class Config:
 
 
 class ConfigLoader:
-    REQUIRED_PROFILE_KEYS = {"name", "api_key", "base_url", "model"}
 
     @staticmethod
     def find_config_file(start_dir: Optional[str] = None) -> str:
@@ -114,11 +127,18 @@ class ConfigLoader:
         except PermissionError as e:
             raise PermissionError(f"Cannot read config file {path}: {e}") from e
 
-        ConfigLoader._validate_profiles(data, path)
+        # Validate providers structure and build ProviderConfig instances
+        providers = ConfigLoader._validate_and_build_providers(data, path)
+
+        # Validate primary and fallback references
+        primary = ConfigLoader._validate_primary(data, providers, path)
+        fallback = ConfigLoader._validate_fallback(data, providers, path)
 
         # Build kwargs for Config from known fields only (unknown keys ignored)
         known_fields = {
-            "provider_profiles",
+            "providers",
+            "primary",
+            "fallback",
             "strip_thinking",
             "max_depth",
             "spawn_timeout",
@@ -141,6 +161,10 @@ class ConfigLoader:
         }
 
         kwargs = {k: v for k, v in data.items() if k in known_fields}
+        # Override parsed providers/primary/fallback into kwargs
+        kwargs["providers"] = providers
+        kwargs["primary"] = primary
+        kwargs["fallback"] = fallback
         config = Config(**kwargs)
 
         # Env var override for timezone (takes precedence over JSON)
@@ -151,38 +175,171 @@ class ConfigLoader:
         return config
 
     @staticmethod
-    def _validate_profiles(data: dict, path: str) -> None:
-        """Validate provider_profiles structure.
+    def _validate_and_build_providers(
+        data: dict, path: str
+    ) -> Dict[str, ProviderConfig]:
+        """Validate the 'providers' dict and build ProviderConfig instances.
 
         Checks:
-        - provider_profiles key exists
-        - provider_profiles is a list
-        - provider_profiles is non-empty
-        - Each profile has all required keys (name, api_key, base_url, model)
+        - 'providers' key exists and is a dict
+        - Each provider has required keys (api_key, base_url)
+        - Model params do not contain reserved keys
 
-        Args:
-            data: Parsed JSON data
-            path: File path (for error messages)
-
-        Raises:
-            ValueError: If any validation fails
+        Returns:
+            Dict mapping provider name → ProviderConfig
         """
-        if "provider_profiles" not in data:
-            raise ValueError(f"Missing required key 'provider_profiles' in {path}")
+        if "providers" not in data:
+            raise ValueError(f"Missing required key 'providers' in {path}")
 
-        profiles = data["provider_profiles"]
-        if not isinstance(profiles, list):
-            raise ValueError(f"'provider_profiles' must be a list in {path}")
+        providers_raw = data["providers"]
+        if not isinstance(providers_raw, dict):
+            raise ValueError(f"'providers' must be a dict in {path}")
 
-        if len(profiles) == 0:
-            raise ValueError(f"'provider_profiles' must not be empty in {path}")
+        if len(providers_raw) == 0:
+            raise ValueError(f"'providers' must not be empty in {path}")
 
-        for i, profile in enumerate(profiles):
-            missing = ConfigLoader.REQUIRED_PROFILE_KEYS - set(profile.keys())
+        providers: Dict[str, ProviderConfig] = {}
+        for prov_name, prov_data in providers_raw.items():
+            if not isinstance(prov_data, dict):
+                raise ValueError(
+                    f"Provider '{prov_name}' must be a dict in {path}"
+                )
+
+            missing = REQUIRED_PROVIDER_KEYS - set(prov_data.keys())
             if missing:
                 raise ValueError(
-                    f"Profile at index {i} missing required keys {sorted(missing)} in {path}"
+                    f"Provider '{prov_name}' missing required keys "
+                    f"{sorted(missing)} in {path}"
                 )
+
+            # Validate model params for reserved keys
+            models_raw = prov_data.get("models", {})
+            if not isinstance(models_raw, dict):
+                raise ValueError(
+                    f"Provider '{prov_name}' has invalid 'models' field "
+                    f"(must be a dict) in {path}"
+                )
+
+            for model_name, model_params in models_raw.items():
+                if not isinstance(model_params, dict):
+                    raise ValueError(
+                        f"Provider '{prov_name}' model '{model_name}' params "
+                        f"must be a dict in {path}"
+                    )
+                reserved = RESERVED_MODEL_PARAM_KEYS & set(model_params.keys())
+                if reserved:
+                    raise ValueError(
+                        f"Provider '{prov_name}' model '{model_name}' contains "
+                        f"reserved keys {sorted(reserved)} in {path}. "
+                        f"Keys {sorted(RESERVED_MODEL_PARAM_KEYS)} are reserved "
+                        f"for LLM call construction"
+                    )
+
+            # Build ProviderConfig with defaults for optional fields
+            providers[prov_name] = ProviderConfig(
+                name=prov_name,
+                api_key=prov_data["api_key"],
+                base_url=prov_data["base_url"],
+                rpm_limit=float(prov_data.get("rpm_limit", 100)),
+                tpm_limit=float(prov_data.get("tpm_limit", 100000)),
+                models=models_raw,
+            )
+
+        return providers
+
+    @staticmethod
+    def _validate_primary(
+        data: dict, providers: Dict[str, ProviderConfig], path: str
+    ) -> str:
+        """Validate the 'primary' field.
+
+        Checks:
+        - 'primary' key exists
+        - Format is 'provider/model'
+        - Referenced provider and model exist
+
+        Returns:
+            The validated primary reference string
+        """
+        if "primary" not in data:
+            raise ValueError(f"Missing required key 'primary' in {path}")
+
+        primary = data["primary"]
+        if not isinstance(primary, str) or not primary:
+            raise ValueError(f"'primary' must be a non-empty string in {path}")
+
+        try:
+            prov_name, model_name = resolve_model_ref(primary)
+        except ValueError as e:
+            raise ValueError(f"Invalid 'primary' reference in {path}: {e}") from e
+
+        if prov_name not in providers:
+            raise ValueError(
+                f"'primary' references unknown provider '{prov_name}' in {path}. "
+                f"Available providers: {sorted(providers.keys())}"
+            )
+
+        if model_name not in providers[prov_name].models:
+            raise ValueError(
+                f"'primary' references unknown model '{model_name}' under "
+                f"provider '{prov_name}' in {path}. "
+                f"Available models: {sorted(providers[prov_name].models.keys())}"
+            )
+
+        return primary
+
+    @staticmethod
+    def _validate_fallback(
+        data: dict, providers: Dict[str, ProviderConfig], path: str
+    ) -> List[str]:
+        """Validate the 'fallback' field.
+
+        Checks for each entry:
+        - Format is 'provider/model'
+        - Referenced provider and model exist
+
+        Returns:
+            The validated fallback list (defaults to [] if absent)
+        """
+        fallback_raw = data.get("fallback", [])
+        if fallback_raw is None:
+            fallback_raw = []
+
+        if not isinstance(fallback_raw, list):
+            raise ValueError(f"'fallback' must be a list in {path}")
+
+        fallback: List[str] = []
+        for i, ref in enumerate(fallback_raw):
+            if not isinstance(ref, str) or not ref:
+                raise ValueError(
+                    f"'fallback' entry at index {i} must be a non-empty "
+                    f"string in {path}"
+                )
+
+            try:
+                prov_name, model_name = resolve_model_ref(ref)
+            except ValueError as e:
+                raise ValueError(
+                    f"Invalid 'fallback' entry at index {i} in {path}: {e}"
+                ) from e
+
+            if prov_name not in providers:
+                raise ValueError(
+                    f"'fallback' entry at index {i} references unknown "
+                    f"provider '{prov_name}' in {path}. "
+                    f"Available providers: {sorted(providers.keys())}"
+                )
+
+            if model_name not in providers[prov_name].models:
+                raise ValueError(
+                    f"'fallback' entry at index {i} references unknown model "
+                    f"'{model_name}' under provider '{prov_name}' in {path}. "
+                    f"Available models: {sorted(providers[prov_name].models.keys())}"
+                )
+
+            fallback.append(ref)
+
+        return fallback
 
 
 _config: Optional[Config] = None

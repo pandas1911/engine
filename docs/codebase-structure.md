@@ -1,6 +1,6 @@
 # Engine Codebase Structure
 
-> A multi-agent orchestration framework that supports nested sub-agent spawning, multi-provider LLM routing with automatic fallback, and per-profile rate limiting.
+> A multi-agent orchestration framework that supports nested sub-agent spawning, multi-provider LLM routing with primary/fallback ordering, and per-provider rate limiting.
 
 ---
 
@@ -17,6 +17,7 @@ engine/
 │   │   ├── __init__.py        # Re-export layer for all safety classes
 │   │   ├── concurrency.py     # ConcurrencyLimiter, LaneConcurrencyQueue, LaneSlot, LaneStatus
 │   │   ├── rate_limit.py      # SlidingWindowRateLimiter
+│   │   ├── token_estimator.py # EmaTokenEstimator — adaptive chars→tokens estimator
 │   │   ├── key_pool.py        # APIKeyPool
 │   │   ├── retry.py           # RetryEngine
 │   │   └── pacing.py          # AdaptivePacer, ResultTruncator, RegistrySizeMonitor
@@ -43,8 +44,9 @@ engine/
 │   │   ├── base.py            # Tool ABC, FunctionTool, ToolRegistry
 │   │   ├── builtin/           # Built-in tools (empty, reserved)
 │   │   │   └── __init__.py
-│   │   └── custom/            # Auto-discovered custom tools
-│   │       └── __init__.py
+│   │   └── custom/            # Auto-discovered custom tools (web search, web fetch)
+│   │       ├── __init__.py
+│   │       └── web_fetch.py   # URL content fetching with HTML→Markdown/Text conversion
 │   └── logging/               # Structured logging
 │       ├── __init__.py
 │       └── sink.py            # Logger, formatters, async file handler
@@ -105,9 +107,9 @@ The main entry point containing `delegate()` and all startup orchestration logic
 1. Load config via `get_config()` (auto-discovers `engine.json`)
 2. Create `TimeProvider`, inject timezone info into system prompt
 3. Initialize logger with configured log directory
-4. Parse `ProviderProfile` entries from config
-5. Create per-profile: `LLMProvider`, `SlidingWindowRateLimiter`, `AdaptivePacer`
-6. Create shared: `APIKeyPool`, `RetryEngine`, `FallbackLLMProvider`
+4. Iterate `config.providers` dict — for each provider, create `SlidingWindowRateLimiter` and `AdaptivePacer`; for each model under that provider, create an `LLMProvider` keyed by `"provider/model"`
+5. Build ordered key list from `config.primary` + `config.fallback`
+6. Create shared: `APIKeyPool` (with ordered composite key names), `RetryEngine`, `FallbackLLMProvider`
 7. Create `LaneConcurrencyQueue` (MAIN + SUBAGENT lanes)
 8. Discover and merge custom tools
 9. Create root `Agent`, register in `AgentTaskRegistry`
@@ -123,14 +125,16 @@ Loads runtime configuration from `engine.json`.
 
 | Class | Description |
 |---|---|
-| `Config` | Dataclass holding all configuration values (provider profiles, retry settings, concurrency limits, pacing, etc.) |
-| `ConfigLoader` | Static methods for discovering and loading `engine.json` |
+| `Config` | Dataclass holding all configuration values (providers dict, primary/fallback model refs, retry settings, concurrency limits, pacing, etc.) |
+| `ConfigLoader` | Static methods for discovering and loading `engine.json`. Validates `providers` dict structure, `primary`/`fallback` references, and per-model `model_params` for reserved keys. |
 
 **Config fields:**
 
 | Field | Default | Description |
 |---|---|---|
-| `provider_profiles` | `[]` | List of LLM provider configs (name, api_key, base_url, model, rpm_limit, tpm_limit, weight) |
+| `providers` | `{}` | `Dict[str, ProviderConfig]` — nested dict keyed by provider name. Each entry defines api_key, base_url, rpm_limit, tpm_limit, and a `models` dict of model_name → model_params |
+| `primary` | `""` | Required. Primary model reference in `"provider/model"` format |
+| `fallback` | `[]` | Optional list of fallback model references in `"provider/model"` format |
 | `strip_thinking` | `True` | Remove `<think/>` tags from LLM responses |
 | `max_depth` | `3` | Maximum sub-agent nesting depth |
 | `spawn_timeout` | `60.0` | Seconds to wait for a concurrency slot before rejecting spawn |
@@ -184,13 +188,42 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 
 **Key flow:** Fast path (capacity available, no waiters) → immediate return. Slow path → enqueue Future, background `_scheduler` task wakes waiters when capacity frees up.
 
+**Deadlock prevention:**
+
+- `acquire()` caps `estimated_tokens` to `tpm_limit` so a single oversized request cannot block forever when estimated > capacity.
+- `_scheduler()` includes deadlock detection: when the sliding window is empty but a waiter still cannot proceed (because its estimated request exceeds the full capacity), the scheduler force-releases the waiter to prevent permanent stall.
+- `acquire()` wait is bounded by a configurable timeout derived from `2 * window_seconds`, raising `asyncio.TimeoutError` on expiry.
+- Private helper `_remove_tpm_entry_by_rid()` consolidates TPM entry cleanup logic.
+
+#### `token_estimator.py` — EMA Token Estimator
+
+| Class | Description |
+|---|---|
+| `EmaTokenEstimator` | Adaptive chars→tokens estimator using exponential moving average. Replaces fixed chars//3 formula with a self-correcting coefficient (default 3.0, bounds [1.0, 5.0], EMA alpha 0.2). |
+
+**Key methods:**
+
+| Method | Description |
+|---|---|
+| `estimate(messages, tools)` | Estimate token count using current coefficient |
+| `feedback(estimated_tokens, actual_tokens)` | Update coefficient via EMA after observing actual usage |
+| `coefficient` (property) | Current coefficient value |
+
 #### `key_pool.py` — API Key Pool
 
 | Class | Description |
 |---|---|
-| `APIKeyPool` | Multi-key management with staircase cooldown (30s → 60s → 300s) and weight-based selection |
+| `APIKeyPool` | Multi-key management with staircase cooldown (30s → 60s → 300s). Accepts `names: List[str]` (composite keys like `"provider/model"`). Selection prefers keys with lowest `consecutive_errors` among those not in cooldown. |
 
-**Key flow:** `acquire_key()` selects by highest weight, then fewest errors. On rate limit, applies staircase cooldown. On success, resets cooldown.
+**Key methods:**
+
+| Method | Description |
+|---|---|
+| `acquire_key()` | Returns best available key name (fewest errors, respects insertion order) |
+| `report_rate_limited(name)` | Increments errors, applies staircase cooldown |
+| `report_success(name)` | Resets error count and cooldown |
+| `is_all_in_cooldown()` | Checks if all keys are in cooldown |
+| `get_active_names()` | Returns key names not currently in cooldown |
 
 #### `retry.py` — Retry Engine
 
@@ -305,12 +338,21 @@ CRUD for `SubagentTask` entries with handler-based notification.
 | `LLMProvider` | OpenAI-compatible implementation using `AsyncOpenAI` |
 | `LLMProviderError` | Unified exception wrapper for all LLM errors |
 
+**LLMProvider constructor:**
+
+`LLMProvider(provider_params: ProviderParams, runtime_config: Config, model_params: Optional[Dict[str, Any]] = None)`
+
+- `provider_params` — resolved connection parameters (api_key, base_url, model)
+- `runtime_config` — global Config for retry/behavior settings
+- `model_params` — optional dict of model-specific kwargs merged into each API call (e.g. temperature, max_tokens)
+
 **LLMProvider features:**
 
-- Retries with configurable max attempts and exponential backoff
+- Per-call retry with configurable max attempts and exponential backoff
 - Thinking tag stripping (`<think/>` removal)
 - Rate limit header extraction (`x-ratelimit-*`)
 - Token usage tracking (prompt_tokens, completion_tokens)
+- `model_params` merged into every `chat()` call (reserved keys `model`, `messages`, `tools` are forbidden)
 
 #### `provider_models.py`
 
@@ -321,21 +363,29 @@ CRUD for `SubagentTask` entries with handler-based notification.
 | `PaceLevel` | Enum: `HEALTHY`, `PRESSING`, `CRITICAL` |
 | `Lane` | Enum: `MAIN`, `SUBAGENT` |
 | `ErrorClass` | Enum: `RETRYABLE`, `NON_RETRYABLE`, `RATE_LIMITED` |
-| `ProviderProfile` | Config: name, api_key, base_url, model, rpm_limit, tpm_limit, weight |
+| `ProviderConfig` | Provider entry: name, api_key, base_url, rpm_limit (default 100), tpm_limit (default 100000), models dict (model_name → model_params dict) |
+| `ProviderParams` | Resolved call params: api_key, base_url, model |
+| `resolve_model_ref()` | Splits `"provider/model"` string on first `/` into `(provider, model)` tuple |
 | `RateLimitSnapshot` | Remaining/limit for RPM and TPM |
 | `ProviderHealth` | Per-key health: consecutive errors, cooldown, pace level |
 
 #### `fallback_provider.py`
 
-`FallbackLLMProvider` wraps multiple `LLMProvider` instances with automatic key rotation and provider fallback (ping-pong).
+`FallbackLLMProvider` wraps multiple `LLMProvider` instances with automatic key rotation and sequential provider fallback.
+
+**Constructor:** `FallbackLLMProvider(providers: Dict[str, LLMProvider], key_pool: APIKeyPool, rate_limiters: Dict[str, SlidingWindowRateLimiter], pacers: Dict[str, AdaptivePacer], retry_engine: RetryEngine)`
+
+Providers are ordered by the insertion order of the `providers` dict (primary first, then fallbacks). No weight-based selection — ordering is deterministic from config.
+
+**Token estimation:** `_estimate_tokens` proxies to an `EmaTokenEstimator` instance instead of using a fixed chars//3 formula, producing adaptive estimates. After each successful LLM call, `feedback()` updates the estimator with actual token usage so subsequent estimates self-correct.
 
 **Flow:**
 
 1. Acquire key from `APIKeyPool`
-2. Apply rate limiting (sliding window)
+2. Apply rate limiting (sliding window) — estimated_tokens is capped to prevent deadlock
 3. Apply adaptive pacing
 4. Execute chat request
-5. On success → record usage, update pacer, report success
+5. On success → record usage, update pacer, report success, feed actual tokens back to estimator
 6. On rate limit → report rate limited, rotate key, retry
 7. On retryable error → release reservation, propagate
 8. On non-retryable error → release reservation, raise
@@ -411,7 +461,10 @@ Thin `Tool` wrapper that delegates to `SubAgentManager.spawn()`. Registered in t
 
 #### `custom/`
 
-Auto-discovered custom tools directory. Place `Tool` subclasses here and they will be automatically loaded by `_discover_custom_tools()`.
+Auto-discovered custom tools directory. Place `Tool` subclasses here and they will be automatically loaded by `_discover_custom_tools()`. Currently contains:
+
+- **`web_search`** (`web_search.py`) — Web search tool using the `ddgs` metasearch library. Aggregates results from multiple search engines (DuckDuckGo, Bing, Brave, Google, etc.) with automatic failover via `backend="auto"`. Uses `asyncio.to_thread()` to wrap the synchronous `DDGS.text()` call. Lazy singleton DDGS instance for connection reuse.
+- **`web_fetch`** (`web_fetch.py`) — URL content fetching tool with configurable format (class variable `DEFAULT_FORMAT`, default: markdown), transient-error retry, Cloudflare handling, and response size limits.
 
 ---
 
@@ -444,8 +497,9 @@ Auto-discovered custom tools directory. Place `Tool` subclasses here and they wi
 |---|---|
 | `test_easy_task.py` | Tests `delegate()` with a Chinese-language research prompt |
 | `test_multilayer_subagent.py` | Tests 3-child × 2-grandchild nesting with random number aggregation |
+| `test_rate_limit_safety.py` | Unit tests for rate limiter deadlock prevention, timeout, and EMA token estimator (13 tests) |
 
-Both tests use `pytest-asyncio` and call the real `delegate()` function (requires valid `engine.json`).
+Both integration tests use `pytest-asyncio` and call the real `delegate()` function (requires valid `engine.json`).
 
 ---
 
@@ -457,7 +511,7 @@ User
   ▼
 delegate() (engine/runner.py)
   ├── Config loading (engine.json)
-  ├── Provider initialization (profiles → providers → fallback)
+  ├── Provider initialization (providers dict → LLMProviders → primary+fallback ordering)
   ├── Lane queue setup (MAIN:4, SUBAGENT:5)
   ├── Tool discovery (custom tools auto-loaded)
   └── Agent creation & registration
@@ -469,7 +523,7 @@ delegate() (engine/runner.py)
     │     ├── _process_tool_calls() ─── LLM chat loop (max 20 iterations)
     │     │     ├── LLMProvider.chat() ──→ FallbackLLMProvider.chat()
     │     │     │                               ├── APIKeyPool.acquire_key()
-    │     │     │                               ├── SlidingWindowRateLimiter.acquire()
+    │     │     │                               ├── SlidingWindowRateLimiter.acquire() ← estimated_tokens capped to tpm_limit
     │     │     │                               ├── AdaptivePacer.wait_if_needed()
     │     │     │                               └── LLMProvider.chat() (OpenAI SDK)
     │     │     ├── Tool execution (ToolRegistry → Tool.execute())
@@ -509,6 +563,7 @@ delegate() (engine/runner.py)
 | Package | Purpose |
 |---|---|
 | `openai` | OpenAI-compatible API client (used by LLMProvider) |
-| `httpx` | Async HTTP client (reserved for custom tools) |
-| `python-dotenv` | Environment variable loading from `.env` |
+| `httpx` | Async HTTP client (used by web fetch tool) |
+| `markdownify` | HTML-to-Markdown conversion (used by web fetch tool) |
+| `ddgs` | Metasearch library aggregating 9+ search engines with automatic failover (used by web search tool) |
 | `pytest` + `pytest-asyncio` | Test framework with async support |

@@ -2,9 +2,6 @@
 .env
 engine.json
 
-# Project specific files
-# AGENTS.md
-
 # Node modules
 node_modules/
 
@@ -45,4 +42,3 @@ ENV/
 # Tests
 dist/
 build/
-# docs/

@@ -15,7 +15,7 @@ from engine.runtime.task_registry import AgentTaskRegistry
 from engine.tools.base import Tool
 from engine.safety import LaneConcurrencyQueue, SlidingWindowRateLimiter, AdaptivePacer, APIKeyPool, RetryEngine
 from engine.providers.fallback_provider import FallbackLLMProvider
-from engine.providers.provider_models import ProviderProfile, Lane
+from engine.providers.provider_models import ProviderParams, Lane
 from engine.time import TimeProvider
 
 DEFAULT_SYSTEM_PROMPT = """\
@@ -114,49 +114,47 @@ async def delegate(
 
         init_logger(log_dir=config.log_dir)
 
-        profiles = [ProviderProfile(**p) for p in config.provider_profiles]
+        # Build LLMProvider instances — one per provider/model combination
+        providers = {}       # composite_key "provider/model" → LLMProvider
+        rate_limiters = {}   # provider_name → SlidingWindowRateLimiter
+        pacers = {}          # provider_name → AdaptivePacer
 
-        # Create per-profile infrastructure
-        providers = {}       # profile_name -> LLMProvider
-        rate_limiters = {}   # profile_name -> SlidingWindowRateLimiter
-        pacers = {}          # profile_name -> AdaptivePacer
-
-        for profile in profiles:
-            # Rate limiter (RPM + TPM)
+        for prov_name, prov_config in config.providers.items():
             limiter = None
-            if profile.rpm_limit > 0 or profile.tpm_limit > 0:
+            if prov_config.rpm_limit > 0 or prov_config.tpm_limit > 0:
                 limiter = SlidingWindowRateLimiter(
-                    rpm_limit=profile.rpm_limit,
-                    tpm_limit=profile.tpm_limit,
-                    profile_name=profile.name,
+                    rpm_limit=prov_config.rpm_limit,
+                    tpm_limit=prov_config.tpm_limit,
+                    profile_name=prov_name,
                 )
-            rate_limiters[profile.name] = limiter
+            rate_limiters[prov_name] = limiter
 
-            # Adaptive pacer
             pacer = None
             if config.pacing_enabled:
                 pacer = AdaptivePacer(
                     min_interval_ms=config.pacing_min_interval_ms,
                     enabled=True,
-                    rpm_limit=profile.rpm_limit,
+                    rpm_limit=prov_config.rpm_limit,
                 )
-            pacers[profile.name] = pacer
+            pacers[prov_name] = pacer
 
-            # LLM Provider
-            providers[profile.name] = LLMProvider(
-                api_key=profile.api_key,
-                base_url=profile.base_url,
-                model=profile.model,
-                config=config,
-                retry_engine=RetryEngine(
-                    max_attempts=config.llm_retry_max_attempts,
-                    base_delay=config.llm_retry_base_delay,
-                ),
-            )
+            for model_name, model_params in prov_config.models.items():
+                composite_key = f"{prov_name}/{model_name}"
+                providers[composite_key] = LLMProvider(
+                    provider_params=ProviderParams(
+                        api_key=prov_config.api_key,
+                        base_url=prov_config.base_url,
+                        model=model_name,
+                    ),
+                    runtime_config=config,
+                    model_params=model_params if model_params else None,
+                )
 
-        # Create shared components
+        # Build ordered provider list from primary + fallback
+        ordered_keys = [config.primary] + config.fallback
+
         key_pool = APIKeyPool(
-            profiles,
+            ordered_keys,
             cooldown_initial_ms=config.cooldown_initial_ms,
             cooldown_max_ms=config.cooldown_max_ms,
         )
@@ -166,9 +164,10 @@ async def delegate(
             base_delay=config.llm_retry_base_delay,
         )
 
-        # Create FallbackProvider
+        ordered_providers = {k: providers[k] for k in ordered_keys}
+
         llm_provider = FallbackLLMProvider(
-            providers=providers,
+            providers=ordered_providers,
             key_pool=key_pool,
             rate_limiters=rate_limiters,
             pacers=pacers,

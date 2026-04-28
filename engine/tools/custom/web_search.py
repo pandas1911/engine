@@ -1,139 +1,118 @@
-"""Bocha AI web search tool for the Agent system."""
+"""Web search tool using ddgs metasearch library.
 
-import os
+Provides web search capability via the ddgs library, which aggregates
+results from multiple search engines (DuckDuckGo, Bing, Brave, Google, etc.)
+with automatic failover for improved stability.
+"""
 
-import httpx
-from dotenv import load_dotenv
+import asyncio
+from typing import Any, Dict, List
 
-# Load BOCHA_API_KEY from .env since core engine no longer calls load_dotenv
-load_dotenv(override=False)
+from ddgs import DDGS
+from ddgs.exceptions import DDGSException, TimeoutException
 
 from engine.safety import ResultTruncator
 from engine.tools.base import Tool
 
-MAX_FIELD_LENGTH = 500
+_ddgs_client: DDGS | None = None
+
+
+def _get_ddgs() -> DDGS:
+    """Lazy-init a singleton DDGS instance for reuse."""
+    global _ddgs_client
+    if _ddgs_client is None:
+        _ddgs_client = DDGS(timeout=10)
+    return _ddgs_client
 
 
 class WebSearchTool(Tool):
-    """Web search tool using Bocha AI API."""
+    """Web search tool powered by ddgs metasearch library.
+
+    Aggregates results from multiple search engines with automatic
+    failover via backend="auto" for improved stability.
+    """
 
     name = "web_search"
     description = (
         "Search the web for up-to-date information. Use this tool when you need "
         "to find current facts, news, recent events, or any topic that requires "
         "real-time internet data. Returns a list of web results with titles, URLs, "
-        "summaries, and source metadata."
+        "and snippets. To retrieve the full content of any URL found in the results, "
+        "use the web_fetch tool."
     )
     parameters = {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "Search keywords or natural language question",
+                "description": (
+                    "Precise keywords for the search query. Use specific terms "
+                    "rather than natural language questions "
+                    "(e.g., 'Python asyncio tutorial' not 'How do I use asyncio in Python?')."
+                ),
             },
             "freshness": {
                 "type": "string",
                 "description": (
-                    "Time range filter. Options: noLimit (default), oneDay, "
-                    "oneWeek, oneMonth, oneYear, or a date (YYYY-MM-DD), or a "
-                    "date range (YYYY-MM-DD..YYYY-MM-DD)"
+                    "Time range filter. Options: 'd' (past day), 'w' (past week), "
+                    "'m' (past month), 'y' (past year). Leave empty for no time limit."
                 ),
             },
         },
         "required": ["query"],
     }
 
+    _BACKEND: str = "auto"
+    _MAX_RESULTS: int = 5
+    _MAX_SNIPPET_LENGTH: int = 1000
+    _REGION: str = "wt-wt"
+    _SAFESEARCH: str = "on"
+
     async def execute(self, arguments: dict, context: dict) -> str:
-        """Execute web search via Bocha AI API.
-
-        Args:
-            arguments: LLM-provided arguments (query, freshness)
-            context: Execution context (unused by this tool)
-
-        Returns:
-            Formatted search results or error message
-        """
-        api_key = os.getenv("BOCHA_API_KEY")
-        if not api_key:
-            return "Web search unavailable: BOCHA_API_KEY not configured"
-
         query = arguments.get("query", "")
-        if not query or not query.strip():
+        if not query or not isinstance(query, str) or not query.strip():
             return "Web search error: empty query provided"
+        query = query.strip()
 
-        freshness = arguments.get("freshness", "noLimit")
-
-        payload = {
-            "query": query,
-            "freshness": freshness,
-            "summary": True,
-            "count": 3,
-        }
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
+        freshness = arguments.get("freshness")
+        timelimit = None
+        if freshness and isinstance(freshness, str) and freshness.strip():
+            timelimit = freshness.strip()
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
-                response = await client.post(
-                    "https://api.bochaai.com/v1/web-search",
-                    json=payload,
-                    headers=headers,
-                )
-        except httpx.RequestError as exc:
-            return f"Web search error: network request failed - {exc}"
+            ddgs = _get_ddgs()
+            results: List[Dict[str, Any]] = await asyncio.to_thread(
+                ddgs.text,
+                query,
+                region=self._REGION,
+                safesearch=self._SAFESEARCH,
+                timelimit=timelimit,
+                max_results=self._MAX_RESULTS,
+                backend=self._BACKEND,
+            )
+        except TimeoutException:
+            return "Web search error: request timed out"
+        except DDGSException:
+            return "Web search error: search request failed"
         except Exception as exc:
             return f"Web search error: unexpected failure - {exc}"
-
-        if response.status_code != 200:
-            return (
-                f"Web search error: API returned status {response.status_code}"
-            )
-
-        try:
-            data = response.json()
-            results = data["data"]["webPages"]["value"]
-        except (KeyError, TypeError, ValueError):
-            return "Web search error: unexpected response format"
 
         if not results:
             return f'No results found for "{query}"'
 
-        # Build formatted output with truncated fields
-        output_lines = [f'Found {len(results)} results for "{query}":\n']
+        return self._format_results(query, results)
 
-        for i, item in enumerate(results, 1):
-            result_id = ResultTruncator.truncate(
-                str(item.get("id", "")) or "", MAX_FIELD_LENGTH
-            )
-            name = ResultTruncator.truncate(
-                str(item.get("name", "")) or "", MAX_FIELD_LENGTH
-            )
-            url = ResultTruncator.truncate(
-                str(item.get("url", "")) or "", MAX_FIELD_LENGTH
-            )
-            snippet = ResultTruncator.truncate(
-                str(item.get("snippet", "")) or "", MAX_FIELD_LENGTH
-            )
-            summary = ResultTruncator.truncate(
-                str(item.get("summary", "")) or "", MAX_FIELD_LENGTH
-            )
-            site_name = ResultTruncator.truncate(
-                str(item.get("siteName", "")) or "", MAX_FIELD_LENGTH
-            )
-            date_published = ResultTruncator.truncate(
-                str(item.get("datePublished", "")) or "", MAX_FIELD_LENGTH
-            )
+    def _format_results(self, query: str, results: List[Dict[str, Any]]) -> str:
+        lines: List[str] = [f'## Search Results for "{query}"', ""]
 
-            output_lines.append(f"[{i}] {name}")
-            output_lines.append(f"ID: {result_id}")
-            output_lines.append(f"URL: {url}")
-            output_lines.append(f"Snippet: {snippet}")
-            output_lines.append(f"Summary: {summary}")
-            output_lines.append(
-                f"Source: {site_name} | Date: {date_published}"
-            )
-            output_lines.append("")
+        for position, result in enumerate(results, start=1):
+            title = result.get("title", "No title")
+            link = result.get("href", "")
+            snippet = ResultTruncator.truncate(result.get("body", ""), self._MAX_SNIPPET_LENGTH)
 
-        return "\n".join(output_lines)
+            lines.append(f"[{position}] **Title:** {title}")
+            lines.append(f"    **URL:** {link}")
+            lines.append(f"    **Snippet:** {snippet}")
+            lines.append("")
+
+        return "\n".join(lines)

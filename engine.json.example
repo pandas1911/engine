@@ -1,21 +1,27 @@
 {
-  "provider_profiles": [
-    {
-      "name": "primary",
-      "api_key": "your-api-key-here",
-      "base_url": "https://api.openai.com/v1",
-      "model": "gpt-4",
+  "providers": {
+    "primary": {
+      "api_key": "your-primary-api-key-here",
+      "base_url": "https://your-primary-base-url/v1",
       "rpm_limit": 300,
-      "tpm_limit": 100000
+      "tpm_limit": 100000,
+      "models": {
+        "your-primary-model": {}
+      }
     },
-    {
-      "name": "fallback",
+    "fallback": {
       "api_key": "your-fallback-api-key-here",
-      "base_url": "https://api.anthropic.com/v1",
-      "model": "claude-3-opus-20240229",
+      "base_url": "https://your-fallback-base-url/v1",
       "rpm_limit": 100,
-      "tpm_limit": 50000
+      "tpm_limit": 50000,
+      "models": {
+        "your-fallback-model": {}
+      }
     }
+  },
+  "primary": "primary/your-primary-model",
+  "fallback": [
+    "fallback/your-fallback-model"
   ],
   "strip_thinking": true,
   "max_depth": 3,
