@@ -31,7 +31,7 @@ class Agent:
     # Implements: Drainable protocol (engine.subagent.protocol)
     """
 
-    MAX_TOOL_ITERATIONS = 20
+    MAX_TOOL_ITERATIONS = 15
 
     def __init__(
         self,
