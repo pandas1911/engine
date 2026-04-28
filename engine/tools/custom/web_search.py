@@ -66,6 +66,7 @@ class WebSearchTool(Tool):
     _MAX_RESULTS: int = 5
     _MAX_SNIPPET_LENGTH: int = 1000
     _REGION: str = "wt-wt"
+    _SAFESEARCH: str = "on"
 
     async def execute(self, arguments: dict, context: dict) -> str:
         query = arguments.get("query", "")
@@ -84,6 +85,7 @@ class WebSearchTool(Tool):
                 ddgs.text,
                 query,
                 region=self._REGION,
+                safesearch=self._SAFESEARCH,
                 timelimit=timelimit,
                 max_results=self._MAX_RESULTS,
                 backend=self._BACKEND,
