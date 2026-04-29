@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 
 
 @dataclass
-class SubagentTask:
-    """A task for a subagent execution."""
+class AgentTask:
+    """A task for an agent execution (root or sub)."""
 
     task_id: str
     session_id: str

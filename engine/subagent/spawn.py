@@ -1,52 +1,93 @@
 """Spawn tool for creating child agents."""
 
+import asyncio
 from typing import Any, Dict, TYPE_CHECKING
 
 from engine.tools.base import Tool
+from engine.logging import get_logger
+from engine.config import get_config
 
 if TYPE_CHECKING:
-    from .manager import SubAgentManager
+    from engine.subagent.manager import SubAgentManager
 
 
 class SpawnTool(Tool):
-    """Tool for spawning child agents asynchronously."""
+    """Spawn tool — creates child agents via SubAgentManager.
+
+    SubAgentManager is lazily created per-agent on first execute() call,
+    with parameters extracted from the parent_agent in context.
+    """
 
     name = "spawn"
     description = (
-        "Spawn a child agent to asynchronously execute an independent task. "
-        "Multiple calls per turn are supported to dispatch multiple child agents in parallel.\n"
-        "[Execution] Returns immediately: a confirmation with task_id on success, or an error message on failure. "
-        "After calling, the parent agent may continue with other tasks or end the current turn — no need to wait for child results. "
-        "Child agents will proactively report their results back to the parent once completed in the background.\n"
-        "[Use Cases] Best suited for breaking down a task into independent subtasks and dispatching them in parallel to child agents."
+        "Spawn a child sub-agent to handle a specific task in parallel. "
+        "The child agent runs asynchronously and results are automatically "
+        "delivered back to you when all children complete. "
+        "Use this to parallelize work — spawn multiple children for independent tasks."
     )
     parameters = {
         "type": "object",
         "properties": {
             "task": {
                 "type": "string",
-                "description": "The task description assigned to the child agent. The child agent will treat it as its sole objective and execute independently, so ensure it includes sufficient context and clear completion criteria.",
+                "description": "Clear, specific task description for the child agent. "
+                               "Be concise but complete — this is all the child sees.",
             },
             "label": {
                 "type": "string",
-                "description": "A descriptive label for the child agent, used for log tracing and result identification (optional). A short name that summarizes the task is recommended.",
+                "description": "Short label for the child agent (used in logs and identification).",
             },
         },
         "required": ["task"],
     }
 
-    def __init__(self, subagent_mgr: "SubAgentManager"):
-        self._subagent_mgr = subagent_mgr
+    def __init__(self):
+        self._managers: Dict[str, "SubAgentManager"] = {}
+        self._lock = asyncio.Lock()
 
     async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> str:
-        """Execute spawn tool to create a child agent."""
         session = context["session"]
-        config = context["config"]
-        agent_factory = context.get("agent_factory")
+        parent_agent = context["parent_agent"]
+        config = get_config()
+        task_id = parent_agent.task_id
 
+        # Runtime depth safety net
+        if session.depth >= config.max_depth:
+            logger = get_logger()
+            logger.error(
+                parent_agent.label,
+                "Spawn rejected: maximum nesting depth reached | "
+                "current_depth={}, max_depth={}".format(session.depth, config.max_depth),
+                task_id=task_id, state="running", depth=session.depth,
+                event_type="spawn_depth_limit",
+                data={"current_depth": session.depth, "max_depth": config.max_depth},
+            )
+            return (
+                "[Spawn Failed] Maximum nesting depth reached "
+                "(current: {}/{}). No further child agents can be spawned."
+            ).format(session.depth, config.max_depth)
+
+        # Lazy init SubAgentManager with lock for concurrency safety
+        async with self._lock:
+            if task_id not in self._managers:
+                from engine.subagent.manager import SubAgentManager
+                self._managers[task_id] = SubAgentManager(
+                    task_registry=parent_agent.task_registry,
+                    event_queue=parent_agent.event_queue,
+                    drainable=parent_agent,
+                    agent_task_id=task_id,
+                    parent_label=parent_agent.label,
+                    config=config,
+                    lane_queue=parent_agent.lane_queue,
+                    llm_provider=parent_agent.llm,
+                    tool_pack=parent_agent.tool_pack,
+                )
+
+        mgr = self._managers[task_id]
         task_desc = arguments.get("task", "")
         label = arguments.get("label", "subagent")
+        return await mgr.spawn(task_desc, label, session)
 
-        return await self._subagent_mgr.spawn(
-            task_desc, label, session, config, agent_factory
-        )
+    def release(self, agent_task_id: str) -> None:
+        """Release cached SubAgentManager for completed agent."""
+        self._managers.pop(agent_task_id, None)

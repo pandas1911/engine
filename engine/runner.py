@@ -13,6 +13,8 @@ from engine.logging import init_logger, stop_logger
 from engine.runtime.agent_models import AgentError, AgentResult, AgentState, ErrorCategory, Session
 from engine.runtime.task_registry import AgentTaskRegistry
 from engine.tools.base import Tool
+from engine.tools.pack import ToolPack
+from engine.subagent.spawn import SpawnTool
 from engine.safety import LaneConcurrencyQueue, SlidingWindowRateLimiter, AdaptivePacer, APIKeyPool, RetryEngine
 from engine.providers.fallback_provider import FallbackLLMProvider
 from engine.providers.provider_models import ProviderParams, Lane
@@ -177,7 +179,19 @@ async def delegate(
         task_registry = AgentTaskRegistry()
 
         custom_tools = _discover_custom_tools()
-        all_tools = custom_tools + (tools or [])
+        all_tool_instances = custom_tools + (tools or [])
+
+        # Filter by config.tools (enable/disable)
+        enabled_tools = [
+            t for t in all_tool_instances
+            if config.is_tool_enabled(t.name)
+        ]
+
+        # Conditionally add SpawnTool
+        if config.is_tool_enabled("spawn"):
+            enabled_tools.append(SpawnTool())
+
+        tool_pack = ToolPack(enabled_tools)
 
         # Create Lane Concurrency Queue
         lane_queue = LaneConcurrencyQueue()
@@ -187,9 +201,9 @@ async def delegate(
         agent = Agent(
             session=session,
             config=config,
-            task_registry=task_registry,
             llm_provider=llm_provider,
-            tools=all_tools,
+            task_registry=task_registry,
+            tool_pack=tool_pack,
             lane_queue=lane_queue,
         )
 

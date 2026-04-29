@@ -10,10 +10,10 @@ import asyncio
 import json
 import re
 import uuid
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from engine.runtime.agent_models import AgentState, Session
-from engine.config import Config
+from engine.config import Config, get_config
 from engine.logging import get_logger
 from engine.providers.provider_models import Lane
 from engine.safety import ConcurrencyLimiter, LaneConcurrencyQueue, ResultTruncator
@@ -23,7 +23,6 @@ from engine.runtime.task_registry import CompleteInfo, AgentTaskRegistry
 from engine.time import TimeProvider
 
 if TYPE_CHECKING:
-    from .spawn import SpawnTool
     from .protocol import Drainable
 
 
@@ -31,7 +30,8 @@ class SubAgentManager:
     """Orchestrates child agent lifecycle: spawn, run, gate-check, notify.
 
     Each Agent instance owns one SubAgentManager. The manager:
-    - Spawns child agents (logic migrated from SpawnTool.execute)
+    - Spawns child agents with shared llm_provider and tool_pack
+    - Constructs child Agents directly (no factory closure)
     - Runs child agents in background tasks (from SpawnTool._run_child_agent)
     - Handles child completion via handler chain (from Registry.complete gate checks)
     - Formats child results for parent consumption (from Agent.run with trigger="children_settled")
@@ -46,7 +46,9 @@ class SubAgentManager:
         parent_label: str,
         config: Optional[Config] = None,
         concurrency_limiter: Optional[ConcurrencyLimiter] = None,  # DEPRECATED, kept for backward compat
-        lane_queue: Optional[LaneConcurrencyQueue] = None,           # NEW
+        lane_queue: Optional[LaneConcurrencyQueue] = None,
+        llm_provider=None,
+        tool_pack=None,
     ):
         """
         Args:
@@ -57,7 +59,9 @@ class SubAgentManager:
             parent_label: Display label for logging
             config: Runtime configuration (used for result truncation limits)
             concurrency_limiter: Optional global concurrency limiter (legacy)
-            lane_queue: Optional lane-based concurrency queue (new)
+            lane_queue: Optional lane-based concurrency queue
+            llm_provider: Shared LLM provider for child agent construction
+            tool_pack: Shared ToolPack for child agent construction
         """
         self._task_registry = task_registry
         self._event_queue = event_queue
@@ -67,6 +71,8 @@ class SubAgentManager:
         self._config = config
         self._concurrency_limiter = concurrency_limiter
         self._lane_queue = lane_queue
+        self._llm_provider = llm_provider
+        self._tool_pack = tool_pack
         self._time_provider = TimeProvider(
             timezone_override=config.user_timezone if config else None
         )
@@ -84,8 +90,6 @@ class SubAgentManager:
         task_desc: str,
         label: str,
         parent_session: Session,
-        config: Config,
-        agent_factory: Callable,
     ) -> str:
         """Create a child agent and start it in the background.
 
@@ -93,12 +97,11 @@ class SubAgentManager:
             task_desc: Task description for the child agent.
             label: Short descriptive label for the child.
             parent_session: The parent agent's session (used for depth tracking).
-            config: Runtime configuration.
-            agent_factory: Callable that creates a child Agent.
 
         Returns:
             Confirmation string on success, or error message on failure.
         """
+        config = get_config()
         if parent_session.depth >= config.max_depth:
             logger = get_logger()
             logger.error(
@@ -289,9 +292,18 @@ A one-line summary at the top is encouraged when the result is complex — skip 
             depth=child_session.depth,
         )
 
-        child_agent = agent_factory(
-            child_session, config, self._task_registry, self._agent_task_id, task_id,
+        from engine.runtime.agent import Agent
+
+        child_agent = Agent(
+            session=child_session,
+            config=config,
+            llm_provider=self._llm_provider,
+            task_registry=self._task_registry,
+            tool_pack=self._tool_pack,
+            task_id=task_id,
+            parent_task_id=self._agent_task_id,
             label=display_name,
+            lane_queue=self._lane_queue,
         )
 
         await self._task_registry.set_agent(task_id, child_agent)
@@ -611,15 +623,4 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
 
         return findings_prompt
 
-    # ------------------------------------------------------------------
-    # create_spawn_tool() — factory for the thin SpawnTool wrapper
-    # ------------------------------------------------------------------
 
-    def create_spawn_tool(self) -> "SpawnTool":
-        """Create a SpawnTool instance bound to this manager.
-
-        Returns:
-            A SpawnTool that delegates to this manager's spawn() method.
-        """
-        from .spawn import SpawnTool
-        return SpawnTool(self)

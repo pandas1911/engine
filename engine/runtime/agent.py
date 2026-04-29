@@ -6,7 +6,7 @@ This module provides the Agent class with async callbacks and error propagation.
 import asyncio
 import json
 import uuid
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 from .agent_models import AgentState, ErrorCategory, AgentError, Session
 from engine.providers.provider_models import ToolCall
@@ -14,12 +14,11 @@ from engine.config import Config
 from engine.time import TimeProvider
 from .task_registry import AgentTaskRegistry
 from engine.subagent.events import AgentEvent, ChildCompletionEvent
-from engine.subagent.manager import SubAgentManager
 from .state import AgentStateMachine
-from engine.tools.base import ToolRegistry
+from engine.tools.pack import ToolPack
 from engine.providers.llm_provider import LLMProviderError
 from engine.logging import get_logger
-from engine.safety import ConcurrencyLimiter, LaneConcurrencyQueue
+from engine.safety import LaneConcurrencyQueue
 
 if TYPE_CHECKING:
     from engine.providers.llm_provider import LLMProvider
@@ -39,12 +38,10 @@ class Agent:
         config: Config,
         llm_provider: "LLMProvider",
         task_registry: Optional[AgentTaskRegistry] = None,
-        tools: Optional[List[Any]] = None,
-        tool_registry: Optional[ToolRegistry] = None,
+        tool_pack: Optional[ToolPack] = None,
         task_id: Optional[str] = None,
         parent_task_id: Optional[str] = None,
         label: Optional[str] = None,
-        concurrency_limiter: Optional[ConcurrencyLimiter] = None,
         lane_queue: Optional[LaneConcurrencyQueue] = None,
     ):
         self.session = session
@@ -61,35 +58,12 @@ class Agent:
         self._completion_event = asyncio.Event()
         self._error_info: Optional[AgentError] = None
         self.display_id = f"[{self.label}|{self.task_id}]"
-        self._concurrency_limiter = concurrency_limiter
         self._lane_queue = lane_queue
         self._time_provider = TimeProvider(timezone_override=config.user_timezone)
         self._event_queue: List[
             AgentEvent
         ] = []  # Deferred event queue (native list, Swift Array equivalent)
-        # SubAgentManager handles child spawning and notification
-        self._subagent_mgr = SubAgentManager(
-            task_registry=self.task_registry,
-            event_queue=self._event_queue,
-            drainable=self,
-            agent_task_id=self.task_id,
-            parent_label=self.label,
-            config=self.config,
-            concurrency_limiter=self._concurrency_limiter,
-            lane_queue=self._lane_queue,
-        )
-        # Use provided registry or create new one
-        self._tool_registry = tool_registry or ToolRegistry()
-
-        # Backward compat: register any tools passed as list
-        if tools:
-            for tool in tools:
-                self._tool_registry.register(tool)
-
-        # SpawnTool conditional injection
-        if session.depth < config.max_depth:
-            spawn_tool = self._subagent_mgr.create_spawn_tool()
-            self._tool_registry.register_spawn(spawn_tool)
+        self._tool_pack = tool_pack or ToolPack([])
 
         get_logger().info(
             self.label,
@@ -97,7 +71,7 @@ class Agent:
                 self.session.id, self.session.depth,
                 self.parent_task_id or "None (root)",
                 self.session.depth < self.config.max_depth,
-                len(self._tool_registry), self.MAX_TOOL_ITERATIONS,
+                len(self._tool_pack), self.MAX_TOOL_ITERATIONS,
             ),
             task_id=self.task_id, state=self.state.value, depth=self.session.depth,
             event_type="agent_init",
@@ -105,7 +79,7 @@ class Agent:
                 "session_id": self.session.id,
                 "parent_task_id": self.parent_task_id,
                 "spawn_enabled": self.session.depth < self.config.max_depth,
-                "tool_count": len(self._tool_registry),
+                "tool_count": len(self._tool_pack),
             },
         )
 
@@ -123,39 +97,20 @@ class Agent:
             return self._event_queue.pop(0)
         return None
 
-    def _create_child_agent(
-        self,
-        session: Session,
-        config: Config,
-        task_registry: AgentTaskRegistry,
-        parent_task_id: str,
-        task_id: Optional[str] = None,
-        label: Optional[str] = None,
-    ) -> "Agent":
-        """Create a child agent.
+    @property
+    def event_queue(self) -> List[AgentEvent]:
+        """Read-only access to event queue."""
+        return self._event_queue
 
-        Args:
-            session: Child agent's session
-            config: Configuration
-            task_registry: AgentTaskRegistry instance
-            parent_task_id: Parent's task ID
-            task_id: Optional task ID for the child (auto-generated if not provided)
-            label: Optional label for the child agent
+    @property
+    def lane_queue(self) -> Optional[LaneConcurrencyQueue]:
+        """Read-only access to lane queue."""
+        return self._lane_queue
 
-        Returns:
-            New Agent instance
-        """
-        return Agent(
-            session=session,
-            config=config,
-            llm_provider=self.llm,
-            task_registry=task_registry,
-            tool_registry=self._tool_registry.clone(),
-            task_id=task_id,
-            parent_task_id=parent_task_id,
-            label=label,
-            concurrency_limiter=self._concurrency_limiter,
-        )
+    @property
+    def tool_pack(self) -> Optional[ToolPack]:
+        """Read-only access to tool pack."""
+        return self._tool_pack
 
     async def run(self, message: Optional[str] = None, *, trigger: str = "start") -> str:
         if message:
@@ -539,7 +494,7 @@ class Agent:
         Returns:
             Tool execution result
         """
-        tool = self._tool_registry.get(tool_call.name)
+        tool = self._tool_pack.get(tool_call.name)
 
         get_logger().tool(
             self.label,
@@ -564,11 +519,7 @@ class Agent:
 
         context = {
             "session": self.session,
-            "config": self.config,
-            "task_registry": self.task_registry,
             "parent_agent": self,
-            "parent_task_id": self.task_id,
-            "agent_factory": self._create_child_agent,
         }
 
         try:
@@ -703,13 +654,16 @@ class Agent:
             task_id=self.task_id, state=self.state.value, depth=self.session.depth)
         self._completion_event.set()
 
+        # Release SpawnTool cached SubAgentManager for this agent
+        self._tool_pack.release_spawn(self.task_id)
+
         if self.parent_task_id:
             await self.task_registry.complete(
                 self.task_id, self._final_result
             )
 
     def _get_tool_schemas(self) -> List[Dict]:
-        return self._tool_registry.get_schemas()
+        return self._tool_pack.get_schemas(self.session)
 
 
 __all__ = [

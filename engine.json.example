@@ -40,5 +40,9 @@
   "key_rotation_enabled": true,
   "fallback_enabled": true,
   "cooldown_initial_ms": 30000.0,
-  "cooldown_max_ms": 300000.0
+  "cooldown_max_ms": 300000.0,
+  "tools": {
+    "tool_1": false,
+    "tool_2": true
+  }
 }

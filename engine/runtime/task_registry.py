@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Set
 
 from engine.logging import get_logger
-from engine.subagent.subagent_models import CollectedChildResult, SubagentTask
+from engine.subagent.subagent_models import CollectedChildResult, AgentTask
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -35,7 +35,7 @@ class AgentTaskRegistry:
 
     def __init__(self):
         """Initialize the registry."""
-        self._tasks: Dict[str, SubagentTask] = {}
+        self._tasks: Dict[str, AgentTask] = {}
         self._pending: Set[str] = set()
         self._lock = asyncio.Lock()
         self._completion_handlers: Dict[str, Callable] = {}  # maps parent_task_id → callback
@@ -49,7 +49,7 @@ class AgentTaskRegistry:
         agent: Optional["Agent"] = None,
         parent_task_id: Optional[str] = None,
         depth: int = 0,
-    ) -> SubagentTask:
+    ) -> AgentTask:
         """Register a subagent - Similar to OpenClaw's registerSubagentRun.
 
         Args:
@@ -62,7 +62,7 @@ class AgentTaskRegistry:
             depth: Nesting depth level
 
         Returns:
-            The created SubagentTask
+            The created AgentTask
 
         Raises:
             ValueError: If registering would create a cycle in the task hierarchy
@@ -84,7 +84,7 @@ class AgentTaskRegistry:
                 f"Cycle detected: agent {task_id} already exists in ancestor chain"
             )
 
-        task = SubagentTask(
+        task = AgentTask(
             task_id=task_id,
             session_id=session_id,
             task_description=description,
@@ -216,14 +216,14 @@ class AgentTaskRegistry:
         """Count direct children of `task_id` still pending."""
         return self._count_pending_for_parent(task_id)
 
-    def get_task(self, task_id: str) -> Optional[SubagentTask]:
+    def get_task(self, task_id: str) -> Optional[AgentTask]:
         """Get a task by ID.
 
         Args:
             task_id: The task ID to retrieve
 
         Returns:
-            The SubagentTask if found, None otherwise
+            The AgentTask if found, None otherwise
         """
         return self._tasks.get(task_id)
 
