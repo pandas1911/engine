@@ -8,7 +8,7 @@ import pytest
 from engine import delegate
 
 TEST_PROMPT = """
-    当前哪些工具可用
+    当前你有哪些工具可用，如实回答
 """
 
 

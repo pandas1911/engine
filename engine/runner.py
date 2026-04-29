@@ -20,26 +20,15 @@ from engine.providers.fallback_provider import FallbackLLMProvider
 from engine.providers.provider_models import ProviderParams, Lane
 from engine.time import TimeProvider
 
-DEFAULT_SYSTEM_PROMPT = """\
+_BASE_PROMPT = """\
 # Root Agent
 
-You are the root orchestrator agent. Your job is to decompose tasks, dispatch work, and synthesize results.
+You are the root orchestrator agent. Your job is to accomplish tasks using available tools.
 
 ## Execution Strategy
 
-1. **Decompose first** — Break the task into independent subtasks. Assign each to a child agent via `spawn`.
-2. **Parallel over sequential** — If subtasks have no dependencies, dispatch them all in one turn.
-3. **Handle simple tasks yourself** — If a task is trivial (single-step, no research needed), do it directly rather than spawning overhead.
-4. **Use tools proactively** — When tools are available, prefer using them over reasoning from incomplete knowledge. Vary your approach if a tool returns weak or empty results.
-5. **Ground your response in evidence** — Strictly base your answers and next actions on tool results and child agent reports. Never fabricate information or speculate beyond what the evidence supports.
-6. **Iterate after synthesis** — After child agents report back, evaluate whether the results are sufficient to complete the task. If so, synthesize and respond. If not, plan and dispatch further work.
-
-## Spawning Rules
-
-- One `spawn` call = one focused subtask with clear completion criteria.
-- Include sufficient context in the task description — the child agent starts isolated.
-- Respect the depth limit: at maximum depth, complete the task yourself.
-- Do NOT spawn a child for tasks that require a single tool call you can make yourself.
+1. **Use tools proactively** — When tools are available, prefer using them over reasoning from incomplete knowledge. Vary your approach if a tool returns weak or empty results.
+2. **Ground your response in evidence** — Strictly base your answers and next actions on tool results. Never fabricate information or speculate beyond what the evidence supports.
 
 ## Output Format
 
@@ -51,6 +40,25 @@ Be concise and structured:
 - No filler, no meta-commentary ("I have completed...", "Here is...").
 - For multi-part tasks, use clear headings or bullet lists.
 """
+
+_SPAWN_PROMPT = """\
+## Execution Strategy (Spawning)
+
+1. **Decompose first** — Break the task into independent subtasks. Assign each to a child agent via `spawn`.
+2. **Parallel over sequential** — If subtasks have no dependencies, dispatch them all in one turn.
+3. **Handle simple tasks yourself** — If a task is trivial (single-step, no research needed), do it directly rather than spawning overhead.
+4. **Iterate after synthesis** — After child agents report back, evaluate whether the results are sufficient to complete the task. If so, synthesize and respond. If not, plan and dispatch further work.
+
+## Spawning Rules
+
+- One `spawn` call = one focused subtask with clear completion criteria.
+- Include sufficient context in the task description — the child agent starts isolated.
+- Respect the depth limit: at maximum depth, complete the task yourself.
+- Do NOT spawn a child for tasks that require a single tool call you can make yourself.
+"""
+
+# Backward-compatible alias: the full prompt with spawn enabled
+DEFAULT_SYSTEM_PROMPT = _BASE_PROMPT + "\n" + _SPAWN_PROMPT
 
 _custom_tools_cache: Optional[List] = None
 
@@ -109,7 +117,12 @@ async def delegate(
 
         # Layer 1: Inject static time info into system prompt
         time_provider = TimeProvider(timezone_override=config.user_timezone)
-        base_system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+        if system_prompt:
+            base_system_prompt = system_prompt
+        else:
+            base_system_prompt = _BASE_PROMPT
+            if config.is_tool_enabled("spawn"):
+                base_system_prompt += "\n" + _SPAWN_PROMPT
         env_block = time_provider.format_system_env_block()
         full_system_prompt = f"{base_system_prompt}\n\n{env_block}"
         session.add_message("system", full_system_prompt)

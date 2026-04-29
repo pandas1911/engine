@@ -211,7 +211,7 @@ class SubAgentManager:
         )
 
         parent_label = self._parent_label
-        can_spawn = child_session.depth < config.max_depth
+        can_spawn = child_session.depth < config.max_depth and config.is_tool_enabled("spawn")
 
         self._child_counter += 1
         child_index = self._child_counter
