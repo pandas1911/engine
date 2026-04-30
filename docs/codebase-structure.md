@@ -96,9 +96,10 @@ The main entry point containing `delegate()` and all startup orchestration logic
 
 | Function | Description |
 |---|---|
-| `delegate(task_description, system_prompt?, tools?, config?)` | Main entry point. Creates a root agent session, initializes all infrastructure (providers, rate limiters, pacers, key pool, lane queue), discovers custom tools, filters by `config.is_tool_enabled()`, builds a `ToolPack`, and runs the agent loop. Returns `AgentResult`. |
+| `delegate(task_description, system_prompt?, tools?, config?, session?)` | Main entry point. Creates a root agent session (or reuses an existing one if `session` is provided), initializes all infrastructure, and runs the agent loop. When `session` is provided, only refreshes the env block (date/timezone) in the existing system message. Returns `AgentResult`. |
 | `_discover_custom_tools()` | Auto-discovers `Tool` subclasses from `engine/tools/custom/*.py` using `importlib` + `inspect`. Results are cached. |
 | `_refresh_custom_tools()` | Clears the custom tools cache. |
+| `_refresh_env_block(session, time_provider)` | Refreshes the date/timezone `<env>` block in the session's first system message. Replaces existing block or appends if absent. |
 
 **Key constants:**
 
@@ -107,7 +108,7 @@ The main entry point containing `delegate()` and all startup orchestration logic
 **Startup flow (`delegate()`):**
 
 1. Load config via `get_config()` (auto-discovers `engine.json`)
-2. Create `TimeProvider`, inject timezone info into system prompt
+2. Create `TimeProvider`, inject timezone info into system prompt (or refresh env block if session is provided)
 3. Initialize logger with configured log directory
 4. Iterate `config.providers` dict — for each provider, create `SlidingWindowRateLimiter` and `AdaptivePacer`; for each model under that provider, create an `LLMProvider` keyed by `"provider/model"`
 5. Build ordered key list from `config.primary` + `config.fallback`
@@ -547,7 +548,7 @@ Auto-discovered custom tools directory. Place `Tool` subclasses here and they wi
 |---|---|
 | `test_easy_task.py` | Tests `delegate()` with a structured city-comparison research prompt |
 | `test_multilayer_subagent.py` | Tests 3-child × 2-grandchild nesting with 3-level data provenance verification via JSONL logs |
-| `test_rate_limit_safety.py` | Unit tests for rate limiter deadlock prevention, timeout, and EMA token estimator (13 tests) |
+| `test_session_reuse.py` | Unit tests for `delegate()` session reuse — 8 tests covering backward compat, ID preservation, env block refresh, warning logging (all mocked, no live LLM calls) |
 
 Both integration tests use `pytest-asyncio` and call the real `delegate()` function (requires valid `engine.json`).
 
