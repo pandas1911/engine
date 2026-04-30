@@ -2,6 +2,8 @@
 
 import importlib
 import inspect
+import logging
+import re
 import uuid
 from pathlib import Path
 from typing import List, Optional
@@ -63,30 +65,63 @@ def _refresh_custom_tools() -> None:
     _custom_tools_cache = None
 
 
+_logger = logging.getLogger(__name__)
+
+_ENV_BLOCK_PATTERN = re.compile(
+    r"<env>\s*Today's date:.*?Time zone:.*?\n</env>",
+    re.DOTALL,
+)
+
+
+def _refresh_env_block(session: Session, time_provider: TimeProvider) -> None:
+    system_msg = None
+    for m in session.messages:
+        if m.role == "system":
+            system_msg = m
+            break
+
+    if system_msg is None:
+        return
+
+    fresh_block = time_provider.format_system_env_block()
+    if _ENV_BLOCK_PATTERN.search(system_msg.content):
+        system_msg.content = _ENV_BLOCK_PATTERN.sub(fresh_block, system_msg.content)
+    else:
+        system_msg.content = f"{system_msg.content}\n\n{fresh_block}"
+
+
 async def delegate(
     task_description: str,
     system_prompt: Optional[str] = None,
     tools: Optional[List] = None,
     config: Optional[Config] = None,
+    session: Optional[Session] = None,
 ) -> AgentResult:
     """Delegate a task to the agent system."""
-    session = Session(id=f"root_{uuid.uuid4().hex[:8]}", depth=0)
+    _provided_session = session is not None
+    if session is None:
+        session = Session(id=f"root_{uuid.uuid4().hex[:8]}", depth=0)
 
     try:
         if config is None:
             config = get_config()
 
-        # Layer 1: Inject static time info into system prompt
         time_provider = TimeProvider(timezone_override=config.user_timezone)
-        if system_prompt:
-            base_system_prompt = system_prompt
+
+        if _provided_session:
+            if system_prompt is not None:
+                _logger.warning("Both 'session' and 'system_prompt' provided; 'system_prompt' is ignored when 'session' is provided.")
+            _refresh_env_block(session, time_provider)
         else:
-            base_system_prompt = build_root_system_prompt(
-                include_spawn=config.is_tool_enabled("spawn")
-            )
-        env_block = time_provider.format_system_env_block()
-        full_system_prompt = f"{base_system_prompt}\n\n{env_block}"
-        session.add_message("system", full_system_prompt)
+            if system_prompt:
+                base_system_prompt = system_prompt
+            else:
+                base_system_prompt = build_root_system_prompt(
+                    include_spawn=config.is_tool_enabled("spawn")
+                )
+            env_block = time_provider.format_system_env_block()
+            full_system_prompt = f"{base_system_prompt}\n\n{env_block}"
+            session.add_message("system", full_system_prompt)
 
         init_logger(log_dir=config.log_dir)
 
