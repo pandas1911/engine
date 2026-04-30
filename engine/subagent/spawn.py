@@ -6,6 +6,7 @@ from typing import Any, Dict, TYPE_CHECKING
 from engine.tools.base import Tool
 from engine.logging import get_logger
 from engine.config import get_config
+from engine.prompts import get_runtime_depth_rejection
 
 if TYPE_CHECKING:
     from engine.subagent.manager import SubAgentManager
@@ -62,10 +63,7 @@ class SpawnTool(Tool):
                 event_type="spawn_depth_limit",
                 data={"current_depth": session.depth, "max_depth": config.max_depth},
             )
-            return (
-                "[Spawn Failed] Maximum nesting depth reached "
-                "(current: {}/{}). No further child agents can be spawned."
-            ).format(session.depth, config.max_depth)
+            return get_runtime_depth_rejection(depth=session.depth, max_depth=config.max_depth)
 
         # Lazy init SubAgentManager with lock for concurrency safety
         async with self._lock:

@@ -1,7 +1,8 @@
 """engine - AI Agent automation package."""
 
 # Core API — extracted to runner.py
-from engine.runner import delegate, DEFAULT_SYSTEM_PROMPT, _discover_custom_tools, _refresh_custom_tools
+from engine.runner import delegate, _discover_custom_tools, _refresh_custom_tools
+from engine.prompts import DEFAULT_SYSTEM_PROMPT
 
 # Public API re-exports
 from engine.tools.base import Tool, FunctionTool

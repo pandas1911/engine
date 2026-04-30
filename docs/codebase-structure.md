@@ -12,10 +12,11 @@ engine/
 │   ├── __init__.py            # Thin re-export layer (re-exports from runner.py and submodules)
 │   ├── runner.py              # delegate(), DEFAULT_SYSTEM_PROMPT, ToolPack construction, is_tool_enabled filtering
 │   ├── config.py              # Configuration loading (engine.json)
+│   ├── prompts.py             # Centralized prompt definitions (pure leaf module, zero engine.* imports)
 │   ├── time.py                # Timezone-aware time utilities
 │   ├── safety/                # Rate limiting, concurrency, retry, pacing
 │   │   ├── __init__.py        # Re-export layer for all safety classes
-│   │   ├── concurrency.py     # ConcurrencyLimiter, LaneConcurrencyQueue, LaneSlot, LaneStatus
+│   │   ├── concurrency.py     # LaneConcurrencyQueue, LaneSlot, LaneStatus
 │   │   ├── rate_limit.py      # SlidingWindowRateLimiter
 │   │   ├── token_estimator.py # EmaTokenEstimator — adaptive chars→tokens estimator
 │   │   ├── key_pool.py        # APIKeyPool
@@ -77,7 +78,7 @@ A minimal re-export module (12 lines) that re-exports the public API from `runne
 | Symbol | Source |
 |---|---|
 | `delegate` | `engine.runner` |
-| `DEFAULT_SYSTEM_PROMPT` | `engine.runner` |
+| `DEFAULT_SYSTEM_PROMPT` | `engine.prompts` |
 | `_discover_custom_tools` | `engine.runner` |
 | `_refresh_custom_tools` | `engine.runner` |
 | `Tool`, `FunctionTool` | `engine.tools.base` |
@@ -101,7 +102,7 @@ The main entry point containing `delegate()` and all startup orchestration logic
 
 **Key constants:**
 
-- `DEFAULT_SYSTEM_PROMPT` — The default system prompt for the root agent, which instructs it to decompose tasks, dispatch work in parallel, and synthesize results.
+- Prompt definitions have been extracted to `engine/prompts.py` (see Section 4).
 
 **Startup flow (`delegate()`):**
 
@@ -167,7 +168,38 @@ Loads runtime configuration from `engine.json`.
 
 ---
 
-### 4. `engine/safety/` — Rate Limiting & Safety Guards
+### 4. `engine/prompts.py` — Centralized Prompt Definitions
+
+A pure leaf module (zero `engine.*` imports) serving as the single source of truth for all LLM prompt text.
+
+**Static Constants:**
+
+| Constant | Description |
+|---|---|
+| `BASE_PROMPT` | Root agent base execution strategy |
+| `SPAWN_PROMPT` | Root agent sub-agent spawning rules |
+| `DEPTH_LIMIT_REJECTION` | Depth limit rejection message template (format string) |
+
+**Dynamic Functions:**
+
+| Function | Description |
+|---|---|
+| `build_root_system_prompt(include_spawn)` | Assemble root agent prompt (BASE + optional SPAWN) |
+| `get_subagent_system_prompt(parent_label, task_desc, depth, max_depth, can_spawn, task_id, label)` | Build sub-agent system prompt |
+| `get_summary_warning(remaining_iterations)` | Iteration limit warning message |
+| `get_emergency_summary_prompt()` | Emergency summary forcing final answer |
+| `get_child_results_prompt(child_results_json)` | Format child results for parent consumption |
+| `get_child_results_empty_warning()` | Warning when no child results collected |
+| `get_spawn_confirmation(task_id, label)` | Spawn success confirmation message |
+| `get_concurrency_timeout_rejection(task_desc, label, active, max_concurrent, timeout)` | Concurrency limit rejection (unified from two templates) |
+| `get_runtime_depth_rejection(depth, max_depth)` | Runtime depth safety net rejection |
+
+**Derived values:**
+- `DEFAULT_SYSTEM_PROMPT` = `build_root_system_prompt(include_spawn=True)` — backward-compatible alias
+
+---
+
+### 5. `engine/safety/` — Rate Limiting & Safety Guards
 
 A package providing resource protection mechanisms for the agent system. Split into focused sub-modules, with `__init__.py` re-exporting all public classes for backward compatibility.
 
@@ -179,7 +211,6 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 
 | Class | Description |
 |---|---|
-| `ConcurrencyLimiter` | Asyncio.Semaphore wrapper with observable active count |
 | `LaneConcurrencyQueue` | Per-lane (MAIN/SUBAGENT) concurrency control with FIFO queuing via `asyncio.Condition` |
 | `LaneSlot` | Async context manager representing a concurrency slot |
 | `LaneStatus` | Data class for lane status queries |
@@ -249,7 +280,7 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 
 ---
 
-### 5. `engine/time.py` — Time Utilities
+### 6. `engine/time.py` — Time Utilities
 
 Timezone-aware time formatting for the agent framework.
 
@@ -268,7 +299,7 @@ Timezone-aware time formatting for the agent framework.
 
 ---
 
-### 6. `engine/runtime/` — Agent Execution Core
+### 7. `engine/runtime/` — Agent Execution Core
 
 #### `agent.py` — Agent Class
 
@@ -334,7 +365,7 @@ CRUD for `AgentTask` entries with handler-based notification.
 
 ---
 
-### 7. `engine/providers/` — LLM Provider Layer
+### 8. `engine/providers/` — LLM Provider Layer
 
 #### `llm_provider.py`
 
@@ -398,11 +429,11 @@ Providers are ordered by the insertion order of the `providers` dict (primary fi
 
 ---
 
-### 8. `engine/subagent/` — Sub-Agent System
+### 9. `engine/subagent/` — Sub-Agent System
 
 #### `manager.py` — SubAgentManager
 
-Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per agent (not owned by `Agent` directly). Receives `llm_provider` and `tool_pack` at construction and builds child agents directly.
+Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per agent (not owned by `Agent` directly). Receives `llm_provider` and `tool_pack` at construction and builds child agents directly. Prompt templates for sub-agent system prompts are defined in `engine/prompts.py` (Section 4).
 
 **Key methods:**
 
@@ -447,7 +478,7 @@ Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per a
 
 ---
 
-### 9. `engine/tools/` — Tool System
+### 10. `engine/tools/` — Tool System
 
 #### `base.py`
 
@@ -487,7 +518,7 @@ Auto-discovered custom tools directory. Place `Tool` subclasses here and they wi
 
 ---
 
-### 10. `engine/logging/` — Logging
+### 11. `engine/logging/` — Logging
 
 #### `sink.py`
 
@@ -510,7 +541,7 @@ Auto-discovered custom tools directory. Place `Tool` subclasses here and they wi
 
 ---
 
-### 11. `tests/` — Test Suite
+### 12. `tests/` — Test Suite
 
 | File | Description |
 |---|---|

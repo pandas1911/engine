@@ -19,6 +19,7 @@ from engine.tools.pack import ToolPack
 from engine.providers.llm_provider import LLMProviderError
 from engine.logging import get_logger
 from engine.safety import LaneConcurrencyQueue
+from engine.prompts import get_summary_warning, get_emergency_summary_prompt
 
 if TYPE_CHECKING:
     from engine.providers.llm_provider import LLMProvider
@@ -311,11 +312,7 @@ class Agent:
             Warning message string to be added as a user message.
         """
         remaining = self.MAX_TOOL_ITERATIONS - current_iteration
-        return (
-            "[System Notice] You have {} tool call iteration(s) remaining. "
-            "Please stop making tool calls and provide your final comprehensive answer "
-            "based on all data you have collected so far. Do NOT make any more tool calls."
-        ).format(remaining)
+        return get_summary_warning(remaining)
 
     async def _emergency_summarize(self) -> str:
         """Force a final summary when iteration limit is reached without a text response.
@@ -345,11 +342,7 @@ class Agent:
 
         condensed.append({
             "role": "user",
-            "content": (
-                "[System] You have exhausted all available tool call iterations. "
-                "You MUST now provide a comprehensive final answer based on all the "
-                "data and results you have gathered. Structure your answer clearly."
-            ),
+            "content": get_emergency_summary_prompt(),
         })
 
         try:
