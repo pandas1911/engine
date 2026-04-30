@@ -514,8 +514,8 @@ Auto-discovered custom tools directory. Place `Tool` subclasses here and they wi
 
 | File | Description |
 |---|---|
-| `test_easy_task.py` | Tests `delegate()` with a Chinese-language research prompt |
-| `test_multilayer_subagent.py` | Tests 3-child × 2-grandchild nesting with random number aggregation |
+| `test_easy_task.py` | Tests `delegate()` with a structured city-comparison research prompt |
+| `test_multilayer_subagent.py` | Tests 3-child × 2-grandchild nesting with 3-level data provenance verification via JSONL logs |
 | `test_rate_limit_safety.py` | Unit tests for rate limiter deadlock prevention, timeout, and EMA token estimator (13 tests) |
 
 Both integration tests use `pytest-asyncio` and call the real `delegate()` function (requires valid `engine.json`).
