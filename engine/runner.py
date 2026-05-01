@@ -2,6 +2,8 @@
 
 import importlib
 import inspect
+import logging
+import re
 import uuid
 from pathlib import Path
 from typing import List, Optional
@@ -13,42 +15,13 @@ from engine.logging import init_logger, stop_logger
 from engine.runtime.agent_models import AgentError, AgentResult, AgentState, ErrorCategory, Session
 from engine.runtime.task_registry import AgentTaskRegistry
 from engine.tools.base import Tool
+from engine.tools.pack import ToolPack
+from engine.subagent.spawn import SpawnTool
 from engine.safety import LaneConcurrencyQueue, SlidingWindowRateLimiter, AdaptivePacer, APIKeyPool, RetryEngine
 from engine.providers.fallback_provider import FallbackLLMProvider
 from engine.providers.provider_models import ProviderParams, Lane
 from engine.time import TimeProvider
-
-DEFAULT_SYSTEM_PROMPT = """\
-# Root Agent
-
-You are the root orchestrator agent. Your job is to decompose tasks, dispatch work, and synthesize results.
-
-## Execution Strategy
-
-1. **Decompose first** — Break the task into independent subtasks. Assign each to a child agent via `spawn`.
-2. **Parallel over sequential** — If subtasks have no dependencies, dispatch them all in one turn.
-3. **Handle simple tasks yourself** — If a task is trivial (single-step, no research needed), do it directly rather than spawning overhead.
-4. **Use tools proactively** — When tools are available, prefer using them over reasoning from incomplete knowledge. Vary your approach if a tool returns weak or empty results.
-5. **Ground your response in evidence** — Strictly base your answers and next actions on tool results and child agent reports. Never fabricate information or speculate beyond what the evidence supports.
-6. **Iterate after synthesis** — After child agents report back, evaluate whether the results are sufficient to complete the task. If so, synthesize and respond. If not, plan and dispatch further work.
-
-## Spawning Rules
-
-- One `spawn` call = one focused subtask with clear completion criteria.
-- Include sufficient context in the task description — the child agent starts isolated.
-- Respect the depth limit: at maximum depth, complete the task yourself.
-- Do NOT spawn a child for tasks that require a single tool call you can make yourself.
-
-## Output Format
-
-When the task specifies an output format, follow it exactly. The guidelines below apply when no format is specified.
-
-Be concise and structured:
-- Start with the direct answer or conclusion.
-- Follow with supporting details only when they add value.
-- No filler, no meta-commentary ("I have completed...", "Here is...").
-- For multi-part tasks, use clear headings or bullet lists.
-"""
+from engine.prompts import build_root_system_prompt
 
 _custom_tools_cache: Optional[List] = None
 
@@ -77,10 +50,16 @@ def _discover_custom_tools() -> List:
                 if issubclass(obj, Tool) and obj is not Tool:
                     try:
                         tools.append(obj())
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as exc:
+                        _logger.warning(
+                            "Failed to instantiate tool class %s from %s: %s",
+                            name, module_name, exc,
+                        )
+        except Exception as exc:
+            _logger.warning(
+                "Failed to import custom tool module %s: %s",
+                module_name, exc,
+            )
 
     _custom_tools_cache = tools
     return tools
@@ -92,25 +71,63 @@ def _refresh_custom_tools() -> None:
     _custom_tools_cache = None
 
 
+_logger = logging.getLogger(__name__)
+
+_ENV_BLOCK_PATTERN = re.compile(
+    r"<env>\s*Today's date:.*?Time zone:.*?\n</env>",
+    re.DOTALL,
+)
+
+
+def _refresh_env_block(session: Session, time_provider: TimeProvider) -> None:
+    system_msg = None
+    for m in session.messages:
+        if m.role == "system":
+            system_msg = m
+            break
+
+    if system_msg is None:
+        return
+
+    fresh_block = time_provider.format_system_env_block()
+    if _ENV_BLOCK_PATTERN.search(system_msg.content):
+        system_msg.content = _ENV_BLOCK_PATTERN.sub(fresh_block, system_msg.content)
+    else:
+        system_msg.content = f"{system_msg.content}\n\n{fresh_block}"
+
+
 async def delegate(
     task_description: str,
     system_prompt: Optional[str] = None,
     tools: Optional[List] = None,
     config: Optional[Config] = None,
+    session: Optional[Session] = None,
 ) -> AgentResult:
     """Delegate a task to the agent system."""
-    session = Session(id=f"root_{uuid.uuid4().hex[:8]}", depth=0)
+    _provided_session = session is not None
+    if session is None:
+        session = Session(id=f"root_{uuid.uuid4().hex[:8]}", depth=0)
 
     try:
         if config is None:
             config = get_config()
 
-        # Layer 1: Inject static time info into system prompt
         time_provider = TimeProvider(timezone_override=config.user_timezone)
-        base_system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
-        env_block = time_provider.format_system_env_block()
-        full_system_prompt = f"{base_system_prompt}\n\n{env_block}"
-        session.add_message("system", full_system_prompt)
+
+        if _provided_session:
+            if system_prompt is not None:
+                _logger.warning("Both 'session' and 'system_prompt' provided; 'system_prompt' is ignored when 'session' is provided.")
+            _refresh_env_block(session, time_provider)
+        else:
+            if system_prompt:
+                base_system_prompt = system_prompt
+            else:
+                base_system_prompt = build_root_system_prompt(
+                    include_spawn=config.is_tool_enabled("spawn")
+                )
+            env_block = time_provider.format_system_env_block()
+            full_system_prompt = f"{base_system_prompt}\n\n{env_block}"
+            session.add_message("system", full_system_prompt)
 
         init_logger(log_dir=config.log_dir)
 
@@ -177,7 +194,19 @@ async def delegate(
         task_registry = AgentTaskRegistry()
 
         custom_tools = _discover_custom_tools()
-        all_tools = custom_tools + (tools or [])
+        all_tool_instances = custom_tools + (tools or [])
+
+        # Filter by config.tools (enable/disable)
+        enabled_tools = [
+            t for t in all_tool_instances
+            if config.is_tool_enabled(t.name)
+        ]
+    
+        # Conditionally add SpawnTool
+        if config.is_tool_enabled("spawn"):
+            enabled_tools.append(SpawnTool())
+
+        tool_pack = ToolPack(enabled_tools)
 
         # Create Lane Concurrency Queue
         lane_queue = LaneConcurrencyQueue()
@@ -187,9 +216,9 @@ async def delegate(
         agent = Agent(
             session=session,
             config=config,
-            task_registry=task_registry,
             llm_provider=llm_provider,
-            tools=all_tools,
+            task_registry=task_registry,
+            tool_pack=tool_pack,
             lane_queue=lane_queue,
         )
 

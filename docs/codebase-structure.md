@@ -10,12 +10,13 @@
 engine/
 ├── engine/                    # Core package
 │   ├── __init__.py            # Thin re-export layer (re-exports from runner.py and submodules)
-│   ├── runner.py              # delegate(), DEFAULT_SYSTEM_PROMPT, custom tool discovery
+│   ├── runner.py              # delegate(), DEFAULT_SYSTEM_PROMPT, ToolPack construction, is_tool_enabled filtering
 │   ├── config.py              # Configuration loading (engine.json)
+│   ├── prompts.py             # Centralized prompt definitions (pure leaf module, zero engine.* imports)
 │   ├── time.py                # Timezone-aware time utilities
 │   ├── safety/                # Rate limiting, concurrency, retry, pacing
 │   │   ├── __init__.py        # Re-export layer for all safety classes
-│   │   ├── concurrency.py     # ConcurrencyLimiter, LaneConcurrencyQueue, LaneSlot, LaneStatus
+│   │   ├── concurrency.py     # LaneConcurrencyQueue, LaneSlot, LaneStatus
 │   │   ├── rate_limit.py      # SlidingWindowRateLimiter
 │   │   ├── token_estimator.py # EmaTokenEstimator — adaptive chars→tokens estimator
 │   │   ├── key_pool.py        # APIKeyPool
@@ -23,7 +24,7 @@ engine/
 │   │   └── pacing.py          # AdaptivePacer, ResultTruncator, RegistrySizeMonitor
 │   ├── runtime/               # Agent execution core
 │   │   ├── __init__.py
-│   │   ├── agent.py           # Agent class — main execution loop
+│   │   ├── agent.py           # Agent class — main execution loop (no SubAgentManager, uses ToolPack)
 │   │   ├── agent_models.py    # Data models (Session, Message, AgentResult, etc.)
 │   │   ├── state.py           # Agent state machine
 │   │   └── task_registry.py   # Task CRUD with handler-based notification
@@ -35,13 +36,14 @@ engine/
 │   ├── subagent/              # Sub-agent spawning and lifecycle
 │   │   ├── __init__.py
 │   │   ├── manager.py         # SubAgentManager — spawn, gate-check, notify
-│   │   ├── spawn.py           # SpawnTool — thin tool wrapper
+│   │   ├── spawn.py           # SpawnTool — lazy-caches SubAgentManager per agent
 │   │   ├── protocol.py        # Drainable protocol definition
 │   │   ├── events.py          # Event types (ChildCompletionEvent)
-│   │   └── subagent_models.py # SubagentTask, CollectedChildResult
+│   │   └── subagent_models.py # AgentTask, CollectedChildResult
 │   ├── tools/                 # Extensible tool system
 │   │   ├── __init__.py
-│   │   ├── base.py            # Tool ABC, FunctionTool, ToolRegistry
+│   │   ├── base.py            # Tool ABC, FunctionTool, ToolRegistry (pure storage)
+│   │   ├── pack.py            # ToolPack — immutable view over ToolRegistry with depth-aware schema filtering
 │   │   ├── builtin/           # Built-in tools (empty, reserved)
 │   │   │   └── __init__.py
 │   │   └── custom/            # Auto-discovered custom tools (web search, web fetch)
@@ -76,7 +78,7 @@ A minimal re-export module (12 lines) that re-exports the public API from `runne
 | Symbol | Source |
 |---|---|
 | `delegate` | `engine.runner` |
-| `DEFAULT_SYSTEM_PROMPT` | `engine.runner` |
+| `DEFAULT_SYSTEM_PROMPT` | `engine.prompts` |
 | `_discover_custom_tools` | `engine.runner` |
 | `_refresh_custom_tools` | `engine.runner` |
 | `Tool`, `FunctionTool` | `engine.tools.base` |
@@ -94,26 +96,30 @@ The main entry point containing `delegate()` and all startup orchestration logic
 
 | Function | Description |
 |---|---|
-| `delegate(task_description, system_prompt?, tools?, config?)` | Main entry point. Creates a root agent session, initializes all infrastructure (providers, rate limiters, pacers, key pool, lane queue), discovers custom tools, and runs the agent loop. Returns `AgentResult`. |
+| `delegate(task_description, system_prompt?, tools?, config?, session?)` | Main entry point. Creates a root agent session (or reuses an existing one if `session` is provided), initializes all infrastructure, and runs the agent loop. When `session` is provided, only refreshes the env block (date/timezone) in the existing system message. Returns `AgentResult`. |
 | `_discover_custom_tools()` | Auto-discovers `Tool` subclasses from `engine/tools/custom/*.py` using `importlib` + `inspect`. Results are cached. |
 | `_refresh_custom_tools()` | Clears the custom tools cache. |
+| `_refresh_env_block(session, time_provider)` | Refreshes the date/timezone `<env>` block in the session's first system message. Replaces existing block or appends if absent. |
 
 **Key constants:**
 
-- `DEFAULT_SYSTEM_PROMPT` — The default system prompt for the root agent, which instructs it to decompose tasks, dispatch work in parallel, and synthesize results.
+- Prompt definitions have been extracted to `engine/prompts.py` (see Section 4).
 
 **Startup flow (`delegate()`):**
 
 1. Load config via `get_config()` (auto-discovers `engine.json`)
-2. Create `TimeProvider`, inject timezone info into system prompt
+2. Create `TimeProvider`, inject timezone info into system prompt (or refresh env block if session is provided)
 3. Initialize logger with configured log directory
 4. Iterate `config.providers` dict — for each provider, create `SlidingWindowRateLimiter` and `AdaptivePacer`; for each model under that provider, create an `LLMProvider` keyed by `"provider/model"`
 5. Build ordered key list from `config.primary` + `config.fallback`
 6. Create shared: `APIKeyPool` (with ordered composite key names), `RetryEngine`, `FallbackLLMProvider`
 7. Create `LaneConcurrencyQueue` (MAIN + SUBAGENT lanes)
 8. Discover and merge custom tools
-9. Create root `Agent`, register in `AgentTaskRegistry`
-10. Run the agent, return `AgentResult`
+9. Filter tools by `config.is_tool_enabled()` — unlisted tools default to enabled
+10. Conditionally add `SpawnTool` (if `"spawn"` is enabled)
+11. Build `ToolPack` from enabled tools
+12. Create root `Agent` with `ToolPack`, register in `AgentTaskRegistry`
+13. Run the agent, return `AgentResult`
 
 ---
 
@@ -153,6 +159,7 @@ Loads runtime configuration from `engine.json`.
 | `cooldown_initial_ms` | `30000.0` | Initial key cooldown on rate limit |
 | `cooldown_max_ms` | `300000.0` | Maximum key cooldown |
 | `user_timezone` | `None` | Timezone override (env var `USER_TIMEZONE` takes precedence) |
+| `tools` | `{}` | `Dict[str, bool]` — tool enable/disable mapping. Unlisted tools default to `True` (enabled). Use `config.is_tool_enabled(name)` to check. |
 
 **Config discovery strategy:**
 
@@ -162,7 +169,38 @@ Loads runtime configuration from `engine.json`.
 
 ---
 
-### 4. `engine/safety/` — Rate Limiting & Safety Guards
+### 4. `engine/prompts.py` — Centralized Prompt Definitions
+
+A pure leaf module (zero `engine.*` imports) serving as the single source of truth for all LLM prompt text.
+
+**Static Constants:**
+
+| Constant | Description |
+|---|---|
+| `BASE_PROMPT` | Root agent base execution strategy |
+| `SPAWN_PROMPT` | Root agent sub-agent spawning rules |
+| `DEPTH_LIMIT_REJECTION` | Depth limit rejection message template (format string) |
+
+**Dynamic Functions:**
+
+| Function | Description |
+|---|---|
+| `build_root_system_prompt(include_spawn)` | Assemble root agent prompt (BASE + optional SPAWN) |
+| `get_subagent_system_prompt(parent_label, task_desc, depth, max_depth, can_spawn, task_id, label)` | Build sub-agent system prompt |
+| `get_summary_warning(remaining_iterations)` | Iteration limit warning message |
+| `get_emergency_summary_prompt()` | Emergency summary forcing final answer |
+| `get_child_results_prompt(child_results_json)` | Format child results for parent consumption |
+| `get_child_results_empty_warning()` | Warning when no child results collected |
+| `get_spawn_confirmation(task_id, label)` | Spawn success confirmation message |
+| `get_concurrency_timeout_rejection(task_desc, label, active, max_concurrent, timeout)` | Concurrency limit rejection (unified from two templates) |
+| `get_runtime_depth_rejection(depth, max_depth)` | Runtime depth safety net rejection |
+
+**Derived values:**
+- `DEFAULT_SYSTEM_PROMPT` = `build_root_system_prompt(include_spawn=True)` — backward-compatible alias
+
+---
+
+### 5. `engine/safety/` — Rate Limiting & Safety Guards
 
 A package providing resource protection mechanisms for the agent system. Split into focused sub-modules, with `__init__.py` re-exporting all public classes for backward compatibility.
 
@@ -174,7 +212,6 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 
 | Class | Description |
 |---|---|
-| `ConcurrencyLimiter` | Asyncio.Semaphore wrapper with observable active count |
 | `LaneConcurrencyQueue` | Per-lane (MAIN/SUBAGENT) concurrency control with FIFO queuing via `asyncio.Condition` |
 | `LaneSlot` | Async context manager representing a concurrency slot |
 | `LaneStatus` | Data class for lane status queries |
@@ -244,7 +281,7 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 
 ---
 
-### 5. `engine/time.py` — Time Utilities
+### 6. `engine/time.py` — Time Utilities
 
 Timezone-aware time formatting for the agent framework.
 
@@ -263,11 +300,11 @@ Timezone-aware time formatting for the agent framework.
 
 ---
 
-### 6. `engine/runtime/` — Agent Execution Core
+### 7. `engine/runtime/` — Agent Execution Core
 
 #### `agent.py` — Agent Class
 
-The central execution engine. Each agent owns a session, tool registry, state machine, and sub-agent manager.
+The central execution engine. Each agent owns a session, tool pack, state machine, and event queue. No `SubAgentManager` — spawning is handled by `SpawnTool` within the `ToolPack`.
 
 **State machine:**
 
@@ -290,6 +327,8 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
 
 **Key features:**
 
+- **ToolPack-based tools**: Agent receives a `ToolPack` (immutable tool view) at construction. Tool schemas are depth-filtered by `ToolPack.get_schemas()` (spawn hidden at max depth).
+- **Properties**: `state`, `result`, `event_queue`, `lane_queue`, `tool_pack` — all read-only via properties
 - **Emergency summary**: When iteration limit is reached without a text response, makes one final LLM call WITHOUT tools to force a summary
 - **Summary warning**: Injects a warning message N iterations before the limit
 - **Timestamp injection**: All user messages get timezone-aware timestamps
@@ -312,8 +351,7 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
 
 #### `task_registry.py` — Task Registry
 
-CRUD for `SubagentTask` entries with handler-based notification.
-
+CRUD for `AgentTask` entries with handler-based notification.
 **Key operations:**
 
 | Operation | Description |
@@ -328,7 +366,7 @@ CRUD for `SubagentTask` entries with handler-based notification.
 
 ---
 
-### 7. `engine/providers/` — LLM Provider Layer
+### 8. `engine/providers/` — LLM Provider Layer
 
 #### `llm_provider.py`
 
@@ -392,11 +430,11 @@ Providers are ordered by the insertion order of the `providers` dict (primary fi
 
 ---
 
-### 8. `engine/subagent/` — Sub-Agent System
+### 9. `engine/subagent/` — Sub-Agent System
 
 #### `manager.py` — SubAgentManager
 
-Orchestrates the full child agent lifecycle. Each `Agent` owns one instance.
+Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per agent (not owned by `Agent` directly). Receives `llm_provider` and `tool_pack` at construction and builds child agents directly. Prompt templates for sub-agent system prompts are defined in `engine/prompts.py` (Section 4).
 
 **Key methods:**
 
@@ -406,7 +444,6 @@ Orchestrates the full child agent lifecycle. Each `Agent` owns one instance.
 | `_run_child()` | Background execution with lane slot management |
 | `_on_child_complete()` | Gate-check handler: pending children? pending siblings? → collect results, notify parent |
 | `_format_child_results()` | Format collected child results as JSON prompt |
-| `create_spawn_tool()` | Factory for `SpawnTool` bound to this manager |
 
 **Gate-check logic (`_on_child_complete()`):**
 
@@ -420,7 +457,7 @@ Orchestrates the full child agent lifecycle. Each `Agent` owns one instance.
 
 #### `spawn.py` — SpawnTool
 
-Thin `Tool` wrapper that delegates to `SubAgentManager.spawn()`. Registered in the tool registry as the `spawn` tool, available to agents below `max_depth`.
+`Tool` subclass that lazy-creates a `SubAgentManager` per agent on first `execute()` call. Uses `asyncio.Lock` for concurrency safety. The `SubAgentManager` receives `llm_provider` and `tool_pack` from the parent agent and directly constructs child `Agent` instances. On agent completion, `release()` clears the cached manager.
 
 #### `protocol.py` — Drainable Protocol
 
@@ -437,12 +474,12 @@ Thin `Tool` wrapper that delegates to `SubAgentManager.spawn()`. Registered in t
 
 | Model | Description |
 |---|---|
-| `SubagentTask` | Task entry: task_id, session_id, description, parent references, child_task_ids, result |
+| `AgentTask` | Task entry: task_id, session_id, description, parent references, child_task_ids, result |
 | `CollectedChildResult` | Collected output: task_description + result string |
 
 ---
 
-### 9. `engine/tools/` — Tool System
+### 10. `engine/tools/` — Tool System
 
 #### `base.py`
 
@@ -450,14 +487,28 @@ Thin `Tool` wrapper that delegates to `SubAgentManager.spawn()`. Registered in t
 |---|---|
 | `Tool` | Abstract base class with `name`, `description`, `parameters`, and async `execute()` |
 | `FunctionTool` | Wraps a plain function (sync or async) as a Tool |
-| `ToolRegistry` | Central registry: `register()`, `register_spawn()`, `clone()`, `get()`, `get_schemas()` |
+| `ToolRegistry` | Pure storage: `register()`, `register_many()`, `unregister()`, `get()`, `get_schemas()`, `all_tools()`. No spawn special-casing. |
 | `ToolRegistrationError` | Raised on duplicate/empty tool names |
 
 **Design notes:**
 
-- `spawn` is a system tool managed separately via `register_spawn()`
-- `clone()` copies business tools but NOT the spawn tool (each agent registers its own)
+- `ToolRegistry` is pure storage with no business logic — all context-aware behavior lives in `ToolPack`
 - Schemas follow OpenAI function calling format
+
+#### `pack.py` — ToolPack
+
+| Class | Description |
+|---|---|
+| `ToolPack` | Immutable view over `ToolRegistry` with context-aware schema filtering. Constructed with a list of `Tool` instances. |
+
+**Key methods:**
+
+| Method | Description |
+|---|---|
+| `get(name)` | Get a tool by name. Returns `None` if not found. |
+| `get_schemas(session?)` | Get OpenAI function calling schemas. If session is provided and `depth >= config.max_depth`, the `spawn` schema is filtered out. |
+| `release_spawn(agent_task_id)` | Forward `release()` to `SpawnTool` if present, cleaning up cached `SubAgentManager`. |
+| `__len__` / `__contains__` | Standard container protocol. |
 
 #### `custom/`
 
@@ -468,7 +519,7 @@ Auto-discovered custom tools directory. Place `Tool` subclasses here and they wi
 
 ---
 
-### 10. `engine/logging/` — Logging
+### 11. `engine/logging/` — Logging
 
 #### `sink.py`
 
@@ -491,13 +542,13 @@ Auto-discovered custom tools directory. Place `Tool` subclasses here and they wi
 
 ---
 
-### 11. `tests/` — Test Suite
+### 12. `tests/` — Test Suite
 
 | File | Description |
 |---|---|
-| `test_easy_task.py` | Tests `delegate()` with a Chinese-language research prompt |
-| `test_multilayer_subagent.py` | Tests 3-child × 2-grandchild nesting with random number aggregation |
-| `test_rate_limit_safety.py` | Unit tests for rate limiter deadlock prevention, timeout, and EMA token estimator (13 tests) |
+| `test_easy_task.py` | Tests `delegate()` with a structured city-comparison research prompt |
+| `test_multilayer_subagent.py` | Tests 3-child × 2-grandchild nesting with 3-level data provenance verification via JSONL logs |
+| `test_session_reuse.py` | Unit tests for `delegate()` session reuse — 8 tests covering backward compat, ID preservation, env block refresh, warning logging (all mocked, no live LLM calls) |
 
 Both integration tests use `pytest-asyncio` and call the real `delegate()` function (requires valid `engine.json`).
 
@@ -514,29 +565,33 @@ delegate() (engine/runner.py)
   ├── Provider initialization (providers dict → LLMProviders → primary+fallback ordering)
   ├── Lane queue setup (MAIN:4, SUBAGENT:5)
   ├── Tool discovery (custom tools auto-loaded)
-  └── Agent creation & registration
+  ├── is_tool_enabled filtering + SpawnTool injection
+  └── ToolPack construction → Agent creation & registration
         │
         ▼
   Agent.run()
     ├── State: IDLE → RUNNING
     ├── _execute_cycle()
-    │     ├── _process_tool_calls() ─── LLM chat loop (max 20 iterations)
+    │     ├── _process_tool_calls() ─── LLM chat loop (max 15 iterations)
     │     │     ├── LLMProvider.chat() ──→ FallbackLLMProvider.chat()
     │     │     │                               ├── APIKeyPool.acquire_key()
     │     │     │                               ├── SlidingWindowRateLimiter.acquire() ← estimated_tokens capped to tpm_limit
     │     │     │                               ├── AdaptivePacer.wait_if_needed()
     │     │     │                               └── LLMProvider.chat() (OpenAI SDK)
-    │     │     ├── Tool execution (ToolRegistry → Tool.execute())
-    │     │     └── spawn tool → SubAgentManager.spawn()
-    │     │                       ├── LaneConcurrencyQueue.acquire()
-    │     │                       ├── Create child session + system prompt
-    │     │                       ├── Register in AgentTaskRegistry
-    │     │                       └── asyncio.create_task(_run_child)
+    │     │     ├── Tool execution (ToolPack → Tool.execute())
+    │     │     └── spawn tool → SpawnTool.execute()
+    │     │                       ├── Lazy SubAgentManager init (per agent, asyncio.Lock)
+    │     │                       ├── SubAgentManager.spawn()
+    │     │                       │     ├── LaneConcurrencyQueue.acquire()
+    │     │                       │     ├── Create child session + system prompt
+    │     │                       │     ├── Build child Agent with shared llm_provider + tool_pack
+    │     │                       │     ├── Register in AgentTaskRegistry
+    │     │                       │     └── asyncio.create_task(_run_child)
     │     │
     │     ├── Drain ChildCompletionEvents
     │     └── State decision: WAITING_FOR_CHILDREN or COMPLETED
     │
-    ├── _finish_and_notify() → AgentTaskRegistry.complete()
+    ├── _finish_and_notify() → ToolPack.release_spawn() + AgentTaskRegistry.complete()
     └── Return AgentResult
 ```
 

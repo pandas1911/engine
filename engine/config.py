@@ -63,6 +63,13 @@ class Config:
     # Timezone
     user_timezone: Optional[str] = None
 
+    # Tool enable/disable configuration
+    tools: Dict[str, bool] = field(default_factory=dict)
+
+    def is_tool_enabled(self, tool_name: str) -> bool:
+        """Check if a tool is enabled. Unlisted tools default to enabled."""
+        return self.tools.get(tool_name, True)
+
 
 class ConfigLoader:
 
@@ -133,6 +140,7 @@ class ConfigLoader:
         # Validate primary and fallback references
         primary = ConfigLoader._validate_primary(data, providers, path)
         fallback = ConfigLoader._validate_fallback(data, providers, path)
+        ConfigLoader._validate_tools(data)
 
         # Build kwargs for Config from known fields only (unknown keys ignored)
         known_fields = {
@@ -158,6 +166,7 @@ class ConfigLoader:
             "cooldown_initial_ms",
             "cooldown_max_ms",
             "user_timezone",
+            "tools",
         }
 
         kwargs = {k: v for k, v in data.items() if k in known_fields}
@@ -340,6 +349,20 @@ class ConfigLoader:
             fallback.append(ref)
 
         return fallback
+
+    @staticmethod
+    def _validate_tools(data: dict) -> None:
+        """Validate the 'tools' configuration field if present."""
+        if "tools" not in data:
+            return
+        tools = data["tools"]
+        if not isinstance(tools, dict):
+            raise ValueError("'tools' must be a dictionary mapping tool names to boolean values")
+        for name, enabled in tools.items():
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError(f"Tool name must be a non-empty string, got: {name!r}")
+            if not isinstance(enabled, bool):
+                raise ValueError(f"Tool '{name}' value must be true/false, got: {enabled!r}")
 
 
 _config: Optional[Config] = None

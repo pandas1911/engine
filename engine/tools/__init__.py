@@ -18,5 +18,6 @@ Usage:
 """
 
 from engine.tools.base import Tool, ToolRegistry, ToolRegistrationError, FunctionTool
+from engine.tools.pack import ToolPack
 
-__all__ = ["Tool", "ToolRegistry", "ToolRegistrationError", "FunctionTool"]
+__all__ = ["Tool", "ToolRegistry", "ToolRegistrationError", "FunctionTool", "ToolPack"]

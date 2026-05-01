@@ -10,20 +10,27 @@ import asyncio
 import json
 import re
 import uuid
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from engine.runtime.agent_models import AgentState, Session
-from engine.config import Config
+from engine.config import Config, get_config
 from engine.logging import get_logger
 from engine.providers.provider_models import Lane
-from engine.safety import ConcurrencyLimiter, LaneConcurrencyQueue, ResultTruncator
+from engine.safety import LaneConcurrencyQueue, ResultTruncator
 from .events import AgentEvent, ChildCompletionEvent
 from .subagent_models import CollectedChildResult
+from engine.prompts import (
+    DEPTH_LIMIT_REJECTION,
+    get_subagent_system_prompt,
+    get_spawn_confirmation,
+    get_concurrency_timeout_rejection,
+    get_child_results_prompt,
+    get_child_results_empty_warning,
+)
 from engine.runtime.task_registry import CompleteInfo, AgentTaskRegistry
 from engine.time import TimeProvider
 
 if TYPE_CHECKING:
-    from .spawn import SpawnTool
     from .protocol import Drainable
 
 
@@ -31,7 +38,8 @@ class SubAgentManager:
     """Orchestrates child agent lifecycle: spawn, run, gate-check, notify.
 
     Each Agent instance owns one SubAgentManager. The manager:
-    - Spawns child agents (logic migrated from SpawnTool.execute)
+    - Spawns child agents with shared llm_provider and tool_pack
+    - Constructs child Agents directly (no factory closure)
     - Runs child agents in background tasks (from SpawnTool._run_child_agent)
     - Handles child completion via handler chain (from Registry.complete gate checks)
     - Formats child results for parent consumption (from Agent.run with trigger="children_settled")
@@ -45,8 +53,9 @@ class SubAgentManager:
         agent_task_id: str,
         parent_label: str,
         config: Optional[Config] = None,
-        concurrency_limiter: Optional[ConcurrencyLimiter] = None,  # DEPRECATED, kept for backward compat
-        lane_queue: Optional[LaneConcurrencyQueue] = None,           # NEW
+        lane_queue: Optional["LaneConcurrencyQueue"] = None,
+        llm_provider=None,
+        tool_pack=None,
     ):
         """
         Args:
@@ -56,8 +65,9 @@ class SubAgentManager:
             agent_task_id: THIS agent's task_id
             parent_label: Display label for logging
             config: Runtime configuration (used for result truncation limits)
-            concurrency_limiter: Optional global concurrency limiter (legacy)
-            lane_queue: Optional lane-based concurrency queue (new)
+            lane_queue: Optional lane-based concurrency queue
+            llm_provider: Shared LLM provider for child agent construction
+            tool_pack: Shared ToolPack for child agent construction
         """
         self._task_registry = task_registry
         self._event_queue = event_queue
@@ -65,8 +75,9 @@ class SubAgentManager:
         self._agent_task_id = agent_task_id
         self._parent_label = parent_label
         self._config = config
-        self._concurrency_limiter = concurrency_limiter
         self._lane_queue = lane_queue
+        self._llm_provider = llm_provider
+        self._tool_pack = tool_pack
         self._time_provider = TimeProvider(
             timezone_override=config.user_timezone if config else None
         )
@@ -84,8 +95,6 @@ class SubAgentManager:
         task_desc: str,
         label: str,
         parent_session: Session,
-        config: Config,
-        agent_factory: Callable,
     ) -> str:
         """Create a child agent and start it in the background.
 
@@ -93,12 +102,11 @@ class SubAgentManager:
             task_desc: Task description for the child agent.
             label: Short descriptive label for the child.
             parent_session: The parent agent's session (used for depth tracking).
-            config: Runtime configuration.
-            agent_factory: Callable that creates a child Agent.
 
         Returns:
             Confirmation string on success, or error message on failure.
         """
+        config = get_config()
         if parent_session.depth >= config.max_depth:
             logger = get_logger()
             logger.error(
@@ -110,7 +118,7 @@ class SubAgentManager:
                 event_type="spawn_depth_limit",
                 data={"current_depth": parent_session.depth, "max_depth": config.max_depth}
             )
-            return f"[Spawn Failed] Maximum nesting depth reached (current: {parent_session.depth}/{config.max_depth}). Please complete the task at the current level — no further child agents can be spawned."
+            return DEPTH_LIMIT_REJECTION.format(depth=parent_session.depth, max_depth=config.max_depth)
 
         # Global concurrency gate — acquire BEFORE register
         lane_slot = None
@@ -140,62 +148,11 @@ class SubAgentManager:
                         "label": label,
                     }
                 )
-                return (
-                    "━━━━ Spawn Failed ━━━━\n"
-                    "Task: {task_desc}\n"
-                    "Label: {label}\n"
-                    "Reason: Global concurrency limit reached ({active}/{max}), "
-                    "timed out waiting for a slot after {timeout}s.\n"
-                    "Suggestion: Wait for existing sub-agents to complete and try again, "
-                    "or consider completing this task yourself directly — "
-                    "you have full access to all tools and context needed."
-                ).format(
+                return get_concurrency_timeout_rejection(
                     task_desc=task_desc,
                     label=label,
                     active=active,
-                    max=max_conc,
-                    timeout=config.spawn_timeout,
-                )
-        elif self._concurrency_limiter is not None:
-            try:
-                await asyncio.wait_for(
-                    self._concurrency_limiter.acquire(),
-                    timeout=config.spawn_timeout,
-                )
-            except asyncio.TimeoutError:
-                logger = get_logger()
-                logger.error(
-                    self._parent_label,
-                    "Spawn rejected: global concurrency limit reached | active={}/{}, timed out after {}s | task_desc=\"{}\"".format(
-                        self._concurrency_limiter.active_count,
-                        self._concurrency_limiter.max_concurrent,
-                        config.spawn_timeout,
-                        task_desc,
-                    ),
-                    task_id=self._agent_task_id, state="running", depth=parent_session.depth,
-                    event_type="spawn_concurrency_limit",
-                    data={
-                        "active_count": self._concurrency_limiter.active_count,
-                        "max_concurrent": self._concurrency_limiter.max_concurrent,
-                        "spawn_timeout": config.spawn_timeout,
-                        "task_description": task_desc,
-                        "label": label,
-                    }
-                )
-                return (
-                    "━━━━ Spawn Failed ━━━━\n"
-                    "Task: {task_desc}\n"
-                    "Label: {label}\n"
-                    "Reason: Global concurrency limit reached ({active}/{max}), "
-                    "timed out waiting for a slot after {timeout}s.\n"
-                    "Suggestion: Wait for existing sub-agents to complete and try again, "
-                    "or consider completing this task yourself directly — "
-                    "you have full access to all tools and context needed."
-                ).format(
-                    task_desc=task_desc,
-                    label=label,
-                    active=self._concurrency_limiter.active_count,
-                    max=self._concurrency_limiter.max_concurrent,
+                    max_concurrent=max_conc,
                     timeout=config.spawn_timeout,
                 )
 
@@ -208,7 +165,7 @@ class SubAgentManager:
         )
 
         parent_label = self._parent_label
-        can_spawn = child_session.depth < config.max_depth
+        can_spawn = child_session.depth < config.max_depth and config.is_tool_enabled("spawn")
 
         self._child_counter += 1
         child_index = self._child_counter
@@ -233,47 +190,15 @@ class SubAgentManager:
             }
         )
 
-        system_prompt = f"""# Subagent Context
-
-You are a **subagent** spawned by the {parent_label} for a specific task.
-
-## Your Role
-- You were created to handle: {task_desc}
-- Complete this task. That's your entire purpose.
-- You are NOT the {parent_label}. Don't try to be.
-
-## Rules
-1. **Stay focused** - Do your assigned task, nothing else
-2. **Complete the task** - Your final message will be automatically reported to the {parent_label}
-3. **Be ephemeral** - You may be terminated after task completion. That's fine.
-4. **Trust push-based completion** - Descendant results are auto-announced back to you
-
-## Output Format
-
-Your final response is delivered **verbatim** to your parent agent. Every token enters the parent's context — be ruthless about brevity.
-
-### Principles
-1. **No filler** — No greetings, no "Here is...", no "I have completed...", no meta-commentary. Start with the result.
-2. **No reasoning traces** — The parent needs your conclusion, not how you got there.
-3. **No repetition** — If the parent gave you information in the task description, do not echo it back.
-
-### Structure by Task Type
-Adapt your output to the task. Use what fits, drop what doesn't:
-
-- **Find / Retrieve** → Bullet list of key findings
-- **Build / Modify** → The output
-- **Analyze / Judge** → Conclusion first, then brief supporting points (includes yes/no questions — answer on line 1)
-- **Execute** → One line per action: what you did + result
-
-A one-line summary at the top is encouraged when the result is complex — skip it for simple answers.
-
-## Sub-Agent Spawning
-{"You CAN spawn your own sub-agents." if can_spawn else "You are a leaf worker and CANNOT spawn further sub-agents."}
-
-## Session Context
-- Label: {label}
-- Depth: {child_session.depth}/{config.max_depth}
-        - Your task ID: {task_id}"""
+        system_prompt = get_subagent_system_prompt(
+            parent_label=parent_label,
+            task_desc=task_desc,
+            depth=child_session.depth,
+            max_depth=config.max_depth,
+            can_spawn=can_spawn,
+            task_id=task_id,
+            label=display_name,
+        )
 
         env_block = self._time_provider.format_system_env_block()
         system_prompt = f"{system_prompt}\n\n{env_block}"
@@ -289,9 +214,18 @@ A one-line summary at the top is encouraged when the result is complex — skip 
             depth=child_session.depth,
         )
 
-        child_agent = agent_factory(
-            child_session, config, self._task_registry, self._agent_task_id, task_id,
+        from engine.runtime.agent import Agent
+
+        child_agent = Agent(
+            session=child_session,
+            config=config,
+            llm_provider=self._llm_provider,
+            task_registry=self._task_registry,
+            tool_pack=self._tool_pack,
+            task_id=task_id,
+            parent_task_id=self._agent_task_id,
             label=display_name,
+            lane_queue=self._lane_queue,
         )
 
         await self._task_registry.set_agent(task_id, child_agent)
@@ -300,11 +234,7 @@ A one-line summary at the top is encouraged when the result is complex — skip 
             self._run_child(child_agent, task_id, task_desc, child_session.depth, display_name, lane_slot=lane_slot)
         )
 
-        return f"""━━━━ Spawned Task ━━━━
-Task ID: {task_id}
-Agent Label: {label}
-
-Sub-agent is now executing in the background. Upon completion, you will be automatically re-activated and receive a full result report. You may proceed with other independent tasks or simply end your current turn."""
+        return get_spawn_confirmation(task_id=task_id, label=label)
 
     # ------------------------------------------------------------------
     # _build_path_index() — generates dotted path index for child labels
@@ -354,15 +284,11 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
             display_name: Display name for the child agent.
             lane_slot: Optional LaneSlot from LaneConcurrencyQueue for auto-release.
         """
-        try:
-            if lane_slot is not None:
-                async with lane_slot:
-                    await self._execute_child(agent, task_id, task_desc, depth, display_name)
-            else:
+        if lane_slot is not None:
+            async with lane_slot:
                 await self._execute_child(agent, task_id, task_desc, depth, display_name)
-        finally:
-            if lane_slot is None and self._concurrency_limiter is not None:
-                self._concurrency_limiter.release()
+        else:
+            await self._execute_child(agent, task_id, task_desc, depth, display_name)
 
     async def _execute_child(
         self,
@@ -584,11 +510,11 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
             Formatted string ready to be injected as a user message.
         """
         if not child_results:
-            return "[WARNING] All sub-agents have completed their tasks, but no results were collected."
+            return get_child_results_empty_warning()
 
         max_len = self._config.max_result_length if self._config else 4000
-        findings_prompt = "All sub-agents have completed their tasks. Below are their results.\n\n"
 
+        entries = []
         for task_id, info in child_results.items():
             truncated = ResultTruncator.truncate(info.result, max_len)
             if len(info.result) > max_len:
@@ -602,24 +528,12 @@ Sub-agent is now executing in the background. Upon completion, you will be autom
                     task_id=task_id,
                     data={"original_length": len(info.result), "max_length": max_len},
                 )
-            entry = {
+            entries.append(json.dumps({
                 "task_id": task_id,
                 "task": info.task_description,
                 "result": truncated,
-            }
-            findings_prompt += json.dumps(entry, ensure_ascii=False) + "\n"
+            }, ensure_ascii=False))
 
-        return findings_prompt
+        return get_child_results_prompt("\n".join(entries))
 
-    # ------------------------------------------------------------------
-    # create_spawn_tool() — factory for the thin SpawnTool wrapper
-    # ------------------------------------------------------------------
 
-    def create_spawn_tool(self) -> "SpawnTool":
-        """Create a SpawnTool instance bound to this manager.
-
-        Returns:
-            A SpawnTool that delegates to this manager's spawn() method.
-        """
-        from .spawn import SpawnTool
-        return SpawnTool(self)
