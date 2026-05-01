@@ -50,10 +50,16 @@ def _discover_custom_tools() -> List:
                 if issubclass(obj, Tool) and obj is not Tool:
                     try:
                         tools.append(obj())
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as exc:
+                        _logger.warning(
+                            "Failed to instantiate tool class %s from %s: %s",
+                            name, module_name, exc,
+                        )
+        except Exception as exc:
+            _logger.warning(
+                "Failed to import custom tool module %s: %s",
+                module_name, exc,
+            )
 
     _custom_tools_cache = tools
     return tools
@@ -195,7 +201,7 @@ async def delegate(
             t for t in all_tool_instances
             if config.is_tool_enabled(t.name)
         ]
-
+    
         # Conditionally add SpawnTool
         if config.is_tool_enabled("spawn"):
             enabled_tools.append(SpawnTool())
