@@ -39,6 +39,12 @@ ENV/
 *.swo
 *~
 
+# Playwright MCP cache
+.playwright-mcp/
+
+# Chat sessions (local data)
+sessions/
+
 # Tests
 dist/
 build/

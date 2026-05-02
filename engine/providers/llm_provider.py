@@ -5,7 +5,7 @@ This module provides abstract and concrete LLM provider implementations.
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from openai import AsyncOpenAI
 
@@ -59,19 +59,10 @@ class BaseLLMProvider(ABC):
         tools: List[Dict],
         agent_label: str = "Root",
         task_id: str = "unknown",
-    ) -> None:
-        """Stream a chat request to the LLM.
-
-        Args:
-            messages: List of message dictionaries with 'role' and 'content'
-            tools: List of tool definitions available to the LLM
-            agent_label: Label for the agent making the request
-            task_id: ID of the task being executed
-
-        Raises:
-            NotImplementedError: Streaming is not yet implemented
-        """
+    ) -> AsyncGenerator[Any, None]:
+        """Stream a chat request to the LLM, yielding StreamChunk objects."""
         pass
+        yield  # make it a generator
 
 
 class LLMProvider(BaseLLMProvider):
@@ -331,19 +322,62 @@ class LLMProvider(BaseLLMProvider):
         tools: List[Dict],
         agent_label: str = "Root",
         task_id: str = "unknown",
-    ) -> None:
-        """Stream a chat request to the LLM.
+    ) -> AsyncGenerator[Any, None]:
+        """Stream a chat request, yielding StreamChunk objects."""
+        from engine.providers.thinking_strategy import get_thinking_extractor
+        from engine.providers.streaming_models import StreamChunk
 
-        Args:
-            messages: List of message dictionaries with 'role' and 'content'
-            tools: List of tool definitions available to the LLM
-            agent_label: Label for the agent making the request
-            task_id: ID of the task being executed
+        params: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+        }
+        if tools:
+            params["tools"] = tools
+        params.update(self._model_params)
 
-        Raises:
-            NotImplementedError: Streaming is not yet implemented
-        """
-        raise NotImplementedError("Streaming not yet implemented")
+        logger = get_logger()
+        logger.info(
+            agent_label,
+            "Streaming LLM API request | model={}, message_count={}, has_tools={}".format(
+                self.model, len(messages), bool(tools)
+            ),
+            task_id=task_id, state="running", depth=0,
+            event_type="llm_stream_request",
+            data={"model": self.model, "message_count": len(messages),
+                  "has_tools": bool(tools)},
+        )
+
+        # One extractor per stream — stateful, matched to provider
+        extractor = get_thinking_extractor(str(self.client.base_url))
+
+        try:
+            response = await self.client.chat.completions.create(**params)
+
+            async for chunk in response:
+                if not chunk.choices:
+                    continue
+
+                delta = chunk.choices[0].delta
+
+                # Thinking + text extraction (one call)
+                result = extractor.extract(delta)
+
+                # Tool call deltas
+                tool_call_deltas = None
+                if hasattr(delta, "tool_calls") and delta.tool_calls:
+                    tool_call_deltas = delta.tool_calls
+
+                yield StreamChunk(
+                    delta_text=result.response_text,
+                    thinking_text=result.thinking_text,
+                    tool_calls=tool_call_deltas,
+                    finish_reason=chunk.choices[0].finish_reason,
+                    thinking_source=result.source,
+                )
+
+        except Exception as e:
+            raise LLMProviderError(e) from e
 
 
 __all__ = ["BaseLLMProvider", "LLMProvider", "LLMProviderError"]

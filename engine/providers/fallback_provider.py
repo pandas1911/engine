@@ -6,10 +6,11 @@ falling back between providers when all keys are exhausted.
 """
 
 import asyncio
-from typing import Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from engine.providers.llm_provider import BaseLLMProvider, LLMProvider, LLMProviderError
 from engine.providers.provider_models import LLMResponse, ErrorClass
+from engine.providers.streaming_models import StreamChunk
 from engine.safety import APIKeyPool, SlidingWindowRateLimiter, AdaptivePacer, RetryEngine
 from engine.safety.token_estimator import EmaTokenEstimator
 from engine.logging import get_logger
@@ -224,21 +225,141 @@ class FallbackLLMProvider(BaseLLMProvider):
         tools: List[Dict],
         agent_label: str = "Root",
         task_id: str = "unknown",
-    ) -> None:
-        profile_name = self._key_pool.acquire_key()
-        self._current_profile = profile_name
+    ) -> AsyncGenerator[StreamChunk, None]:
+        """Stream a chat request with key rotation and provider fallback.
 
-        provider = self._providers.get(profile_name)
-        if provider is None:
-            raise RuntimeError(
-                "No provider found for profile: {}".format(profile_name)
+        Follows the same safety mechanism pattern as chat():
+        acquire_key -> rate_limiter -> pacer -> stream_chat -> report.
+        On rate limit: rotate key and continue loop.
+        On other errors: release reservation and raise.
+        """
+        estimated_tokens = self._estimate_tokens(messages, tools)
+        max_iterations = max(
+            50,
+            len(self._providers) * (self._max_profile_rotations + 1) * 2,
+        )
+
+        for iteration in range(max_iterations):
+            profile_name = self._key_pool.acquire_key()
+            self._current_profile = profile_name
+
+            provider = self._providers.get(profile_name)
+            if provider is None:
+                raise RuntimeError(
+                    "No provider found for profile: {}".format(profile_name)
+                )
+
+            provider_name = profile_name.split("/", 1)[0]
+
+            limiter = self._rate_limiters.get(provider_name)
+            reservation_id = 0
+            if limiter is not None:
+                reservation_id = await limiter.acquire(estimated_tokens=estimated_tokens)
+
+            pacer = self._pacers.get(provider_name)
+            if pacer is not None:
+                await pacer.wait_if_needed()
+
+            try:
+                async for chunk in provider.stream_chat(
+                    messages=messages,
+                    tools=tools,
+                    agent_label=agent_label,
+                    task_id=task_id,
+                ):
+                    yield chunk
+
+                self._key_pool.report_success(profile_name)
+                self._rotation_count = 0
+
+                if limiter is not None:
+                    usage = provider.get_last_usage()
+                    if usage is not None:
+                        prompt_tokens, completion_tokens = usage
+                        total_tokens = prompt_tokens + completion_tokens
+                        await limiter.record_usage(total_tokens, reservation_id=reservation_id)
+                        self._token_estimator.feedback(estimated_tokens, total_tokens)
+
+                if pacer is not None:
+                    snapshot = provider.get_rate_limit_snapshot()
+                    if snapshot is not None:
+                        pacer.update_from_snapshot(snapshot)
+
+                self._logger.info(
+                    agent_label,
+                    "Fallback stream success | profile={}".format(profile_name),
+                    task_id=task_id,
+                    state="running",
+                    event_type="fallback_stream_success",
+                    data={"profile": profile_name},
+                )
+
+                return
+
+            except asyncio.CancelledError:
+                if limiter is not None and reservation_id > 0:
+                    await limiter.release_reserved(reservation_id)
+                raise
+
+            except LLMProviderError as e:
+                error_class = self._retry_engine.classify_error(e.original_error)
+
+                if error_class == ErrorClass.NON_RETRYABLE:
+                    self._logger.warning(
+                        agent_label,
+                        "Non-retryable stream error | profile={} error={}".format(
+                            profile_name, str(e)[:200]
+                        ),
+                        task_id=task_id,
+                        state="error",
+                        event_type="fallback_stream_non_retryable",
+                        data={
+                            "profile": profile_name,
+                            "error_type": type(e.original_error).__name__,
+                            "error_message": str(e)[:500],
+                        },
+                    )
+                    if limiter is not None and reservation_id > 0:
+                        await limiter.release_reserved(reservation_id)
+                    raise
+
+                if error_class == ErrorClass.RETRYABLE:
+                    if limiter is not None and reservation_id > 0:
+                        await limiter.release_reserved(reservation_id)
+                    raise
+
+                if error_class == ErrorClass.RATE_LIMITED:
+                    retry_after = self._retry_engine.extract_retry_after(e.original_error)
+                    self._key_pool.report_rate_limited(profile_name, retry_after)
+                    if limiter is not None and reservation_id > 0:
+                        await limiter.release_reserved(reservation_id)
+                    self._rotation_count += 1
+
+                    self._logger.warning(
+                        "RateControl",
+                        "Rate limited on stream | profile={} rotation={}/{}".format(
+                            profile_name,
+                            self._rotation_count,
+                            self._max_profile_rotations,
+                        ),
+                        event_type="fallback_stream_rate_limited",
+                        data={
+                            "profile": profile_name,
+                            "rotation_count": self._rotation_count,
+                        },
+                    )
+
+                    if self._rotation_count > self._max_profile_rotations:
+                        self._rotation_count = 0
+
+                    continue
+
+        raise LLMProviderError(
+            RuntimeError(
+                "Fallback stream provider exceeded maximum iterations ({})".format(
+                    max_iterations
+                )
             )
-
-        await provider.stream_chat(
-            messages=messages,
-            tools=tools,
-            agent_label=agent_label,
-            task_id=task_id,
         )
 
     def get_active_provider_info(self) -> Dict:

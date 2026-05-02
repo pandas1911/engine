@@ -14,6 +14,9 @@ uv sync
 
 # 开发环境（含测试依赖）
 uv sync --extra dev
+
+# 含前端服务依赖
+uv sync --extra dev --extra server
 ```
 
 ## 运行测试
@@ -39,3 +42,11 @@ print(result.content)
 ## 配置
 
 在项目根目录创建 `engine.json` 配置 LLM Provider 和模型参数，参考 `engine.json.example`。
+
+## 启动前端服务
+
+```bash
+uv run serve app.main:app --port 8765
+```
+
+浏览器打开 `http://localhost:8765` 即可使用聊天界面。
