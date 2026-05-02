@@ -70,21 +70,35 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
     done_event = asyncio.Event()
 
     def on_engine_event(event_name: str, data: dict) -> None:
-        if event_name == "llm_chunk":
-            if data.get("thinking_text"):
-                event_queue.put_nowait({
-                    "event": "thinking_delta",
-                    "data": json.dumps({"text": data["thinking_text"]}),
-                })
-            if data.get("delta_text"):
-                event_queue.put_nowait({
-                    "event": "text_delta",
-                    "data": json.dumps({"text": data["delta_text"]}),
-                })
+        if event_name == "part_new":
+            event_queue.put_nowait({
+                "event": "part_new",
+                "data": json.dumps({
+                    "part_id": data["part_id"],
+                    "part_type": data["part_type"],
+                    "text": data.get("text", ""),
+                }),
+            })
+        elif event_name == "part_delta":
+            event_queue.put_nowait({
+                "event": "part_delta",
+                "data": json.dumps({
+                    "part_id": data["part_id"],
+                    "text": data.get("text", ""),
+                }),
+            })
+        elif event_name == "part_close":
+            event_queue.put_nowait({
+                "event": "part_close",
+                "data": json.dumps({
+                    "part_id": data["part_id"],
+                }),
+            })
         elif event_name == "tool_start":
             event_queue.put_nowait({
                 "event": "tool_call_start",
                 "data": json.dumps({
+                    "part_id": data.get("part_id", 0),
                     "tool_name": data["tool_name"],
                     "arguments": data.get("arguments", {}),
                     "call_id": data.get("call_id", ""),
@@ -94,6 +108,7 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
             event_queue.put_nowait({
                 "event": "tool_call_result",
                 "data": json.dumps({
+                    "part_id": data.get("part_id", 0),
                     "tool_name": data["tool_name"],
                     "result": data.get("result", ""),
                     "call_id": data.get("call_id", ""),
@@ -104,7 +119,6 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
                 "event": "done",
                 "data": json.dumps({
                     "success": data.get("success", True),
-                    "content": data.get("content", ""),
                     "session_id": session_id,
                 }),
             })
