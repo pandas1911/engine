@@ -67,6 +67,10 @@ class Agent:
         ] = []  # Deferred event queue (native list, Swift Array equivalent)
         self._tool_pack = tool_pack or ToolPack([])
         self._event_callback = event_callback
+        # Part-tracking state for streaming events (reset per _get_llm_response call)
+        self._part_counter = 0
+        self._active_reasoning_part_id: Optional[int] = None
+        self._active_text_part_id: Optional[int] = None
 
         get_logger().info(
             self.label,
@@ -182,6 +186,9 @@ class Agent:
                 depth=self.session.depth,
             )
 
+        self._active_reasoning_part_id = None
+        self._active_text_part_id = None
+
         collected_content = ""
         tool_call_buffers: dict[int, dict] = {}
         collected_tool_calls: list[ToolCall] = []
@@ -193,10 +200,60 @@ class Agent:
             task_id=self.task_id,
             depth=self.session.depth,
         ):
-            self._emit("llm_chunk", {
-                "thinking_text": chunk.thinking_text,
-                "delta_text": chunk.delta_text,
-            })
+            thinking = chunk.thinking_text or ""
+            delta = chunk.delta_text or ""
+
+            if thinking:
+                if self._active_reasoning_part_id is None:
+                    self._part_counter += 1
+                    self._active_reasoning_part_id = self._part_counter
+                    self._emit("part_new", {
+                        "part_id": self._part_counter,
+                        "part_type": "reasoning",
+                        "text": thinking,
+                    })
+                else:
+                    self._emit("part_delta", {
+                        "part_id": self._active_reasoning_part_id,
+                        "text": thinking,
+                    })
+
+            # Close reasoning part when transitioning to text (whether or not
+            # this chunk also carries thinking content — covers both same-chunk
+            # and cross-chunk reasoning→text transitions).
+            if delta and self._active_reasoning_part_id is not None:
+                self._emit("part_close", {
+                    "part_id": self._active_reasoning_part_id,
+                })
+                self._active_reasoning_part_id = None
+
+            if delta:
+                if self._active_text_part_id is None:
+                    self._part_counter += 1
+                    self._active_text_part_id = self._part_counter
+                    self._emit("part_new", {
+                        "part_id": self._part_counter,
+                        "part_type": "text",
+                        "text": delta,
+                    })
+                else:
+                    self._emit("part_delta", {
+                        "part_id": self._active_text_part_id,
+                        "text": delta,
+                    })
+
+            if chunk.finish_reason:
+                if self._active_reasoning_part_id is not None:
+                    self._emit("part_close", {
+                        "part_id": self._active_reasoning_part_id,
+                    })
+                    self._active_reasoning_part_id = None
+                if self._active_text_part_id is not None:
+                    self._emit("part_close", {
+                        "part_id": self._active_text_part_id,
+                    })
+                    self._active_text_part_id = None
+
             collected_content += chunk.delta_text
             if chunk.tool_calls:
                 for tc_delta in chunk.tool_calls:
@@ -341,16 +398,20 @@ class Agent:
             )
 
             for tool_call in response.tool_calls:
+                self._part_counter += 1
+                part_id = self._part_counter
                 self._emit("tool_start", {
                     "tool_name": tool_call.name,
                     "arguments": tool_call.arguments,
                     "call_id": tool_call.call_id,
+                    "part_id": part_id,
                 })
                 result = await self._execute_tool(tool_call)
                 self._emit("tool_end", {
                     "tool_name": tool_call.name,
                     "result": str(result)[:2000],
                     "call_id": tool_call.call_id,
+                    "part_id": part_id,
                 })
                 safe_result = result or "[Tool returned empty content]"
                 self.session.add_message("tool", safe_result, tool_call_id=tool_call.call_id)
@@ -497,6 +558,8 @@ class Agent:
         """
         if self.state != AgentState.RUNNING:
             return self._final_result or ""
+
+        self._part_counter = 0
 
         await self._process_tool_calls()
 
