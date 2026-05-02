@@ -6,8 +6,8 @@
     <title>Engine Chat</title>
     <style>
         :root {
-            --font-size-small: 13px;
-            --font-size-base: 14px;
+            --font-size-small: 14px;
+            --font-size-base: 15px;
             --text-strong: #e4e4e7;
             --text-base: #a1a1aa;
             --text-weak: #71717a;
@@ -39,7 +39,7 @@
             display: flex;
             flex-direction: column;
             height: 100vh;
-            max-width: 780px;
+            max-width: 100%;
             margin: 0 auto;
         }
 
@@ -54,7 +54,7 @@
         }
 
         header h1 {
-            font-size: 15px;
+            font-size: 16px;
             font-weight: 600;
             letter-spacing: -0.01em;
             color: var(--text-strong);
@@ -116,16 +116,18 @@
             display: flex;
             flex-direction: column;
             gap: 12px;
-            max-width: 85%;
+            max-width: 100%;
         }
 
         /* Thinking content */
-        .thinking-section {
+        .parts-section {
             display: none;
         }
 
-        .thinking-section.visible {
-            display: block;
+        .parts-section.visible {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
         }
 
         .thinking-content {
@@ -139,12 +141,6 @@
         }
 
         /* Tool calls */
-        .tools-section {
-            display: flex;
-            flex-direction: column;
-            gap: 2px;
-        }
-
         .tool-row {
             display: flex;
             align-items: center;
@@ -255,7 +251,7 @@
         .text-content {
             color: var(--text-strong);
             font-size: var(--font-size-base);
-            line-height: 1.6;
+            line-height: 1.7;
             word-break: break-word;
         }
 
@@ -368,6 +364,20 @@
             color: var(--text-weaker);
             font-size: var(--font-size-small);
         }
+
+        @media (min-width: 768px) {
+            #app {
+                max-width: 800px;
+                margin: 0 auto;
+            }
+        }
+
+        @media (min-width: 1536px) {
+            #app {
+                max-width: 1000px;
+                margin: 0 auto;
+            }
+        }
     </style>
 </head>
 <body>
@@ -474,25 +484,24 @@
             const wrapper = document.createElement('div');
             wrapper.className = 'message assistant';
 
-            const thinkingSection = document.createElement('div');
-            thinkingSection.className = 'thinking-section';
-            const thinkingContent = document.createElement('div');
-            thinkingContent.className = 'thinking-content';
-            thinkingSection.appendChild(thinkingContent);
-
-            const toolsSection = document.createElement('div');
-            toolsSection.className = 'tools-section';
+            const partsContainer = document.createElement('div');
+            partsContainer.className = 'parts-section';
 
             const textContent = document.createElement('div');
             textContent.className = 'text-content';
 
-            wrapper.appendChild(thinkingSection);
-            wrapper.appendChild(toolsSection);
+            wrapper.appendChild(partsContainer);
             wrapper.appendChild(textContent);
             messagesEl.appendChild(wrapper);
             autoScroll();
 
-            return { wrapper, thinkingSection, thinkingContent, toolsSection, textContent };
+            return { wrapper, partsContainer, textContent };
+        }
+
+        function getLastThinkingElement(partsContainer) {
+            const last = partsContainer.lastElementChild;
+            if (last && last.classList.contains('thinking-content')) return last;
+            return null;
         }
 
         // Create a flat inline tool row
@@ -570,7 +579,7 @@
         }
 
         // Handle SSE events and update DOM
-        function handleSSEEvent(eventType, data, thinkingSection, thinkingContent, toolsSection, textContent) {
+        function handleSSEEvent(eventType, data, partsContainer, textContent) {
             switch (eventType) {
                 case 'agent_start': {
                     // Session management
@@ -581,8 +590,18 @@
                 }
 
                 case 'thinking_delta': {
-                    thinkingSection.classList.add('visible');
-                    thinkingContent.textContent += data.text || '';
+                    const text = data.text || '';
+                    if (!text) break;
+                    const lastThinking = getLastThinkingElement(partsContainer);
+                    if (lastThinking) {
+                        lastThinking.textContent += text;
+                    } else {
+                        const thinkingDiv = document.createElement('div');
+                        thinkingDiv.className = 'thinking-content';
+                        thinkingDiv.textContent = text;
+                        partsContainer.appendChild(thinkingDiv);
+                    }
+                    partsContainer.classList.add('visible');
                     autoScroll();
                     break;
                 }
@@ -605,8 +624,9 @@
 
                     // Store reference by call ID for later updates
                     row.dataset.callId = data.call_id || '';
-                    toolsSection.appendChild(row);
-                    toolsSection.appendChild(detail);
+                    partsContainer.appendChild(row);
+                    partsContainer.appendChild(detail);
+                    partsContainer.classList.add('visible');
                     autoScroll();
                     break;
                 }
@@ -614,7 +634,7 @@
                 case 'tool_call_result': {
                     // Find the matching tool row by call_id
                     const callId = data.call_id || '';
-                    const rows = toolsSection.querySelectorAll('.tool-row');
+                    const rows = partsContainer.querySelectorAll('.tool-row');
                     let targetRow = null;
                     let targetDetail = null;
 
@@ -679,7 +699,7 @@
             appendUserMessage(message);
 
             // Prepare assistant message container
-            const { thinkingSection, thinkingContent, toolsSection, textContent } = createAssistantMessage();
+            const { partsContainer, textContent } = createAssistantMessage();
             fullText = '';
 
             try {
@@ -722,7 +742,7 @@
                         } else if (line.startsWith('data: ')) {
                             try {
                                 const data = JSON.parse(line.slice(6));
-                                handleSSEEvent(eventType, data, thinkingSection, thinkingContent, toolsSection, textContent);
+                                handleSSEEvent(eventType, data, partsContainer, textContent);
                             } catch (e) {
                                 console.warn('Failed to parse SSE data:', line, e);
                             }
@@ -742,7 +762,7 @@
                         } else if (line.startsWith('data: ')) {
                             try {
                                 const data = JSON.parse(line.slice(6));
-                                handleSSEEvent(eventType, data, thinkingSection, thinkingContent, toolsSection, textContent);
+                                handleSSEEvent(eventType, data, partsContainer, textContent);
                             } catch (e) {
                                 // Skip
                             }
