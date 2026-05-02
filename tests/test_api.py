@@ -8,14 +8,14 @@ from app.main import app
 from app._state import set_streaming
 
 
-async def _mock_stream_simple(task_description, **kwargs):
-    """Async generator that mimics delegate_stream without real LLM calls."""
-    from engine.providers.streaming_models import (
-        AgentStartEvent, TextDeltaEvent, DoneEvent,
-    )
-    yield AgentStartEvent(data={"session_id": "test-sess"})
-    yield TextDeltaEvent(data={"text": "Response"})
-    yield DoneEvent(data={"success": True, "content": "Response", "session_id": "test-sess"})
+async def _mock_delegate_simple(task_description, **kwargs):
+    """Mock delegate() that simulates engine events via callback."""
+    event_callback = kwargs.get("event_callback")
+    if event_callback:
+        event_callback("llm_chunk", {"thinking_text": "", "delta_text": "Response"})
+        event_callback("agent_done", {"success": True, "content": "Response"})
+    from engine.runtime.agent_models import AgentResult
+    return AgentResult(content="Response", success=True)
 
 
 @pytest_asyncio.fixture
@@ -46,18 +46,18 @@ async def test_health_returns_ok(client):
 # ── Chat SSE ──
 
 @pytest.mark.asyncio
-@patch("engine.runner.delegate_stream")
-async def test_chat_returns_sse(mock_stream, client):
-    mock_stream.side_effect = _mock_stream_simple
+@patch("engine.runner.delegate")
+async def test_chat_returns_sse(mock_delegate, client):
+    mock_delegate.side_effect = _mock_delegate_simple
     response = await client.post("/api/chat", json={"message": "Hi"})
     assert response.status_code == 200
     assert "text/event-stream" in response.headers.get("content-type", "")
 
 
 @pytest.mark.asyncio
-@patch("engine.runner.delegate_stream")
-async def test_chat_includes_session_id_in_done(mock_stream, client):
-    mock_stream.side_effect = _mock_stream_simple
+@patch("engine.runner.delegate")
+async def test_chat_includes_session_id_in_done(mock_delegate, client):
+    mock_delegate.side_effect = _mock_delegate_simple
     response = await client.post("/api/chat", json={"message": "Hi"})
     assert response.status_code == 200
     # _event_generator overrides session_id with chat_{uuid}, verify it's present
