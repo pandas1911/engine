@@ -123,6 +123,27 @@ class ThinkingCapture:
             response_text="".join(response_parts),
         )
 
+    def flush(self) -> CaptureResult:
+        """Flush any remaining buffered content when stream ends.
+
+        Handles partial tag characters that were being accumulated
+        in MAYBE_OPEN or MAYBE_CLOSE states when the stream terminated.
+        """
+        if self.state == ThinkState.MAYBE_CLOSE:
+            # Buffer contains partial closing tag chars that are actually thinking content
+            buffered = self._buffer
+            self._buffer = ""
+            self.state = ThinkState.INSIDE
+            return CaptureResult(thinking_text=buffered)
+        elif self.state == ThinkState.MAYBE_OPEN:
+            # Buffer contains partial opening tag chars that are actually response content
+            buffered = self._buffer
+            self._buffer = ""
+            self.state = ThinkState.OUTSIDE
+            return CaptureResult(response_text=buffered)
+        # INSIDE or OUTSIDE: no buffered content to flush
+        return CaptureResult()
+
     def _find_tag_end(self, text: str, start: int) -> Optional[int]:
         """Find the position of '>' after a tag prefix. Returns index or None."""
         for i in range(start, len(text)):

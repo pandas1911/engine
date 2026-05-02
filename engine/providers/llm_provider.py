@@ -378,6 +378,13 @@ class LLMProvider(BaseLLMProvider):
                     thinking_source=result.source,
                 )
 
+            flush_result = extractor.flush()
+            if flush_result.thinking_text or flush_result.response_text:
+                yield StreamChunk(
+                    delta_text=flush_result.response_text,
+                    thinking_text=flush_result.thinking_text,
+                )
+
         except Exception as e:
             raise LLMProviderError(e) from e
 

@@ -31,6 +31,11 @@ class ThinkingExtractor(ABC):
         """Extract thinking/response text from a streaming chunk delta."""
         ...
 
+    @abstractmethod
+    def flush(self) -> ThinkingResult:
+        """Flush any remaining buffered content when stream ends."""
+        ...
+
 
 # ── Strategy: reasoning_details (MiniMax) ──
 
@@ -61,6 +66,9 @@ class ReasoningDetailsExtractor(ThinkingExtractor):
             source="reasoning_details" if thinking_text else None,
         )
 
+    def flush(self) -> ThinkingResult:
+        return ThinkingResult()
+
 
 # ── Strategy: reasoning_content (Qwen/DashScope) ──
 
@@ -83,6 +91,9 @@ class ReasoningContentExtractor(ThinkingExtractor):
             source="reasoning_content" if thinking_text else None,
         )
 
+    def flush(self) -> ThinkingResult:
+        return ThinkingResult()
+
 
 # ── Strategy: tag_parser (default/DeepSeek) ──
 
@@ -99,6 +110,14 @@ class TagParserExtractor(ThinkingExtractor):
         if not (hasattr(delta, "content") and delta.content):
             return ThinkingResult()
         parsed = self._capture.feed(delta.content)
+        return ThinkingResult(
+            thinking_text=parsed.thinking_text,
+            response_text=parsed.response_text,
+            source="tag_parser" if parsed.thinking_text else None,
+        )
+
+    def flush(self) -> ThinkingResult:
+        parsed = self._capture.flush()
         return ThinkingResult(
             thinking_text=parsed.thinking_text,
             response_text=parsed.response_text,
