@@ -55,6 +55,23 @@ engine/
 ├── tests/                     # Test suite
 │   ├── test_easy_task.py      # Simple delegation test
 │   └── test_multilayer_subagent.py  # Multi-layer nesting test
+├── app/                       # FastAPI web application
+│   ├── main.py                # FastAPI app factory, static file mount
+│   ├── _state.py              # Global streaming lock (single-request enforcement)
+│   ├── session_store.py       # In-memory session persistence (save/load Session objects)
+│   ├── models/
+│   │   ├── __init__.py
+│   │   └── sse_events.py      # Part-based SSE event dataclasses (StreamEvent + 8 event types)
+│   └── routers/
+│       ├── __init__.py
+│       ├── chat.py            # POST /chat SSE endpoint with Part-based event mapping
+│       ├── sessions.py        # Session management endpoints
+│       └── health.py          # Health check endpoint
+├── web/                       # Frontend static files
+│   ├── index.html             # Minimal HTML shell
+│   ├── styles.css             # CSS styles (extracted from monolithic index.html)
+│   ├── app.js                 # Main JS: SSE handling, Part data model, UI logic
+│   └── parts.js               # Part rendering: create/update/close DOM elements
 ├── docs/                      # Documentation
 │   └── codebase-structure.md  # This file
 ├── logs/                      # Runtime log output (JSONL)
@@ -332,6 +349,7 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
 - **Emergency summary**: When iteration limit is reached without a text response, makes one final LLM call WITHOUT tools to force a summary
 - **Summary warning**: Injects a warning message N iterations before the limit
 - **Timestamp injection**: All user messages get timezone-aware timestamps
+- **Part-based streaming**: Agent tracks `_part_counter`, `_active_reasoning_part_id`, and `_active_text_part_id` per `_get_llm_response()` call. Emits `part_new`, `part_delta`, `part_close`, `tool_start`, and `tool_end` events via `_event_callback` for SSE streaming.
 
 #### `agent_models.py` — Data Models
 
@@ -554,6 +572,68 @@ Both integration tests use `pytest-asyncio` and call the real `delegate()` funct
 
 ---
 
+### 13. `app/` — FastAPI Web Application
+
+A FastAPI application providing a chat UI and SSE-based streaming API. Static files are served from the `web/` directory.
+
+#### `main.py` — Application Factory
+
+Creates the FastAPI app, mounts static files from `web/`, and includes routers for chat, sessions, and health.
+
+#### `_state.py` — Global Streaming Lock
+
+Enforces single-request-at-a-time processing via a boolean flag (`set_streaming` / `is_streaming`). Returns HTTP 429 if a request arrives while another is streaming.
+
+#### `session_store.py` — Session Persistence
+
+In-memory store for `Session` objects. Provides `save(session)` and `load(session_id)` methods. Used by the chat endpoint to persist conversations across requests.
+
+#### `models/sse_events.py` — Part-based SSE Event Dataclasses
+
+Defines the wire-format SSE event types as dataclasses inheriting from `StreamEvent`:
+
+| Dataclass | `type` Field | Data Fields |
+|---|---|---|
+| `StreamEvent` | (base) | `type`, `data` |
+| `AgentStartEvent` | `agent_start` | — |
+| `PartNewEvent` | `part_new` | `part_id`, `part_type`, `text` |
+| `PartDeltaEvent` | `part_delta` | `part_id`, `text` |
+| `PartCloseEvent` | `part_close` | `part_id` |
+| `ToolCallStartEvent` | `tool_call_start` | `part_id`, `tool_name`, `arguments`, `call_id` |
+| `ToolCallResultEvent` | `tool_call_result` | `part_id`, `tool_name`, `result`, `call_id` |
+| `DoneEvent` | `done` | `success`, `session_id` |
+| `ErrorEvent` | `error` | `message`, `session_id` |
+
+9 dataclasses total (1 base `StreamEvent` + 8 event types). The `DoneEvent` does not include a `content` field — text content is delivered incrementally via Part events.
+
+#### `routers/chat.py` — Chat SSE Endpoint
+
+Exposes `POST /chat` which streams agent responses via Server-Sent Events.
+
+**Event translation (`on_engine_event()`):**
+
+The `on_engine_event()` callback maps internal engine events to SSE wire format:
+
+| Engine Event | SSE Event | Notes |
+|---|---|---|
+| `part_new` | `part_new` | Direct pass-through |
+| `part_delta` | `part_delta` | Direct pass-through |
+| `part_close` | `part_close` | Direct pass-through |
+| `tool_start` | `tool_call_start` | Renamed for clarity on wire |
+| `tool_end` | `tool_call_result` | Renamed for clarity on wire |
+| `agent_done` | `done` | Adds `session_id` |
+| `error` | `error` | Adds `session_id` |
+
+Additionally, `agent_start` is emitted immediately when the SSE connection opens, before `delegate()` begins execution.
+
+**Session management:**
+
+- `ChatRequest` accepts optional `session_id` for conversation continuity
+- `_truncate_session()` removes oldest complete turns when non-system messages exceed `MAX_MESSAGES` (20)
+- Sessions are saved to `SessionStore` after streaming completes
+
+---
+
 ## Data Flow
 
 ```
@@ -573,12 +653,19 @@ delegate() (engine/runner.py)
     ├── State: IDLE → RUNNING
     ├── _execute_cycle()
     │     ├── _process_tool_calls() ─── LLM chat loop (max 15 iterations)
-    │     │     ├── LLMProvider.chat() ──→ FallbackLLMProvider.chat()
-    │     │     │                               ├── APIKeyPool.acquire_key()
-    │     │     │                               ├── SlidingWindowRateLimiter.acquire() ← estimated_tokens capped to tpm_limit
-    │     │     │                               ├── AdaptivePacer.wait_if_needed()
-    │     │     │                               └── LLMProvider.chat() (OpenAI SDK)
+    │     │     ├── _get_llm_response() ──→ FallbackLLMProvider.stream_chat()
+    │     │     │     ├── Part tracking (per streaming call):
+    │     │     │     │     ├── _part_counter (incrementing int, reset per call)
+    │     │     │     │     ├── thinking_text → part_new(reasoning) / part_delta / part_close
+    │     │     │     │     ├── delta_text → part_new(text) / part_delta / part_close
+    │     │     │     │     └── finish_reason → close all active Parts
+    │     │     │     └── FallbackLLMProvider.stream_chat()
+    │     │     │           ├── APIKeyPool.acquire_key()
+    │     │     │           ├── SlidingWindowRateLimiter.acquire() ← estimated_tokens capped to tpm_limit
+    │     │     │           ├── AdaptivePacer.wait_if_needed()
+    │     │     │           └── LLMProvider.stream_chat() (OpenAI SDK)
     │     │     ├── Tool execution (ToolPack → Tool.execute())
+    │     │     │     └── per tool call → _part_counter++ → tool_start(part_id) → execute → tool_end(part_id)
     │     │     └── spawn tool → SpawnTool.execute()
     │     │                       ├── Lazy SubAgentManager init (per agent, asyncio.Lock)
     │     │                       ├── SubAgentManager.spawn()
@@ -622,3 +709,46 @@ delegate() (engine/runner.py)
 | `markdownify` | HTML-to-Markdown conversion (used by web fetch tool) |
 | `ddgs` | Metasearch library aggregating 9+ search engines with automatic failover (used by web search tool) |
 | `pytest` + `pytest-asyncio` | Test framework with async support |
+
+---
+
+## SSE Protocol
+
+The frontend communicates with the backend via Server-Sent Events (SSE) using a Part-based streaming model.
+
+### Event Types
+
+| SSE Event | Direction | Data |
+|---|---|---|
+| `agent_start` | Server → Client | `{session_id: str}` |
+| `part_new` | Server → Client | `{part_id: int, part_type: "text"|"reasoning", text: str}` |
+| `part_delta` | Server → Client | `{part_id: int, text: str}` |
+| `part_close` | Server → Client | `{part_id: int}` |
+| `tool_call_start` | Server → Client | `{part_id: int, tool_name: str, arguments: dict, call_id: str}` |
+| `tool_call_result` | Server → Client | `{part_id: int, tool_name: str, result: str, call_id: str}` |
+| `done` | Server → Client | `{success: bool, session_id: str}` |
+| `error` | Server → Client | `{message: str, session_id: str}` |
+
+### Part Types
+
+| Part Type | Description |
+|---|---|
+| `text` | LLM response text content |
+| `reasoning` | LLM thinking/reasoning content |
+| `tool` | Tool call execution (implicit via `tool_call_start`/`part_id`) |
+
+### Part ID Assignment
+
+Part IDs are simple incrementing integers assigned by `Agent._get_llm_response()` per streaming call. The counter resets at the start of each `_get_llm_response()` invocation, ensuring clean state even if `FallbackLLMProvider` retries internally.
+
+### Event Flow
+
+```
+Agent._get_llm_response()
+  ├── thinking_text → part_new(reasoning) → part_delta → ... → part_close
+  ├── delta_text → part_new(text) → part_delta → ... → part_close
+  └── finish_reason → close any active Parts
+
+Agent._process_tool_calls()
+  └── per tool call → _part_counter++ → tool_start(part_id) → execute → tool_end(part_id)
+```
