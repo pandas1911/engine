@@ -59,6 +59,7 @@ class BaseLLMProvider(ABC):
         tools: List[Dict],
         agent_label: str = "Root",
         task_id: str = "unknown",
+        depth: int = 0,
     ) -> AsyncGenerator[Any, None]:
         """Stream a chat request to the LLM, yielding StreamChunk objects."""
         pass
@@ -322,10 +323,11 @@ class LLMProvider(BaseLLMProvider):
         tools: List[Dict],
         agent_label: str = "Root",
         task_id: str = "unknown",
+        depth: int = 0,
     ) -> AsyncGenerator[Any, None]:
         """Stream a chat request, yielding StreamChunk objects."""
         from engine.providers.thinking_strategy import get_thinking_extractor
-        from engine.providers.streaming_models import StreamChunk
+        from engine.providers.chunk_types import StreamChunk
 
         params: Dict[str, Any] = {
             "model": self.model,
@@ -342,7 +344,7 @@ class LLMProvider(BaseLLMProvider):
             "Streaming LLM API request | model={}, message_count={}, has_tools={}".format(
                 self.model, len(messages), bool(tools)
             ),
-            task_id=task_id, state="running", depth=0,
+            task_id=task_id, state="running", depth=depth,
             event_type="llm_stream_request",
             data={"model": self.model, "message_count": len(messages),
                   "has_tools": bool(tools)},

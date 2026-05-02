@@ -10,7 +10,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from engine.providers.llm_provider import BaseLLMProvider, LLMProvider, LLMProviderError
 from engine.providers.provider_models import LLMResponse, ErrorClass
-from engine.providers.streaming_models import StreamChunk
+from engine.providers.chunk_types import StreamChunk
 from engine.safety import APIKeyPool, SlidingWindowRateLimiter, AdaptivePacer, RetryEngine
 from engine.safety.token_estimator import EmaTokenEstimator
 from engine.logging import get_logger
@@ -225,6 +225,7 @@ class FallbackLLMProvider(BaseLLMProvider):
         tools: List[Dict],
         agent_label: str = "Root",
         task_id: str = "unknown",
+        depth: int = 0,
     ) -> AsyncGenerator[StreamChunk, None]:
         """Stream a chat request with key rotation and provider fallback.
 
@@ -266,6 +267,7 @@ class FallbackLLMProvider(BaseLLMProvider):
                     tools=tools,
                     agent_label=agent_label,
                     task_id=task_id,
+                    depth=depth,
                 ):
                     yield chunk
 
