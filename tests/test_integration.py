@@ -19,9 +19,11 @@ from engine.runtime.agent_models import AgentResult, Session
 async def _mock_delegate_success(task_description, **kwargs):
     event_callback = kwargs.get("event_callback")
     if event_callback:
-        event_callback("llm_chunk", {"thinking_text": "Let me think...", "delta_text": ""})
-        event_callback("llm_chunk", {"thinking_text": "", "delta_text": "Hello "})
-        event_callback("llm_chunk", {"thinking_text": "", "delta_text": "World"})
+        event_callback("part_new", {"part_id": 1, "part_type": "reasoning", "text": "Let me think..."})
+        event_callback("part_close", {"part_id": 1})
+        event_callback("part_new", {"part_id": 2, "part_type": "text", "text": "Hello "})
+        event_callback("part_delta", {"part_id": 2, "text": "World"})
+        event_callback("part_close", {"part_id": 2})
         event_callback("agent_done", {"success": True, "content": "Hello World"})
     return AgentResult(
         content="Hello World",
@@ -33,10 +35,12 @@ async def _mock_delegate_success(task_description, **kwargs):
 async def _mock_delegate_with_tools(task_description, **kwargs):
     event_callback = kwargs.get("event_callback")
     if event_callback:
-        event_callback("llm_chunk", {"thinking_text": "", "delta_text": ""})
-        event_callback("tool_start", {"tool_name": "web_search", "arguments": {"query": "Python"}, "call_id": "call_123"})
-        event_callback("tool_end", {"tool_name": "web_search", "result": "Python is great", "call_id": "call_123"})
-        event_callback("llm_chunk", {"thinking_text": "", "delta_text": "Based on search results..."})
+        event_callback("part_new", {"part_id": 1, "part_type": "text", "text": ""})
+        event_callback("part_close", {"part_id": 1})
+        event_callback("tool_start", {"tool_name": "web_search", "arguments": {"query": "Python"}, "call_id": "call_123", "part_id": 2})
+        event_callback("tool_end", {"tool_name": "web_search", "result": "Python is great", "call_id": "call_123", "part_id": 2})
+        event_callback("part_new", {"part_id": 3, "part_type": "text", "text": "Based on search results..."})
+        event_callback("part_close", {"part_id": 3})
         event_callback("agent_done", {"success": True, "content": "Based on search results..."})
     return AgentResult(
         content="Based on search results...",
@@ -96,7 +100,7 @@ async def test_health_endpoint(client):
 @pytest.mark.asyncio
 @patch("engine.runner.delegate")
 async def test_chat_sse_stream_format(mock_delegate, client):
-    """POST /api/chat returns SSE stream with correct event types and ordering."""
+    """POST /api/chat returns SSE stream with correct Part event types and ordering."""
     mock_delegate.side_effect = _mock_delegate_success
 
     response = await client.post("/api/chat", json={"message": "Hello"})
@@ -106,36 +110,36 @@ async def test_chat_sse_stream_format(mock_delegate, client):
     events = _parse_sse_events(response.text)
 
     event_types = [e["event"] for e in events]
-    # agent_start is emitted by _event_generator, not delegate
     assert event_types[0] == "agent_start"
-    assert "thinking_delta" in event_types
-    assert "text_delta" in event_types
+    assert "part_new" in event_types
+    assert "part_delta" in event_types
+    assert "part_close" in event_types
     assert event_types[-1] == "done"
 
-    thinking_idx = event_types.index("thinking_delta")
-    text_idx = event_types.index("text_delta")
-    assert thinking_idx < text_idx
+    assert "thinking_delta" not in event_types
+    assert "text_delta" not in event_types
 
 
 @pytest.mark.asyncio
 @patch("engine.runner.delegate")
-async def test_chat_thinking_deltas(mock_delegate, client):
-    """Thinking delta events carry reasoning text."""
+async def test_chat_part_new_carries_thinking_text(mock_delegate, client):
+    """part_new events for reasoning Parts carry thinking text."""
     mock_delegate.side_effect = _mock_delegate_success
 
     response = await client.post("/api/chat", json={"message": "Hello"})
     assert response.status_code == 200
 
     events = _parse_sse_events(response.text)
-    thinking_events = [e for e in events if e["event"] == "thinking_delta"]
-    assert len(thinking_events) >= 1
-    assert thinking_events[0]["data"]["text"] == "Let me think..."
+    part_new_events = [e for e in events if e["event"] == "part_new"]
+    reasoning_parts = [e for e in part_new_events if e["data"]["part_type"] == "reasoning"]
+    assert len(reasoning_parts) >= 1
+    assert reasoning_parts[0]["data"]["text"] == "Let me think..."
 
 
 @pytest.mark.asyncio
 @patch("engine.runner.delegate")
 async def test_chat_tool_calls(mock_delegate, client):
-    """Tool call events appear in correct start -> result sequence with matching call_id."""
+    """Tool call events appear in correct start -> result sequence with part_id."""
     mock_delegate.side_effect = _mock_delegate_with_tools
 
     response = await client.post("/api/chat", json={"message": "Search Python"})
@@ -152,9 +156,11 @@ async def test_chat_tool_calls(mock_delegate, client):
     tool_start = next(e for e in events if e["event"] == "tool_call_start")
     assert tool_start["data"]["tool_name"] == "web_search"
     assert tool_start["data"]["call_id"] == "call_123"
+    assert "part_id" in tool_start["data"]
 
     tool_result = next(e for e in events if e["event"] == "tool_call_result")
     assert tool_result["data"]["call_id"] == "call_123"
+    assert tool_result["data"]["part_id"] == tool_start["data"]["part_id"]
 
 
 @pytest.mark.asyncio
@@ -206,3 +212,42 @@ async def test_chat_concurrent_rejection(client):
     assert response.status_code == 429
     body = response.json()
     assert "error" in body
+
+
+@pytest.mark.asyncio
+@patch("engine.runner.delegate")
+async def test_chat_part_ordering_invariant(mock_delegate, client):
+    """part_new always appears before part_delta for the same part_id."""
+    mock_delegate.side_effect = _mock_delegate_success
+
+    response = await client.post("/api/chat", json={"message": "Hello"})
+    assert response.status_code == 200
+
+    events = _parse_sse_events(response.text)
+    part_events = [e for e in events if e["event"] in ("part_new", "part_delta")]
+
+    seen_part_ids = set()
+    for e in part_events:
+        pid = e["data"]["part_id"]
+        if e["event"] == "part_new":
+            assert pid not in seen_part_ids, f"Duplicate part_new for part_id {pid}"
+            seen_part_ids.add(pid)
+        elif e["event"] == "part_delta":
+            assert pid in seen_part_ids, f"part_delta for unknown part_id {pid}"
+
+
+@pytest.mark.asyncio
+@patch("engine.runner.delegate")
+async def test_chat_done_event_no_content(mock_delegate, client):
+    """Done event should not include content field."""
+    mock_delegate.side_effect = _mock_delegate_success
+
+    response = await client.post("/api/chat", json={"message": "Hello"})
+    assert response.status_code == 200
+
+    events = _parse_sse_events(response.text)
+    done_events = [e for e in events if e["event"] == "done"]
+    assert len(done_events) >= 1
+    assert "content" not in done_events[0]["data"]
+    assert "session_id" in done_events[0]["data"]
+    assert done_events[0]["data"]["success"] is True

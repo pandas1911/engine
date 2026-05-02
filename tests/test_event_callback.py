@@ -150,6 +150,105 @@ async def test_get_llm_response_emits_chunks():
 
     await agent._get_llm_response()
 
-    assert callback.call_count == 2
-    callback.assert_any_call("llm_chunk", {"thinking_text": "hmm", "delta_text": ""})
-    callback.assert_any_call("llm_chunk", {"thinking_text": "", "delta_text": "answer"})
+    assert callback.call_count == 3
+    callback.assert_any_call("part_new", {"part_id": 1, "part_type": "reasoning", "text": "hmm"})
+    callback.assert_any_call("part_close", {"part_id": 1})
+    callback.assert_any_call("part_new", {"part_id": 2, "part_type": "text", "text": "answer"})
+
+
+@pytest.mark.asyncio
+async def test_dual_content_chunk_produces_correct_parts():
+    """When a single chunk has both thinking and text, reasoning closes before text opens."""
+    callback = MagicMock()
+    agent = _create_test_agent(event_callback=callback)
+
+    chunks = [
+        StreamChunk(delta_text="answer", thinking_text="hmm"),
+    ]
+    agent.llm.stream_chat = MagicMock(return_value=_async_iter(chunks))
+
+    await agent._get_llm_response()
+
+    assert callback.call_count == 3
+    # Order: part_new(reasoning) -> part_close(reasoning) -> part_new(text)
+    calls = [c.args for c in callback.call_args_list]
+    assert calls[0] == ("part_new", {"part_id": 1, "part_type": "reasoning", "text": "hmm"})
+    assert calls[1] == ("part_close", {"part_id": 1})
+    assert calls[2] == ("part_new", {"part_id": 2, "part_type": "text", "text": "answer"})
+
+
+@pytest.mark.asyncio
+async def test_empty_chunks_produce_no_part_events():
+    """Chunks with no content should not create any Part events."""
+    callback = MagicMock()
+    agent = _create_test_agent(event_callback=callback)
+
+    chunks = [
+        StreamChunk(delta_text="", thinking_text=""),
+        StreamChunk(delta_text="", thinking_text=""),
+    ]
+    agent.llm.stream_chat = MagicMock(return_value=_async_iter(chunks))
+
+    await agent._get_llm_response()
+
+    assert callback.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_finish_reason_closes_active_parts():
+    """finish_reason should emit part_close for any active Parts."""
+    callback = MagicMock()
+    agent = _create_test_agent(event_callback=callback)
+
+    chunks = [
+        StreamChunk(delta_text="Hello"),
+        StreamChunk(delta_text=" World", finish_reason="stop"),
+    ]
+    agent.llm.stream_chat = MagicMock(return_value=_async_iter(chunks))
+
+    await agent._get_llm_response()
+
+    calls = [c.args for c in callback.call_args_list]
+    # part_new(text, id=1) -> part_delta(id=1) -> part_close(id=1)
+    assert calls[0] == ("part_new", {"part_id": 1, "part_type": "text", "text": "Hello"})
+    assert calls[1] == ("part_delta", {"part_id": 1, "text": " World"})
+    assert calls[2] == ("part_close", {"part_id": 1})
+
+
+@pytest.mark.asyncio
+async def test_tool_events_include_part_id():
+    """Tool start/end events should include part_id."""
+    callback = MagicMock()
+    agent = _create_test_agent(event_callback=callback)
+
+    func_delta = MagicMock()
+    func_delta.name = "search"
+    func_delta.arguments = '{"q":"test"}'
+
+    tc = MagicMock()
+    tc.index = 0
+    tc.id = "call_abc"
+    tc.function = func_delta
+
+    chunks = [
+        StreamChunk(delta_text="", thinking_text="", tool_calls=[tc]),
+        StreamChunk(delta_text="", thinking_text="", tool_calls=[tc], finish_reason="stop"),
+    ]
+    agent.llm.stream_chat = MagicMock(return_value=_async_iter(chunks))
+    agent.llm.chat = AsyncMock(return_value=LLMResponse(content="done"))
+
+    mock_tool = MagicMock()
+    mock_tool.name = "search"
+    agent._tool_pack = MagicMock()
+    agent._tool_pack.get.return_value = mock_tool
+    mock_tool.execute = AsyncMock(return_value="search results")
+
+    await agent._process_tool_calls()
+
+    tool_start_calls = [c for c in callback.call_args_list if c.args[0] == "tool_start"]
+    tool_end_calls = [c for c in callback.call_args_list if c.args[0] == "tool_end"]
+    assert len(tool_start_calls) >= 1
+    assert len(tool_end_calls) >= 1
+    assert "part_id" in tool_start_calls[0].args[1]
+    assert "part_id" in tool_end_calls[0].args[1]
+    assert tool_start_calls[0].args[1]["part_id"] == tool_end_calls[0].args[1]["part_id"]

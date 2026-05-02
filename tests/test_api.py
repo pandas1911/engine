@@ -12,7 +12,8 @@ async def _mock_delegate_simple(task_description, **kwargs):
     """Mock delegate() that simulates engine events via callback."""
     event_callback = kwargs.get("event_callback")
     if event_callback:
-        event_callback("llm_chunk", {"thinking_text": "", "delta_text": "Response"})
+        event_callback("part_new", {"part_id": 1, "part_type": "text", "text": "Response"})
+        event_callback("part_close", {"part_id": 1})
         event_callback("agent_done", {"success": True, "content": "Response"})
     from engine.runtime.agent_models import AgentResult
     return AgentResult(content="Response", success=True)
