@@ -6,7 +6,7 @@ This module provides the Agent class with async callbacks and error propagation.
 import asyncio
 import json
 import uuid
-from typing import Any, AsyncGenerator, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .agent_models import AgentState, ErrorCategory, AgentError, Session
 from engine.providers.provider_models import ToolCall
@@ -44,6 +44,7 @@ class Agent:
         parent_task_id: Optional[str] = None,
         label: Optional[str] = None,
         lane_queue: Optional[LaneConcurrencyQueue] = None,
+        event_callback: Optional[Any] = None,
     ):
         self.session = session
         self.config = config
@@ -65,6 +66,7 @@ class Agent:
             AgentEvent
         ] = []  # Deferred event queue (native list, Swift Array equivalent)
         self._tool_pack = tool_pack or ToolPack([])
+        self._event_callback = event_callback
 
         get_logger().info(
             self.label,
@@ -97,6 +99,11 @@ class Agent:
         if self._event_queue:
             return self._event_queue.pop(0)
         return None
+
+    def _emit(self, event_name: str, data: Any) -> None:
+        """Emit an event to the registered callback. No-op if no callback."""
+        if self._event_callback is not None:
+            self._event_callback(event_name, data)
 
     @property
     def event_queue(self) -> List[AgentEvent]:
@@ -160,117 +167,69 @@ class Agent:
             await self._abort(e)
             return self._final_result
 
-    async def run_streaming(
-        self,
-        task_description: str,
-    ) -> AsyncGenerator[Any, None]:
-        """Streaming version of run(). Yields StreamEvent objects."""
-        from engine.providers.streaming_models import (
-            ThinkingDeltaEvent, TextDeltaEvent,
-            ToolCallStartEvent, ToolCallResultEvent,
-        )
+    async def _get_llm_response(self) -> "LLMResponse":
+        from engine.providers.provider_models import LLMResponse, ToolCall
 
-        self.session.add_message("user", task_description)
-        self.state_machine.trigger("start")
+        messages = self.session.get_messages()
+        tools = self._get_tool_schemas()
 
-        full_response = ""
-
-        for iteration in range(self.MAX_TOOL_ITERATIONS):
-            messages = self.session.get_messages()
-            tool_schemas = self._get_tool_schemas()
-
-            collected_content = ""
-            collected_tool_calls: list = []
-            tool_call_buffers: dict = {}
-
-            async for chunk in self.llm.stream_chat(
+        if self._event_callback is None:
+            return await self.llm.chat(
                 messages=messages,
-                tools=tool_schemas,
+                tools=tools,
                 agent_label=self.label,
                 task_id=self.task_id,
-            ):
-                if chunk.thinking_text:
-                    yield ThinkingDeltaEvent(data={"text": chunk.thinking_text})
-
-                if chunk.delta_text:
-                    collected_content += chunk.delta_text
-                    full_response += chunk.delta_text
-                    yield TextDeltaEvent(data={"text": chunk.delta_text})
-
-                if chunk.tool_calls:
-                    for tc_delta in chunk.tool_calls:
-                        idx = tc_delta.index
-                        if idx not in tool_call_buffers:
-                            tool_call_buffers[idx] = {
-                                "name": "", "arguments": "", "call_id": ""
-                            }
-                        if hasattr(tc_delta, 'id') and tc_delta.id:
-                            tool_call_buffers[idx]["call_id"] = tc_delta.id
-                        if hasattr(tc_delta, 'function') and tc_delta.function:
-                            if tc_delta.function.name:
-                                tool_call_buffers[idx]["name"] += tc_delta.function.name
-                            if tc_delta.function.arguments:
-                                tool_call_buffers[idx]["arguments"] += tc_delta.function.arguments
-
-                if chunk.finish_reason:
-                    for idx in sorted(tool_call_buffers.keys()):
-                        buf = tool_call_buffers[idx]
-                        args = {}
-                        if buf["arguments"]:
-                            try:
-                                args = json.loads(buf["arguments"])
-                            except json.JSONDecodeError:
-                                args = {"raw": buf["arguments"]}
-                        collected_tool_calls.append(ToolCall(
-                            name=buf["name"],
-                            arguments=args,
-                            call_id=buf["call_id"],
-                        ))
-
-            if not collected_tool_calls:
-                if collected_content:
-                    self.session.add_message("assistant", collected_content)
-                    self._final_result = collected_content
-                else:
-                    self._final_result = "[WARNING] No text response was generated by the agent."
-                self.state_machine.trigger("finish")
-                break
-
-            tool_calls_for_msg = [
-                {
-                    "id": tc.call_id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": json.dumps(tc.arguments)
-                        if isinstance(tc.arguments, dict)
-                        else tc.arguments,
-                    },
-                }
-                for tc in collected_tool_calls
-            ]
-            self.session.add_message(
-                "assistant", collected_content or "", tool_calls=tool_calls_for_msg
+                depth=self.session.depth,
             )
 
-            for tc in collected_tool_calls:
-                yield ToolCallStartEvent(data={
-                    "tool_name": tc.name,
-                    "arguments": tc.arguments,
-                })
+        collected_content = ""
+        tool_call_buffers: dict[int, dict] = {}
+        collected_tool_calls: list[ToolCall] = []
 
-                result = await self._execute_tool(tc)
+        async for chunk in self.llm.stream_chat(
+            messages=messages,
+            tools=tools,
+            agent_label=self.label,
+            task_id=self.task_id,
+            depth=self.session.depth,
+        ):
+            self._emit("llm_chunk", {
+                "thinking_text": chunk.thinking_text,
+                "delta_text": chunk.delta_text,
+            })
+            collected_content += chunk.delta_text
+            if chunk.tool_calls:
+                for tc_delta in chunk.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tool_call_buffers:
+                        tool_call_buffers[idx] = {"name": "", "arguments": "", "call_id": ""}
+                    if hasattr(tc_delta, 'id') and tc_delta.id:
+                        tool_call_buffers[idx]["call_id"] = tc_delta.id
+                    if hasattr(tc_delta, 'function') and tc_delta.function:
+                        if tc_delta.function.name:
+                            tool_call_buffers[idx]["name"] += tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            tool_call_buffers[idx]["arguments"] += tc_delta.function.arguments
+            if chunk.finish_reason:
+                collected_tool_calls.clear()
+                for idx in sorted(tool_call_buffers.keys()):
+                    buf = tool_call_buffers[idx]
+                    args: dict = {}
+                    if buf["arguments"]:
+                        try:
+                            args = json.loads(buf["arguments"])
+                        except json.JSONDecodeError:
+                            args = {"raw": buf["arguments"]}
+                    collected_tool_calls.append(ToolCall(
+                        name=buf["name"],
+                        arguments=args,
+                        call_id=buf["call_id"],
+                    ))
 
-                yield ToolCallResultEvent(data={
-                    "tool_name": tc.name,
-                    "result": str(result)[:2000],
-                })
-
-                safe_result = result or "[Tool returned empty content]"
-                self.session.add_message("tool", safe_result, tool_call_id=tc.call_id)
-        else:
-            self._final_result = full_response or "[WARNING] Maximum tool call iterations reached."
-            self.state_machine.trigger("finish")
+        return LLMResponse(
+            content=collected_content,
+            tool_calls=collected_tool_calls,
+        )
 
     async def _process_tool_calls(self) -> None:
         """Process tool calls from the LLM."""
@@ -327,13 +286,7 @@ class Agent:
                 },
             )
 
-            response = await self.llm.chat(
-                messages=self.session.get_messages(),
-                tools=self._get_tool_schemas(),
-                agent_label=self.label,
-                task_id=self.task_id,
-                depth=self.session.depth,
-            )
+            response = await self._get_llm_response()
 
             if not response.has_tool_calls():
                 get_logger().info(
@@ -388,8 +341,17 @@ class Agent:
             )
 
             for tool_call in response.tool_calls:
+                self._emit("tool_start", {
+                    "tool_name": tool_call.name,
+                    "arguments": tool_call.arguments,
+                    "call_id": tool_call.call_id,
+                })
                 result = await self._execute_tool(tool_call)
-                # Prevent empty content — some LLM APIs reject content="" with 422
+                self._emit("tool_end", {
+                    "tool_name": tool_call.name,
+                    "result": str(result)[:2000],
+                    "call_id": tool_call.call_id,
+                })
                 safe_result = result or "[Tool returned empty content]"
                 self.session.add_message("tool", safe_result, tool_call_id=tool_call.call_id)
 
@@ -717,6 +679,9 @@ class Agent:
                 pass
 
         # Step 4: _completion_event.set() (best effort)
+        self._emit("error", {
+            "message": "{}: {}".format(type(error).__name__, str(error)),
+        })
         try:
             self._completion_event.set()
         except Exception:
@@ -757,6 +722,12 @@ class Agent:
         get_logger().state_change(
             self.label, prev_state.value, self.state.value, "finish",
             task_id=self.task_id, state=self.state.value, depth=self.session.depth)
+
+        self._emit("agent_done", {
+            "success": True,
+            "content": self._final_result or "",
+        })
+
         self._completion_event.set()
 
         # Release SpawnTool cached SubAgentManager for this agent
