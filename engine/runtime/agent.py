@@ -17,6 +17,7 @@ from engine.subagent.events import AgentEvent, ChildCompletionEvent
 from .state import AgentStateMachine
 from engine.tools.pack import ToolPack
 from engine.providers.llm_provider import LLMProviderError
+from engine.runtime.streaming_handler import StreamingHandler
 from engine.logging import get_logger
 from engine.safety import LaneConcurrencyQueue
 from engine.prompts import get_summary_warning, get_emergency_summary_prompt
@@ -44,7 +45,7 @@ class Agent:
         parent_task_id: Optional[str] = None,
         label: Optional[str] = None,
         lane_queue: Optional[LaneConcurrencyQueue] = None,
-        event_callback: Optional[Any] = None,
+        streaming_handler: Optional[StreamingHandler] = None,
     ):
         self.session = session
         self.config = config
@@ -66,11 +67,7 @@ class Agent:
             AgentEvent
         ] = []  # Deferred event queue (native list, Swift Array equivalent)
         self._tool_pack = tool_pack or ToolPack([])
-        self._event_callback = event_callback
-        # Part-tracking state for streaming events (reset per _get_llm_response call)
-        self._part_counter = 0
-        self._active_reasoning_part_id: Optional[int] = None
-        self._active_text_part_id: Optional[int] = None
+        self._streaming_handler = streaming_handler
 
         get_logger().info(
             self.label,
@@ -105,9 +102,9 @@ class Agent:
         return None
 
     def _emit(self, event_name: str, data: Any) -> None:
-        """Emit an event to the registered callback. No-op if no callback."""
-        if self._event_callback is not None:
-            self._event_callback(event_name, data)
+        """Emit an event via the streaming handler. No-op if no handler."""
+        if self._streaming_handler is not None:
+            self._streaming_handler.emit(event_name, data)
 
     @property
     def event_queue(self) -> List[AgentEvent]:
@@ -172,12 +169,12 @@ class Agent:
             return self._final_result
 
     async def _get_llm_response(self) -> "LLMResponse":
-        from engine.providers.provider_models import LLMResponse, ToolCall
+        from engine.providers.provider_models import LLMResponse
 
         messages = self.session.get_messages()
         tools = self._get_tool_schemas()
 
-        if self._event_callback is None:
+        if self._streaming_handler is None:
             return await self.llm.chat(
                 messages=messages,
                 tools=tools,
@@ -186,12 +183,7 @@ class Agent:
                 depth=self.session.depth,
             )
 
-        self._active_reasoning_part_id = None
-        self._active_text_part_id = None
-
-        collected_content = ""
-        tool_call_buffers: dict[int, dict] = {}
-        collected_tool_calls: list[ToolCall] = []
+        self._streaming_handler.reset()
 
         async for chunk in self.llm.stream_chat(
             messages=messages,
@@ -200,92 +192,11 @@ class Agent:
             task_id=self.task_id,
             depth=self.session.depth,
         ):
-            thinking = chunk.thinking_text or ""
-            delta = chunk.delta_text or ""
-
-            if thinking:
-                if self._active_reasoning_part_id is None:
-                    self._part_counter += 1
-                    self._active_reasoning_part_id = self._part_counter
-                    self._emit("part_new", {
-                        "part_id": self._part_counter,
-                        "part_type": "reasoning",
-                        "text": thinking,
-                    })
-                else:
-                    self._emit("part_delta", {
-                        "part_id": self._active_reasoning_part_id,
-                        "text": thinking,
-                    })
-
-            # Close reasoning part when transitioning to text (whether or not
-            # this chunk also carries thinking content — covers both same-chunk
-            # and cross-chunk reasoning→text transitions).
-            if delta and self._active_reasoning_part_id is not None:
-                self._emit("part_close", {
-                    "part_id": self._active_reasoning_part_id,
-                })
-                self._active_reasoning_part_id = None
-
-            if delta:
-                if self._active_text_part_id is None:
-                    self._part_counter += 1
-                    self._active_text_part_id = self._part_counter
-                    self._emit("part_new", {
-                        "part_id": self._part_counter,
-                        "part_type": "text",
-                        "text": delta,
-                    })
-                else:
-                    self._emit("part_delta", {
-                        "part_id": self._active_text_part_id,
-                        "text": delta,
-                    })
-
-            if chunk.finish_reason:
-                if self._active_reasoning_part_id is not None:
-                    self._emit("part_close", {
-                        "part_id": self._active_reasoning_part_id,
-                    })
-                    self._active_reasoning_part_id = None
-                if self._active_text_part_id is not None:
-                    self._emit("part_close", {
-                        "part_id": self._active_text_part_id,
-                    })
-                    self._active_text_part_id = None
-
-            collected_content += chunk.delta_text
-            if chunk.tool_calls:
-                for tc_delta in chunk.tool_calls:
-                    idx = tc_delta.index
-                    if idx not in tool_call_buffers:
-                        tool_call_buffers[idx] = {"name": "", "arguments": "", "call_id": ""}
-                    if hasattr(tc_delta, 'id') and tc_delta.id:
-                        tool_call_buffers[idx]["call_id"] = tc_delta.id
-                    if hasattr(tc_delta, 'function') and tc_delta.function:
-                        if tc_delta.function.name:
-                            tool_call_buffers[idx]["name"] += tc_delta.function.name
-                        if tc_delta.function.arguments:
-                            tool_call_buffers[idx]["arguments"] += tc_delta.function.arguments
-            if chunk.finish_reason:
-                collected_tool_calls.clear()
-                for idx in sorted(tool_call_buffers.keys()):
-                    buf = tool_call_buffers[idx]
-                    args: dict = {}
-                    if buf["arguments"]:
-                        try:
-                            args = json.loads(buf["arguments"])
-                        except json.JSONDecodeError:
-                            args = {"raw": buf["arguments"]}
-                    collected_tool_calls.append(ToolCall(
-                        name=buf["name"],
-                        arguments=args,
-                        call_id=buf["call_id"],
-                    ))
+            self._streaming_handler.on_chunk(chunk)
 
         return LLMResponse(
-            content=collected_content,
-            tool_calls=collected_tool_calls,
+            content=self._streaming_handler.get_content(),
+            tool_calls=self._streaming_handler.get_tool_calls(),
         )
 
     async def _process_tool_calls(self) -> None:
@@ -371,7 +282,7 @@ class Agent:
                     "type": "function",
                     "function": {
                         "name": tc.name,
-                        "arguments": json.dumps(tc.arguments)
+                        "arguments": json.dumps(tc.arguments, ensure_ascii=False)
                         if isinstance(tc.arguments, dict)
                         else tc.arguments,
                     },
@@ -398,21 +309,17 @@ class Agent:
             )
 
             for tool_call in response.tool_calls:
-                self._part_counter += 1
-                part_id = self._part_counter
-                self._emit("tool_start", {
-                    "tool_name": tool_call.name,
-                    "arguments": tool_call.arguments,
-                    "call_id": tool_call.call_id,
-                    "part_id": part_id,
-                })
+                if self._streaming_handler is not None:
+                    part_id = self._streaming_handler.on_tool_start(
+                        tool_call.name, tool_call.arguments, tool_call.call_id,
+                    )
+                else:
+                    part_id = 0
                 result = await self._execute_tool(tool_call)
-                self._emit("tool_end", {
-                    "tool_name": tool_call.name,
-                    "result": str(result)[:2000],
-                    "call_id": tool_call.call_id,
-                    "part_id": part_id,
-                })
+                if self._streaming_handler is not None:
+                    self._streaming_handler.on_tool_end(
+                        tool_call.name, str(result)[:2000], tool_call.call_id, part_id,
+                    )
                 safe_result = result or "[Tool returned empty content]"
                 self.session.add_message("tool", safe_result, tool_call_id=tool_call.call_id)
 

@@ -7,17 +7,19 @@ from engine.runtime.agent_models import Session
 from engine.config import Config
 from engine.providers.chunk_types import StreamChunk
 from engine.providers.provider_models import LLMResponse, ToolCall
+from engine.runtime.streaming_handler import SSEStreamingHandler
 
 
 def _create_test_agent(event_callback=None):
     session = Session(id="test-session", depth=0)
     config = Config()
     llm = MagicMock()
+    handler = SSEStreamingHandler(event_callback) if event_callback else None
     return Agent(
         session=session,
         config=config,
         llm_provider=llm,
-        event_callback=event_callback,
+        streaming_handler=handler,
     )
 
 

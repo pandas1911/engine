@@ -60,7 +60,6 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
     if chat_req.session_id:
         session = session_store.load(chat_req.session_id)
     if session:
-        session.add_message("user", chat_req.message)
         _truncate_session(session)
     else:
         session = Session(id=f"chat_{uuid.uuid4().hex[:8]}", depth=0)
@@ -167,7 +166,7 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
                 if delegate_task.done() and event_queue.empty():
                     break
     finally:
-        # session_store.save(session)  # Persistence disabled
+        session_store.save(session)
         set_streaming(False)
         if not delegate_task.done():
             delegate_task.cancel()

@@ -27,7 +27,8 @@ engine/
 │   │   ├── agent.py           # Agent class — main execution loop (no SubAgentManager, uses ToolPack)
 │   │   ├── agent_models.py    # Data models (Session, Message, AgentResult, etc.)
 │   │   ├── state.py           # Agent state machine
-│   │   └── task_registry.py   # Task CRUD with handler-based notification
+│   │   ├── task_registry.py   # Task CRUD with handler-based notification
+│   │   └── streaming_handler.py  # StreamingHandler Protocol + SSEStreamingHandler (streaming state extraction)
 │   ├── providers/             # LLM provider layer
 │   │   ├── __init__.py
 │   │   ├── llm_provider.py    # BaseLLMProvider / LLMProvider (OpenAI-compatible)
@@ -352,7 +353,7 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
 - **Emergency summary**: When iteration limit is reached without a text response, makes one final LLM call WITHOUT tools to force a summary
 - **Summary warning**: Injects a warning message N iterations before the limit
 - **Timestamp injection**: All user messages get timezone-aware timestamps
-- **Part-based streaming**: Agent tracks `_part_counter`, `_active_reasoning_part_id`, and `_active_text_part_id` per `_get_llm_response()` call. Emits `part_new`, `part_delta`, `part_close`, `tool_start`, and `tool_end` events via `_event_callback` for SSE streaming. **`_part_counter` is never reset** — it increments monotonically across the agent's entire lifetime, ensuring globally unique part IDs even when `_execute_cycle()` is called multiple times (e.g., Branch A resume after `WAITING_FOR_CHILDREN`).
+- **Streaming via handler**: Agent delegates all streaming event emission to an optional `StreamingHandler` (received as `streaming_handler: Optional[StreamingHandler]` in constructor). When a handler is present, `_get_llm_response()` uses `handler.reset()` → `handler.on_chunk(chunk)` loop → `handler.get_content()/get_tool_calls()`. When no handler is present (sub-agents), the non-streaming `llm.chat()` path is used. The handler owns all part lifecycle state, content accumulation, and tool call buffering.
 
 #### `agent_models.py` — Data Models
 
@@ -384,6 +385,34 @@ CRUD for `AgentTask` entries with handler-based notification.
 | `collect_and_cleanup()` | Atomic: collect results, clear children, remove child tasks |
 | `get_all_ancestors()` | BFS traversal up the task hierarchy |
 | `register_handler()` | Map parent_task_id → completion callback |
+
+#### `streaming_handler.py` — Streaming Response Handler
+
+Defines the `StreamingHandler` Protocol and `SSEStreamingHandler` concrete implementation that encapsulates all streaming-specific concerns extracted from the Agent class.
+
+**Protocol:**
+
+| Protocol | Description |
+|---|---|
+| `StreamingHandler` | `@runtime_checkable` Protocol with 7 methods for streaming event handling |
+
+**Protocol methods:**
+
+| Method | Description |
+|---|---|
+| `emit(event_name, data)` | Emit a generic event (agent_done, error) |
+| `on_chunk(chunk)` | Process a StreamChunk: manages part events + accumulates content/tool_calls |
+| `get_content()` | Return accumulated text content |
+| `get_tool_calls()` | Return parsed ToolCall objects (after finish_reason) |
+| `on_tool_start(tool_name, arguments, call_id)` | Emit tool_start, return part_id |
+| `on_tool_end(tool_name, result, call_id, part_id)` | Emit tool_end |
+| `reset()` | Reset per-call state (part IDs + data buffers). Does NOT reset counter. |
+
+**Concrete implementation:**
+
+| Class | Description |
+|---|---|
+| `SSEStreamingHandler` | Wraps `Callable[[str, Any], None]` callback. Owns part lifecycle state machine, content accumulation, and tool call buffering. `_part_counter` is monotonic across handler lifetime. |
 
 ---
 
@@ -735,18 +764,17 @@ delegate() (engine/runner.py)
     ├── _execute_cycle()
     │     ├── _process_tool_calls() ─── LLM chat loop (max 15 iterations)
     │     │     ├── _get_llm_response() ──→ FallbackLLMProvider.stream_chat()
-    │     │     │     ├── Part tracking (per streaming call):
-    │     │     │     │     ├── _part_counter (incrementing int, reset per call)
-    │     │     │     │     ├── thinking_text → part_new(reasoning) / part_delta / part_close
-    │     │     │     │     ├── delta_text → part_new(text) / part_delta / part_close
-    │     │     │     │     └── finish_reason → close all active Parts
+    │     │     │     ├── StreamingHandler.on_chunk() (delegates all streaming state):
+    │     │     │     │     ├── Part lifecycle (part_new/part_delta/part_close)
+    │     │     │     │     ├── Content accumulation (get_content())
+    │     │     │     │     └── Tool call buffering (get_tool_calls())
     │     │     │     └── FallbackLLMProvider.stream_chat()
     │     │     │           ├── APIKeyPool.acquire_key()
     │     │     │           ├── SlidingWindowRateLimiter.acquire() ← estimated_tokens capped to tpm_limit
     │     │     │           ├── AdaptivePacer.wait_if_needed()
     │     │     │           └── LLMProvider.stream_chat() (OpenAI SDK)
     │     │     ├── Tool execution (ToolPack → Tool.execute())
-    │     │     │     └── per tool call → _part_counter++ → tool_start(part_id) → execute → tool_end(part_id)
+    │     │     │     └── per tool call → handler.on_tool_start() → execute → handler.on_tool_end()
     │     │     └── spawn tool → SpawnTool.execute()
     │     │                       ├── Lazy SubAgentManager init (per agent, asyncio.Lock)
     │     │                       ├── SubAgentManager.spawn()
@@ -820,16 +848,16 @@ The frontend communicates with the backend via Server-Sent Events (SSE) using a 
 
 ### Part ID Assignment
 
-Part IDs are simple incrementing integers assigned by `Agent._get_llm_response()` per streaming call. The counter **never resets** — it increments monotonically across the agent's entire lifetime (including across multiple `_execute_cycle()` invocations caused by Branch A resume). This guarantees globally unique part IDs, preventing the frontend from misrouting events when the same agent produces multiple rounds of streaming output.
+Part IDs are simple incrementing integers assigned by `SSEStreamingHandler.on_tool_start()` and the part lifecycle logic in `on_chunk()`. The handler's `_part_counter` **never resets** — it increments monotonically across the handler's entire lifetime (including across multiple `_get_llm_response()` calls within a single agent run). This guarantees globally unique part IDs, preventing the frontend from misrouting events when the same agent produces multiple rounds of streaming output.
 
 ### Event Flow
 
 ```
-Agent._get_llm_response()
+StreamingHandler.on_chunk(chunk)
   ├── thinking_text → part_new(reasoning) → part_delta → ... → part_close
   ├── delta_text → part_new(text) → part_delta → ... → part_close
   └── finish_reason → close any active Parts
 
-Agent._process_tool_calls()
-  └── per tool call → _part_counter++ → tool_start(part_id) → execute → tool_end(part_id)
+StreamingHandler.on_tool_start() / on_tool_end()
+  └── per tool call → counter++ → tool_start(part_id) → execute → tool_end(part_id)
 ```

@@ -22,6 +22,7 @@ from engine.providers.fallback_provider import FallbackLLMProvider
 from engine.providers.provider_models import ProviderParams, Lane
 from engine.time import TimeProvider
 from engine.prompts import build_root_system_prompt
+from engine.runtime.streaming_handler import SSEStreamingHandler
 
 _custom_tools_cache: Optional[List] = None
 
@@ -223,6 +224,8 @@ async def delegate(
         lane_queue.configure_lane(Lane.MAIN, max_concurrent=config.main_lane_concurrency)
         lane_queue.configure_lane(Lane.SUBAGENT, max_concurrent=config.subagent_lane_concurrency)
 
+        streaming_handler = SSEStreamingHandler(event_callback) if event_callback else None
+
         agent = Agent(
             session=session,
             config=config,
@@ -230,7 +233,7 @@ async def delegate(
             task_registry=task_registry,
             tool_pack=tool_pack,
             lane_queue=lane_queue,
-            event_callback=event_callback,
+            streaming_handler=streaming_handler,
         )
 
         await task_registry.register(
