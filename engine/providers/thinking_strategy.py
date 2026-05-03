@@ -5,6 +5,7 @@ that encapsulates its own state and extraction algorithm.
 stream_chat() just calls extractor.extract(delta) per chunk.
 """
 from __future__ import annotations
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -40,26 +41,50 @@ class ThinkingExtractor(ABC):
 # ── Strategy: reasoning_details (MiniMax) ──
 
 class ReasoningDetailsExtractor(ThinkingExtractor):
-    """MiniMax: delta.reasoning_details[].text is CUMULATIVE.
-    Must diff against buffer to get incremental text.
+    """MiniMax: delta.reasoning_details[].text is incremental.
+    Each chunk contains only new text — no diff or buffer needed.
+
+    BUG HISTORY (for future reference):
+      The original implementation used a diff algorithm
+      (new_text = full_text[len(self._buffer):]) matching the official MiniMax
+      docs, which state that reasoning_details[].text is cumulative. However,
+      the actual MiniMax API returns INCREMENTAL text — each chunk contains
+      only the new characters since the last chunk.
+
+      This caused all thinking content after the first chunk to be silently
+      dropped: self._buffer grew to the length of the first chunk's text, and
+      subsequent incremental texts were shorter than self._buffer, so the slice
+      full_text[len(self._buffer):] returned "" every time.
+
+      Evidence: https://github.com/MiniMax-AI/MiniMax-M2/issues/95
+
+    Additionally, MiniMax sometimes leaks thinking content into the response
+    content field prefixed with "(think)\\n". We strip that here.
+      See: https://github.com/MiniMax-AI/MiniMax-M2/issues/105
     """
 
-    def __init__(self):
-        self._buffer = ""
-
     def extract(self, delta: Any) -> ThinkingResult:
+        # Accumulate incremental text from each reasoning_details entry.
+        # No state tracking needed — each detail["text"] is only the new text.
         thinking_text = ""
         if hasattr(delta, "reasoning_details") and delta.reasoning_details:
             for detail in delta.reasoning_details:
+                # Support both dict objects and SDK objects with a .text attr.
+                # Some MiniMax SDK versions return non-dict objects for details.
                 if isinstance(detail, dict) and "text" in detail:
-                    full_text = detail["text"]
-                    new_text = full_text[len(self._buffer):]
-                    if new_text:
-                        thinking_text = new_text
-                        self._buffer = full_text
+                    thinking_text += detail["text"]
+                elif hasattr(detail, "text"):
+                    thinking_text += detail.text
+
         response_text = ""
         if hasattr(delta, "content") and delta.content:
             response_text = delta.content
+
+        # Strip the "(think)\n" prefix that MiniMax sometimes leaks into
+        # the content field when thinking content bleeds through.
+        if response_text:
+            response_text = re.sub(r"^\(think\)\s*\n?", "", response_text)
+
         return ThinkingResult(
             thinking_text=thinking_text,
             response_text=response_text,

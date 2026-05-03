@@ -32,7 +32,10 @@ engine/
 │   │   ├── __init__.py
 │   │   ├── llm_provider.py    # BaseLLMProvider / LLMProvider (OpenAI-compatible)
 │   │   ├── provider_models.py # Data models (ToolCall, LLMResponse, Lane, etc.)
-│   │   └── fallback_provider.py  # Multi-provider fallback with key rotation
+│   │   ├── fallback_provider.py  # Multi-provider fallback with key rotation
+│   │   ├── thinking_strategy.py  # Provider-specific thinking content extraction (strategy pattern)
+│   │   ├── thinking_capture.py   # Tag-based thinking capture state machine (for tag_parser strategy)
+│   │   └── chunk_types.py        # LLM streaming chunk types (StreamChunk dataclass)
 │   ├── subagent/              # Sub-agent spawning and lifecycle
 │   │   ├── __init__.py
 │   │   ├── manager.py         # SubAgentManager — spawn, gate-check, notify
@@ -445,6 +448,84 @@ Providers are ordered by the insertion order of the `providers` dict (primary fi
 6. On rate limit → report rate limited, rotate key, retry
 7. On retryable error → release reservation, propagate
 8. On non-retryable error → release reservation, raise
+
+#### `thinking_strategy.py` — Provider-Specific Thinking Extraction
+
+Maps provider `base_url` domain to a thinking content extraction strategy. Each strategy is a class encapsulating its own state and extraction algorithm. `stream_chat()` calls `extractor.extract(delta)` per chunk and `extractor.flush()` when the stream ends.
+
+**Common result type:**
+
+| Dataclass | Description |
+|---|---|
+| `ThinkingResult` | Returned by every `extract()` / `flush()` call. Fields: `thinking_text`, `response_text`, `source` (strategy name or `None`) |
+
+**Abstract base:**
+
+| Class | Description |
+|---|---|
+| `ThinkingExtractor` | ABC requiring `extract(delta) → ThinkingResult` and `flush() → ThinkingResult` |
+
+**Concrete strategies:**
+
+| Class | Domain | Description |
+|---|---|---|
+| `ReasoningDetailsExtractor` | `api.minimaxi.com` | MiniMax. Reads `delta.reasoning_details[].text` as **incremental** text (each chunk contains only new characters). Strips `(think)\n` prefix that MiniMax sometimes leaks into the response content field. No state tracking needed. |
+| `ReasoningContentExtractor` | `dashscope.aliyuncs.com` | Qwen/DashScope. Reads `delta.reasoning_content` as incremental text. No state tracking needed. |
+| `TagParserExtractor` | default (DeepSeek, etc.) | Parses `<think/>` tags embedded in `delta.content`. Uses `ThinkingCapture` state machine internally to handle partial tags split across chunks. |
+
+**Factory function:**
+
+| Function | Description |
+|---|---|
+| `get_thinking_extractor(base_url)` | Parses the hostname from `base_url`, looks it up in the domain registry, and returns the matching `ThinkingExtractor` instance. Falls back to `TagParserExtractor` for unknown domains. |
+
+**Domain registry:**
+
+| Hostname | Extractor |
+|---|---|
+| `api.minimaxi.com` | `ReasoningDetailsExtractor` |
+| `dashscope.aliyuncs.com` | `ReasoningContentExtractor` |
+| *(any other)* | `TagParserExtractor` |
+
+#### `thinking_capture.py` — Tag-Based Thinking Capture
+
+Stateful tag parser for the `tag_parser` strategy (default/DeepSeek). Handles partial `<think/>` tags split across streaming chunks. Only used by `TagParserExtractor` — the other strategies (`ReasoningDetailsExtractor`, `ReasoningContentExtractor`) extract thinking content directly from structured delta fields without needing tag parsing.
+
+**State machine:**
+
+| Enum | State | Description |
+|---|---|---|
+| `ThinkState.OUTSIDE` | `outside` | Normal response text — everything goes to `response_text` |
+| `ThinkState.INSIDE` | `inside` | Inside `<think...>` tag — everything goes to `thinking_text` |
+| `ThinkState.MAYBE_OPEN` | `maybe_open` | Partial opening tag accumulated in buffer (e.g. `"<thi"`) |
+| `ThinkState.MAYBE_CLOSE` | `maybe_close` | Partial closing tag accumulated in buffer (e.g. `"</thi"`) |
+
+**Key class:**
+
+| Class | Description |
+|---|---|
+| `ThinkingCapture` | Stateful tag parser. Tracks current `ThinkState` and an internal `_buffer` for partial tag text. |
+
+**Methods:**
+
+| Method | Description |
+|---|---|
+| `feed(content)` | Process a content chunk. Returns `CaptureResult(thinking_text, response_text)` with separated content. |
+| `flush()` | Flush remaining buffered content when the stream ends. In `MAYBE_CLOSE` state, buffered text is thinking content; in `MAYBE_OPEN` state, it is response content. |
+
+**Result type:**
+
+| Dataclass | Description |
+|---|---|
+| `CaptureResult` | Fields: `thinking_text`, `response_text` |
+
+#### `chunk_types.py` — LLM Streaming Chunk Types
+
+Defines the unified chunk type yielded by `stream_chat()`.
+
+| Dataclass | Description |
+|---|---|
+| `StreamChunk` | A single streaming chunk. Fields: `delta_text` (response text delta), `thinking_text` (thinking/reasoning text delta), `tool_calls` (optional list of partial/complete tool call deltas), `finish_reason` (optional string), `thinking_source` (strategy identifier: `"tag_parser"`, `"reasoning_content"`, `"reasoning_details"`, or `None`) |
 
 ---
 
