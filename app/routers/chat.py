@@ -167,7 +167,7 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
                 if delegate_task.done() and event_queue.empty():
                     break
     finally:
-        session_store.save(session)
+        # session_store.save(session)  # Persistence disabled
         set_streaming(False)
         if not delegate_task.done():
             delegate_task.cancel()
