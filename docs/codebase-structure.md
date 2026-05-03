@@ -349,7 +349,7 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
 - **Emergency summary**: When iteration limit is reached without a text response, makes one final LLM call WITHOUT tools to force a summary
 - **Summary warning**: Injects a warning message N iterations before the limit
 - **Timestamp injection**: All user messages get timezone-aware timestamps
-- **Part-based streaming**: Agent tracks `_part_counter`, `_active_reasoning_part_id`, and `_active_text_part_id` per `_get_llm_response()` call. Emits `part_new`, `part_delta`, `part_close`, `tool_start`, and `tool_end` events via `_event_callback` for SSE streaming.
+- **Part-based streaming**: Agent tracks `_part_counter`, `_active_reasoning_part_id`, and `_active_text_part_id` per `_get_llm_response()` call. Emits `part_new`, `part_delta`, `part_close`, `tool_start`, and `tool_end` events via `_event_callback` for SSE streaming. **`_part_counter` is never reset** — it increments monotonically across the agent's entire lifetime, ensuring globally unique part IDs even when `_execute_cycle()` is called multiple times (e.g., Branch A resume after `WAITING_FOR_CHILDREN`).
 
 #### `agent_models.py` — Data Models
 
@@ -739,7 +739,7 @@ The frontend communicates with the backend via Server-Sent Events (SSE) using a 
 
 ### Part ID Assignment
 
-Part IDs are simple incrementing integers assigned by `Agent._get_llm_response()` per streaming call. The counter resets at the start of each `_get_llm_response()` invocation, ensuring clean state even if `FallbackLLMProvider` retries internally.
+Part IDs are simple incrementing integers assigned by `Agent._get_llm_response()` per streaming call. The counter **never resets** — it increments monotonically across the agent's entire lifetime (including across multiple `_execute_cycle()` invocations caused by Branch A resume). This guarantees globally unique part IDs, preventing the frontend from misrouting events when the same agent produces multiple rounds of streaming output.
 
 ### Event Flow
 

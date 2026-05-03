@@ -559,8 +559,6 @@ class Agent:
         if self.state != AgentState.RUNNING:
             return self._final_result or ""
 
-        self._part_counter = 0
-
         await self._process_tool_calls()
 
         # Drain ALL queued events iteratively (replaces recursive drain_events chain)
