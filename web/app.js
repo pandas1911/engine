@@ -255,7 +255,10 @@
                     if (!sa) break;
                     const part = sa.parts.find(p => p.id === data.part_id);
                     if (part && part.element) {
-                        updateSubAgentToolResult(data.part_id, data.result, data.tool_name, part.element);
+                        const res = updateSubAgentToolResult(data.part_id, data.result, data.tool_name, part.element);
+                        if (res === 'removed') {
+                            sa.parts = sa.parts.filter(p => p.id !== data.part_id);
+                        }
                     }
                     autoScroll();
                     break;

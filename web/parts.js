@@ -251,10 +251,10 @@ function updateSubAgentToolResult(partId, result, toolName, element) {
         const argsSpan = element.querySelector('.tool-args');
         if (argsSpan) {
             if (taskIdMatch && labelMatch) {
-                argsSpan.textContent = 'spawn(Task ID: ' + taskIdMatch[1] + ', Agent Label: ' + labelMatch[1].trim() + ')';
+                argsSpan.textContent = '(Task ID: ' + taskIdMatch[1] + ', Agent Label: ' + labelMatch[1].trim() + ')';
             } else {
-                const truncated = resultStr.length > 120 ? resultStr.substring(0, 120) + '...' : resultStr;
-                argsSpan.textContent = truncated;
+                element.remove();
+                return 'removed';
             }
         }
     }
