@@ -123,6 +123,7 @@
             padding-left: 12px;
             white-space: pre-wrap;
             word-break: break-word;
+            margin-bottom: 4px;
         }
 
         .text-block {
@@ -333,7 +334,9 @@
         }
 
         .subagent-content.visible {
-            display: block;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
         }
 
         .subagent-content::-webkit-scrollbar {
@@ -360,6 +363,7 @@
             font-size: var(--font-size-small);
             line-height: 1.7;
             word-break: break-word;
+            white-space: normal;
         }
 
         .subagent-tool-row {
