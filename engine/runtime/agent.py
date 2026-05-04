@@ -17,7 +17,7 @@ from engine.subagent.events import AgentEvent, ChildCompletionEvent
 from .state import AgentStateMachine
 from engine.tools.pack import ToolPack
 from engine.providers.llm_provider import LLMProviderError
-from engine.runtime.streaming_handler import StreamingHandler
+from engine.streaming_handler import BaseStreamingHandler
 from engine.logging import get_logger
 from engine.safety import LaneConcurrencyQueue
 from engine.prompts import get_summary_warning, get_emergency_summary_prompt
@@ -45,7 +45,7 @@ class Agent:
         parent_task_id: Optional[str] = None,
         label: Optional[str] = None,
         lane_queue: Optional[LaneConcurrencyQueue] = None,
-        streaming_handler: Optional[StreamingHandler] = None,
+        streaming_handler: Optional[BaseStreamingHandler] = None,
     ):
         self.session = session
         self.config = config

@@ -1,7 +1,7 @@
 """Unit tests for SubAgentStreamingWrapper and sub-agent streaming behavior."""
 
 from engine.providers.chunk_types import StreamChunk
-from engine.runtime.streaming_handler import SSEStreamingHandler, SubAgentStreamingWrapper
+from engine.streaming_handler import SSEStreamingHandler, SubAgentStreamingWrapper
 
 
 def _make_handler():
@@ -12,11 +12,10 @@ def _make_handler():
 
 def _make_wrapper(task_id="task_test"):
     events = []
-    handler, _ = _make_handler()
+    handler = SSEStreamingHandler(lambda e, d: events.append((e, d)))
     wrapper = SubAgentStreamingWrapper(
-        emit=lambda e, d: events.append((e, d)),
+        parent=handler,
         task_id=task_id,
-        allocate_part_id=handler._next_part_id,
     )
     return wrapper, events, handler
 
@@ -25,9 +24,8 @@ def _make_wrapper(task_id="task_test"):
 def test_part_id_uniqueness():
     handler, _ = _make_handler()
     wrapper = SubAgentStreamingWrapper(
-        emit=lambda e, d: None,
+        parent=handler,
         task_id="task_test",
-        allocate_part_id=handler._next_part_id,
     )
 
     root_ids = [handler._next_part_id() for _ in range(3)]
@@ -177,18 +175,8 @@ def test_backward_compat_handler_without_allocate_part_id():
 # 11. Two wrappers sharing same root counter produce non-overlapping part IDs
 def test_concurrent_subagents_unique_ids():
     handler, _ = _make_handler()
-    events_a = []
-    events_b = []
-    wrapper_a = SubAgentStreamingWrapper(
-        emit=lambda e, d: events_a.append((e, d)),
-        task_id="task_a",
-        allocate_part_id=handler._next_part_id,
-    )
-    wrapper_b = SubAgentStreamingWrapper(
-        emit=lambda e, d: events_b.append((e, d)),
-        task_id="task_b",
-        allocate_part_id=handler._next_part_id,
-    )
+    wrapper_a = SubAgentStreamingWrapper(parent=handler, task_id="task_a")
+    wrapper_b = SubAgentStreamingWrapper(parent=handler, task_id="task_b")
 
     ids_a = [wrapper_a._allocate_part_id() for _ in range(3)]
     ids_b = [wrapper_b._allocate_part_id() for _ in range(3)]

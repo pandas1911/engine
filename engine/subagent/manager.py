@@ -220,15 +220,14 @@ class SubAgentManager:
         # Create SubAgentStreamingWrapper for depth-1 children (root agent's direct children)
         child_streaming_handler = None
         if self._root_streaming_handler is not None and parent_session.depth == 0:
-            from engine.runtime.streaming_handler import SubAgentStreamingWrapper
+            from engine.streaming_handler import SubAgentStreamingWrapper
             child_streaming_handler = SubAgentStreamingWrapper(
-                emit=self._root_streaming_handler._callback,
+                parent=self._root_streaming_handler,
                 task_id=task_id,
-                allocate_part_id=self._root_streaming_handler._next_part_id,
             )
             # Emit subagent_start event
             start_part_id = self._root_streaming_handler._next_part_id()
-            self._root_streaming_handler._callback("subagent_start", {
+            self._root_streaming_handler.emit("subagent_start", {
                 "part_id": start_part_id,
                 "task_id": task_id,
                 "label": label,
@@ -353,7 +352,7 @@ class SubAgentManager:
                 data={"error_type": type(e).__name__, "error_message": str(e)},
             )
             if self._root_streaming_handler is not None:
-                self._root_streaming_handler._callback("subagent_error", {
+                self._root_streaming_handler.emit("subagent_error", {
                     "task_id": task_id,
                     "message": str(agent._final_result or "Unknown error"),
                 })
@@ -401,11 +400,11 @@ class SubAgentManager:
 
         if self._root_streaming_handler is not None:
             if state == AgentState.COMPLETED:
-                self._root_streaming_handler._callback("subagent_done", {
+                self._root_streaming_handler.emit("subagent_done", {
                     "task_id": task_id, "success": True,
                 })
             elif state == AgentState.ERROR:
-                self._root_streaming_handler._callback("subagent_error", {
+                self._root_streaming_handler.emit("subagent_error", {
                     "task_id": task_id,
                     "message": str(agent._final_result or "Unknown error"),
                 })

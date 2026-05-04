@@ -7,7 +7,7 @@ from engine.runtime.agent_models import Session
 from engine.config import Config
 from engine.providers.chunk_types import StreamChunk
 from engine.providers.provider_models import LLMResponse, ToolCall
-from engine.runtime.streaming_handler import SSEStreamingHandler
+from engine.streaming_handler import SSEStreamingHandler
 
 
 def _create_test_agent(event_callback=None):

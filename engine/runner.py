@@ -22,7 +22,7 @@ from engine.providers.fallback_provider import FallbackLLMProvider
 from engine.providers.provider_models import ProviderParams, Lane
 from engine.time import TimeProvider
 from engine.prompts import build_root_system_prompt
-from engine.runtime.streaming_handler import SSEStreamingHandler
+from engine.streaming_handler import SSEStreamingHandler
 
 _custom_tools_cache: Optional[List] = None
 

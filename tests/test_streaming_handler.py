@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 from engine.providers.chunk_types import StreamChunk
 from engine.providers.provider_models import ToolCall
-from engine.runtime.streaming_handler import SSEStreamingHandler, StreamingHandler
+from engine.streaming_handler import SSEStreamingHandler, BaseStreamingHandler
 
 
 def _make_handler():
@@ -32,7 +32,7 @@ def _make_tc_delta(index=0, call_id=None, func_name=None, func_args=None):
 # 1. Protocol conformance
 def test_protocol_conformance():
     handler, _ = _make_handler()
-    assert isinstance(handler, StreamingHandler)
+    assert isinstance(handler, BaseStreamingHandler)
 
 
 # 2. Part lifecycle — reasoning only
