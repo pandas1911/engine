@@ -239,17 +239,23 @@ function createSubAgentToolRow(partId, toolName, args, callId) {
     return row;
 }
 
-function updateSubAgentToolResult(partId, result, element) {
+function updateSubAgentToolResult(partId, result, toolName, element) {
     if (!element) return;
     const spinner = element.querySelector('.spinner-svg');
     if (spinner) spinner.remove();
 
-    if (result) {
+    if (toolName === 'spawn' && result) {
         const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+        const taskIdMatch = resultStr.match(/Task ID:\s*(\S+)/);
+        const labelMatch = resultStr.match(/Agent Label:\s*(.+)/);
         const argsSpan = element.querySelector('.tool-args');
         if (argsSpan) {
-            const truncated = resultStr.length > 120 ? resultStr.substring(0, 120) + '...' : resultStr;
-            argsSpan.textContent = truncated;
+            if (taskIdMatch && labelMatch) {
+                argsSpan.textContent = 'spawn(Task ID: ' + taskIdMatch[1] + ', Agent Label: ' + labelMatch[1].trim() + ')';
+            } else {
+                const truncated = resultStr.length > 120 ? resultStr.substring(0, 120) + '...' : resultStr;
+                argsSpan.textContent = truncated;
+            }
         }
     }
 }

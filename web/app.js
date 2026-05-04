@@ -232,7 +232,13 @@
                     const sa = subagents[data.task_id];
                     if (!sa) break;
                     const part = sa.parts.find(p => p.id === data.part_id);
-                    if (part) part.state = 'closed';
+                    if (part) {
+                        part.state = 'closed';
+                        if (part.type === 'reasoning' && part.element) {
+                            part.content = part.content.trimEnd();
+                            part.element.textContent = part.content;
+                        }
+                    }
                     break;
                 }
                 case 'subagent_tool_start': {
@@ -249,7 +255,7 @@
                     if (!sa) break;
                     const part = sa.parts.find(p => p.id === data.part_id);
                     if (part && part.element) {
-                        updateSubAgentToolResult(data.part_id, data.result, part.element);
+                        updateSubAgentToolResult(data.part_id, data.result, data.tool_name, part.element);
                     }
                     autoScroll();
                     break;

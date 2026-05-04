@@ -101,6 +101,31 @@ describe('Sub-agent panel rendering', () => {
     });
   });
 
+  describe('sub-agent reasoning part close trims trailing whitespace', () => {
+    it('trims trailing whitespace on reasoning part close', () => {
+      const el = createSubAgentThinking(5, 'thinking text\n\n\n');
+      expect(el.textContent).toBe('thinking text\n\n\n');
+
+      // Simulate what subagent_part_close does
+      const content = 'thinking text\n\n\n';
+      const trimmed = content.trimEnd();
+      el.textContent = trimmed;
+
+      expect(el.textContent).toBe('thinking text');
+      expect(el.textContent.endsWith('\n')).toBe(false);
+    });
+
+    it('does NOT trim text parts on close', () => {
+      const el = createSubAgentText(6, 'output text   ');
+      expect(el.textContent).toBe('output text   ');
+
+      // Text parts should NOT be trimmed (only reasoning gets trimmed)
+      // So textContent stays the same
+      expect(el.textContent).toBe('output text   ');
+      expect(el.textContent.endsWith(' ')).toBe(true);
+    });
+  });
+
   describe('createSubAgentText', () => {
     it('creates element with correct class, data attribute, and text', () => {
       const el = createSubAgentText(6, 'output text');
@@ -142,32 +167,57 @@ describe('Sub-agent panel rendering', () => {
   });
 
   describe('updateSubAgentToolResult', () => {
-    it('removes spinner and updates tool-args text', () => {
+    it('removes spinner and keeps original args for non-spawn tools', () => {
       const row = createSubAgentToolRow(7, 'search', { q: 'test' }, 'call_1');
-
       expect(row.querySelector('.spinner-svg')).not.toBeNull();
-
-      updateSubAgentToolResult(7, 'result text', row);
-
+      const originalArgs = row.querySelector('.tool-args').textContent;
+      updateSubAgentToolResult(7, 'result text', 'search', row);
       expect(row.querySelector('.spinner-svg')).toBeNull();
-
       const argsSpan = row.querySelector('.tool-args');
-      expect(argsSpan.textContent).toBe('result text');
+      expect(argsSpan.textContent).toBe(originalArgs);
     });
 
-    it('truncates long results to 120 chars', () => {
-      const row = createSubAgentToolRow(7, 'tool', 'args', 'call_1');
+    it('keeps original args unchanged for non-spawn tools with long results', () => {
+      const row = createSubAgentToolRow(7, 'tool', 'original args', 'call_1');
       const longResult = 'z'.repeat(200);
-
-      updateSubAgentToolResult(7, longResult, row);
-
+      updateSubAgentToolResult(7, longResult, 'tool', row);
       const argsSpan = row.querySelector('.tool-args');
-      expect(argsSpan.textContent.length).toBeLessThanOrEqual(123);
-      expect(argsSpan.textContent.endsWith('...')).toBe(true);
+      expect(argsSpan.textContent).toBe('original args');
     });
 
     it('handles null element without error', () => {
-      expect(() => updateSubAgentToolResult(7, 'result', null)).not.toThrow();
+      expect(() => updateSubAgentToolResult(7, 'result', 'search', null)).not.toThrow();
+    });
+
+    it('spawn tool shows compact format with parsed task_id and label', () => {
+      const row = createSubAgentToolRow(7, 'spawn', { label: 'research' }, 'call_1');
+      const spawnResult = '━━━━ Spawned Task ━━━━\nTask ID: task_abc\nAgent Label: research\n\nSub-agent is running...';
+      updateSubAgentToolResult(7, spawnResult, 'spawn', row);
+      const argsSpan = row.querySelector('.tool-args');
+      expect(argsSpan.textContent).toBe('spawn(Task ID: task_abc, Agent Label: research)');
+      expect(row.querySelector('.spinner-svg')).toBeNull();
+    });
+
+    it('spawn result parsing failure falls back to truncated result', () => {
+      const row = createSubAgentToolRow(7, 'spawn', { label: 'test' }, 'call_1');
+      const badResult = 'Error: depth limit reached';
+      updateSubAgentToolResult(7, badResult, 'spawn', row);
+      const argsSpan = row.querySelector('.tool-args');
+      expect(argsSpan.textContent).toBe('Error: depth limit reached');
+    });
+
+    it('non-spawn tool keeps original args on result', () => {
+      const row = createSubAgentToolRow(7, 'web_search', '{"query":"test"}', 'call_1');
+      updateSubAgentToolResult(7, '## Search Results\nfound 3 items', 'web_search', row);
+      const argsSpan = row.querySelector('.tool-args');
+      expect(argsSpan.textContent).toBe('{"query":"test"}');
+      expect(row.querySelector('.spinner-svg')).toBeNull();
+    });
+
+    it('empty result does not crash', () => {
+      const row = createSubAgentToolRow(7, 'search', 'args', 'call_1');
+      expect(() => updateSubAgentToolResult(7, '', 'search', row)).not.toThrow();
+      expect(row.querySelector('.spinner-svg')).toBeNull();
     });
   });
 
