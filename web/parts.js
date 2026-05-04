@@ -21,6 +21,9 @@ function updatePartContent(partId, content, type, element) {
 
 function closePart(partId, content, type, element) {
     if (!element) return;
+    if (type === 'reasoning') {
+        element.textContent = content.trimEnd();
+    }
     if (type === 'text' && content && typeof marked !== 'undefined') {
         element.innerHTML = marked.parse(content);
     }
@@ -147,18 +150,12 @@ function createSubAgentPanel(partId, taskId, label, description) {
     labelSpan.className = 'subagent-label';
     labelSpan.textContent = labelText.length > 120 ? labelText.substring(0, 120) + '...' : labelText;
 
-    const descText = description || '';
-    const descSpan = document.createElement('span');
-    descSpan.className = 'subagent-desc';
-    descSpan.textContent = descText.length > 120 ? descText.substring(0, 120) + '...' : descText;
-
     const chevron = document.createElement('span');
     chevron.className = 'subagent-chevron';
     chevron.textContent = '\u25B6';
 
     header.appendChild(spinner);
     header.appendChild(labelSpan);
-    header.appendChild(descSpan);
     header.appendChild(chevron);
 
     const content = document.createElement('div');

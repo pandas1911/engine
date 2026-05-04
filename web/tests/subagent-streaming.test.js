@@ -48,7 +48,7 @@ describe('Sub-agent panel rendering', () => {
 
       expect(header.querySelector('.spinner-svg')).not.toBeNull();
       expect(header.querySelector('.subagent-label')).not.toBeNull();
-      expect(header.querySelector('.subagent-desc')).not.toBeNull();
+      expect(header.querySelector('.subagent-desc')).toBeNull();
       expect(header.querySelector('.subagent-chevron')).not.toBeNull();
     });
 
@@ -67,15 +67,6 @@ describe('Sub-agent panel rendering', () => {
       const label = panel.querySelector('.subagent-label');
       expect(label.textContent.length).toBeLessThanOrEqual(123);
       expect(label.textContent.endsWith('...')).toBe(true);
-    });
-
-    it('truncates description when it exceeds 120 chars', () => {
-      const longDesc = 'x'.repeat(200);
-      const panel = createSubAgentPanel(1, 'task_1', 'label', longDesc);
-
-      const desc = panel.querySelector('.subagent-desc');
-      expect(desc.textContent.length).toBeLessThanOrEqual(123);
-      expect(desc.textContent.endsWith('...')).toBe(true);
     });
 
     it('toggles content visibility on header click', () => {

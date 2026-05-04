@@ -232,19 +232,21 @@ def test_subagent_event_sequence():
         assert data["task_id"] == "seq_test"
 
 
-# 13. Wrapper suppresses spawn tool calls and allows other tools
+# 13. Wrapper allows spawn tool calls through (no longer suppressed)
 def test_spawn_tool_suppression_in_wrapper():
     wrapper, events, _ = _make_wrapper(task_id="spawn_test")
 
     result = wrapper.on_tool_start("spawn", {"task": "sub-task"}, "call_x")
-    assert result == 0
-    assert len(events) == 0, "spawn should emit no events"
+    assert result > 0
+    assert len(events) == 1
+    assert events[0][0] == "subagent_tool_start"
+    assert events[0][1]["tool_name"] == "spawn"
 
     pid = wrapper.on_tool_start("web_search", {"query": "test"}, "call_y")
     assert pid > 0
-    assert len(events) == 1
-    assert events[0][0] == "subagent_tool_start"
-    assert events[0][1]["tool_name"] == "web_search"
+    assert len(events) == 2
+    assert events[1][0] == "subagent_tool_start"
+    assert events[1][1]["tool_name"] == "web_search"
 
 
 # 14. spawn.py uses "unknown" as the default label
@@ -256,10 +258,12 @@ def test_label_default_is_unknown():
     assert '"unknown"' in source, 'Default label "unknown" not found in SpawnHandler.execute'
 
 
-# 15. Wrapper on_tool_start("spawn", ...) returns 0 with no emitted events
+# 15. Wrapper on_tool_start("spawn", ...) emits events normally (no longer suppressed)
 def test_wrapper_spawn_tool_suppression():
     wrapper, events, _ = _make_wrapper(task_id="suppress_test")
 
     result = wrapper.on_tool_start("spawn", {"task": "anything"}, "call_spawn_1")
-    assert result == 0
-    assert len(events) == 0
+    assert result > 0
+    assert len(events) == 1
+    assert events[0][0] == "subagent_tool_start"
+    assert events[0][1]["tool_name"] == "spawn"

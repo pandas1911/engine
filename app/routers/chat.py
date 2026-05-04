@@ -179,7 +179,7 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
                     "call_id": data.get("call_id", ""),
                 }),
             })
-        elif event_name == "subagent_tool_result":
+        elif event_name == "subagent_tool_end":
             event_queue.put_nowait({
                 "event": "subagent_tool_result",
                 "data": json.dumps({

@@ -140,6 +140,10 @@
             margin-bottom: 0;
         }
 
+        .text-block:empty {
+            display: none;
+        }
+
         .text-block code {
             background: var(--bg-user);
             padding: 1px 5px;
@@ -302,16 +306,6 @@
             white-space: nowrap;
         }
 
-        .subagent-desc {
-            font-weight: 400;
-            color: var(--text-weak);
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            font-size: var(--font-size-small);
-            flex: 1;
-            min-width: 0;
-        }
 
         .subagent-chevron {
             opacity: 0;
@@ -362,7 +356,7 @@
         }
 
         .subagent-text {
-            color: var(--text-strong);
+            color: var(--text-base);
             font-size: var(--font-size-small);
             line-height: 1.7;
             word-break: break-word;

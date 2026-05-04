@@ -351,8 +351,6 @@ class SubAgentStreamingWrapper:
         return self._collected_tool_calls
 
     def on_tool_start(self, tool_name: str, arguments: dict, call_id: str) -> int:
-        if tool_name == "spawn":
-            return 0
         part_id = self._allocate_part_id()
         self.emit("tool_start", {
             "tool_name": tool_name,
