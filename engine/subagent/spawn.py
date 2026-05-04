@@ -79,11 +79,12 @@ class SpawnTool(Tool):
                     lane_queue=parent_agent.lane_queue,
                     llm_provider=parent_agent.llm,
                     tool_pack=parent_agent.tool_pack,
+                    root_streaming_handler=parent_agent.streaming_handler,
                 )
 
         mgr = self._managers[task_id]
         task_desc = arguments.get("task", "")
-        label = arguments.get("label", "subagent")
+        label = arguments.get("label", "unknown")
         return await mgr.spawn(task_desc, label, session)
 
     def release(self, agent_task_id: str) -> None:

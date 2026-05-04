@@ -271,6 +271,120 @@
             font-size: var(--font-size-small);
         }
 
+        .subagent-panel {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .subagent-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            height: 32px;
+            cursor: pointer;
+            padding: 0 4px;
+            border-radius: 4px;
+            transition: background 0.1s;
+        }
+
+        .subagent-header:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .subagent-header:hover .subagent-chevron {
+            opacity: 1;
+        }
+
+        .subagent-label {
+            font-weight: 400;
+            color: var(--text-weak);
+            font-size: var(--font-size-small);
+            white-space: nowrap;
+        }
+
+        .subagent-desc {
+            font-weight: 400;
+            color: var(--text-weak);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: var(--font-size-small);
+            flex: 1;
+            min-width: 0;
+        }
+
+        .subagent-chevron {
+            opacity: 0;
+            transition: opacity 0.15s;
+            color: var(--text-weak);
+            font-size: 12px;
+            flex-shrink: 0;
+        }
+
+        .subagent-chevron.expanded {
+            opacity: 1;
+            transform: rotate(90deg);
+        }
+
+        .subagent-content {
+            font-size: var(--font-size-small);
+            color: var(--text-weak);
+            max-height: 240px;
+            overflow: auto;
+            padding: 6px 4px 6px 12px;
+            border-left: 2px solid var(--text-weaker);
+            white-space: pre-wrap;
+            word-break: break-word;
+            display: none;
+        }
+
+        .subagent-content.visible {
+            display: block;
+        }
+
+        .subagent-content::-webkit-scrollbar {
+            width: 3px;
+        }
+
+        .subagent-content::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 2px;
+        }
+
+        .subagent-thinking {
+            color: var(--text-weak);
+            font-size: var(--font-size-small);
+            font-style: italic;
+            border-left: 2px solid var(--text-weaker);
+            padding-left: 12px;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .subagent-text {
+            color: var(--text-strong);
+            font-size: var(--font-size-small);
+            line-height: 1.7;
+            word-break: break-word;
+        }
+
+        .subagent-tool-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            height: 28px;
+            padding: 0 4px;
+        }
+
+        .subagent-content .spinner-svg {
+            width: 10px;
+            height: 10px;
+        }
+
+        .subagent-content .spinner-svg circle {
+            stroke: var(--text-weaker);
+        }
+
         .input-area {
             display: flex;
             align-items: flex-end;

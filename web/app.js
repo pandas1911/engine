@@ -1,5 +1,6 @@
         let streaming = false;
         let parts = [];
+        let subagents = {};
         let autoScrollEnabled = true;
         const SESSION_KEY = 'engine_session_id';
 
@@ -184,6 +185,93 @@
                     errorEl.className = 'error-message';
                     errorEl.textContent = 'Error: ' + (data.message || 'Unknown error');
                     contentStream.appendChild(errorEl);
+                    autoScroll();
+                    break;
+                }
+                case 'subagent_start': {
+                    const panel = createSubAgentPanel(data.part_id, data.task_id, data.label, data.description);
+                    subagents[data.task_id] = {
+                        part_id: data.part_id,
+                        element: panel,
+                        contentEl: panel.querySelector('.subagent-content'),
+                        parts: [],
+                        state: 'running',
+                    };
+                    contentStream.appendChild(panel);
+                    autoScroll();
+                    break;
+                }
+                case 'subagent_part_new': {
+                    const sa = subagents[data.task_id];
+                    if (!sa) break;
+                    let el;
+                    if (data.part_type === 'reasoning') {
+                        el = createSubAgentThinking(data.part_id, data.text || '');
+                    } else if (data.part_type === 'text') {
+                        el = createSubAgentText(data.part_id, data.text || '');
+                    }
+                    if (el) {
+                        sa.parts.push({ id: data.part_id, type: data.part_type, element: el, content: data.text || '' });
+                        sa.contentEl.appendChild(el);
+                    }
+                    autoScroll();
+                    break;
+                }
+                case 'subagent_part_delta': {
+                    const sa = subagents[data.task_id];
+                    if (!sa) break;
+                    const part = sa.parts.find(p => p.id === data.part_id);
+                    if (part && part.element) {
+                        part.content += data.text || '';
+                        part.element.textContent = part.content;
+                    }
+                    autoScroll();
+                    break;
+                }
+                case 'subagent_part_close': {
+                    const sa = subagents[data.task_id];
+                    if (!sa) break;
+                    const part = sa.parts.find(p => p.id === data.part_id);
+                    if (part) part.state = 'closed';
+                    break;
+                }
+                case 'subagent_tool_start': {
+                    const sa = subagents[data.task_id];
+                    if (!sa) break;
+                    const toolRow = createSubAgentToolRow(data.part_id, data.tool_name, data.arguments, data.call_id);
+                    sa.parts.push({ id: data.part_id, type: 'tool', element: toolRow, state: 'open' });
+                    sa.contentEl.appendChild(toolRow);
+                    autoScroll();
+                    break;
+                }
+                case 'subagent_tool_result': {
+                    const sa = subagents[data.task_id];
+                    if (!sa) break;
+                    const part = sa.parts.find(p => p.id === data.part_id);
+                    if (part && part.element) {
+                        updateSubAgentToolResult(data.part_id, data.result, part.element);
+                    }
+                    autoScroll();
+                    break;
+                }
+                case 'subagent_done': {
+                    const sa = subagents[data.task_id];
+                    if (!sa) break;
+                    sa.state = 'completed';
+                    const spinner = sa.element.querySelector('.subagent-header .spinner-svg');
+                    if (spinner) spinner.remove();
+                    break;
+                }
+                case 'subagent_error': {
+                    const sa = subagents[data.task_id];
+                    if (!sa) break;
+                    sa.state = 'error';
+                    const spinner = sa.element.querySelector('.subagent-header .spinner-svg');
+                    if (spinner) spinner.remove();
+                    const errorEl = document.createElement('div');
+                    errorEl.className = 'error-message';
+                    errorEl.textContent = 'Error: ' + (data.message || 'Unknown error');
+                    sa.contentEl.appendChild(errorEl);
                     autoScroll();
                     break;
                 }

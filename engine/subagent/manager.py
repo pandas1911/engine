@@ -56,6 +56,7 @@ class SubAgentManager:
         lane_queue: Optional["LaneConcurrencyQueue"] = None,
         llm_provider=None,
         tool_pack=None,
+        root_streaming_handler=None,
     ):
         """
         Args:
@@ -68,6 +69,7 @@ class SubAgentManager:
             lane_queue: Optional lane-based concurrency queue
             llm_provider: Shared LLM provider for child agent construction
             tool_pack: Shared ToolPack for child agent construction
+            root_streaming_handler: Optional SSEStreamingHandler from the root agent for sub-agent streaming
         """
         self._task_registry = task_registry
         self._event_queue = event_queue
@@ -78,6 +80,7 @@ class SubAgentManager:
         self._lane_queue = lane_queue
         self._llm_provider = llm_provider
         self._tool_pack = tool_pack
+        self._root_streaming_handler = root_streaming_handler
         self._time_provider = TimeProvider(
             timezone_override=config.user_timezone if config else None
         )
@@ -214,6 +217,24 @@ class SubAgentManager:
             depth=child_session.depth,
         )
 
+        # Create SubAgentStreamingWrapper for depth-1 children (root agent's direct children)
+        child_streaming_handler = None
+        if self._root_streaming_handler is not None and parent_session.depth == 0:
+            from engine.runtime.streaming_handler import SubAgentStreamingWrapper
+            child_streaming_handler = SubAgentStreamingWrapper(
+                emit=self._root_streaming_handler._callback,
+                task_id=task_id,
+                allocate_part_id=self._root_streaming_handler._next_part_id,
+            )
+            # Emit subagent_start event
+            start_part_id = self._root_streaming_handler._next_part_id()
+            self._root_streaming_handler._callback("subagent_start", {
+                "part_id": start_part_id,
+                "task_id": task_id,
+                "label": label,
+                "description": task_desc,
+            })
+
         from engine.runtime.agent import Agent
 
         child_agent = Agent(
@@ -226,6 +247,7 @@ class SubAgentManager:
             parent_task_id=self._agent_task_id,
             label=display_name,
             lane_queue=self._lane_queue,
+            streaming_handler=child_streaming_handler,
         )
 
         await self._task_registry.set_agent(task_id, child_agent)
@@ -330,6 +352,11 @@ class SubAgentManager:
                 event_type="child_run_unhandled",
                 data={"error_type": type(e).__name__, "error_message": str(e)},
             )
+            if self._root_streaming_handler is not None:
+                self._root_streaming_handler._callback("subagent_error", {
+                    "task_id": task_id,
+                    "message": str(agent._final_result or "Unknown error"),
+                })
             return
 
         # Log based on final state (registry.complete handled internally by agent)
@@ -371,6 +398,17 @@ class SubAgentManager:
                 event_type="child_run_unexpected_state",
                 data={"state": state.value},
             )
+
+        if self._root_streaming_handler is not None:
+            if state == AgentState.COMPLETED:
+                self._root_streaming_handler._callback("subagent_done", {
+                    "task_id": task_id, "success": True,
+                })
+            elif state == AgentState.ERROR:
+                self._root_streaming_handler._callback("subagent_error", {
+                    "task_id": task_id,
+                    "message": str(agent._final_result or "Unknown error"),
+                })
 
     # ------------------------------------------------------------------
     # _on_child_complete() — migrated from Registry.complete() (registry.py lines 167-243)

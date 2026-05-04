@@ -76,14 +76,25 @@ class SSEStreamingHandler:
     globally unique part IDs even across multiple _get_llm_response calls.
     """
 
-    def __init__(self, callback: Callable[[str, Any], None]) -> None:
+    def __init__(
+        self,
+        callback: Callable[[str, Any], None],
+        allocate_part_id: Optional[Callable[[], int]] = None,
+    ) -> None:
         self._callback = callback
+        self._allocate_part_id = allocate_part_id
         self._part_counter: int = 0
         self._active_reasoning_part_id: Optional[int] = None
         self._active_text_part_id: Optional[int] = None
         self._collected_content: str = ""
         self._tool_call_buffers: dict[int, dict] = {}
         self._collected_tool_calls: List[ToolCall] = []
+
+    def _next_part_id(self) -> int:
+        if self._allocate_part_id is not None:
+            return self._allocate_part_id()
+        self._part_counter += 1
+        return self._part_counter
 
     def emit(self, event_name: str, data: Any) -> None:
         self._callback(event_name, data)
@@ -94,10 +105,10 @@ class SSEStreamingHandler:
 
         if thinking:
             if self._active_reasoning_part_id is None:
-                self._part_counter += 1
-                self._active_reasoning_part_id = self._part_counter
+                part_id = self._next_part_id()
+                self._active_reasoning_part_id = part_id
                 self.emit("part_new", {
-                    "part_id": self._part_counter,
+                    "part_id": part_id,
                     "part_type": "reasoning",
                     "text": thinking,
                 })
@@ -116,10 +127,10 @@ class SSEStreamingHandler:
 
         if delta:
             if self._active_text_part_id is None:
-                self._part_counter += 1
-                self._active_text_part_id = self._part_counter
+                part_id = self._next_part_id()
+                self._active_text_part_id = part_id
                 self.emit("part_new", {
-                    "part_id": self._part_counter,
+                    "part_id": part_id,
                     "part_type": "text",
                     "text": delta,
                 })
@@ -182,8 +193,167 @@ class SSEStreamingHandler:
         return self._collected_tool_calls
 
     def on_tool_start(self, tool_name: str, arguments: dict, call_id: str) -> int:
-        self._part_counter += 1
-        part_id = self._part_counter
+        if tool_name == "spawn":
+            return 0
+        part_id = self._next_part_id()
+        self.emit("tool_start", {
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "call_id": call_id,
+            "part_id": part_id,
+        })
+        return part_id
+
+    def on_tool_end(self, tool_name: str, result: str, call_id: str, part_id: int) -> None:
+        self.emit("tool_end", {
+            "tool_name": tool_name,
+            "result": result,
+            "call_id": call_id,
+            "part_id": part_id,
+        })
+
+    def reset(self) -> None:
+        self._active_reasoning_part_id = None
+        self._active_text_part_id = None
+        self._collected_content = ""
+        self._tool_call_buffers = {}
+        self._collected_tool_calls = []
+
+
+class SubAgentStreamingWrapper:
+    """StreamingHandler wrapper that namespaces events for sub-agent streams.
+
+    Wraps a parent SSEStreamingHandler's emit callback and:
+    - Prefixes all event names with ``subagent_``
+    - Injects ``task_id`` into every emitted data dict
+    - Converts ``agent_done`` -> ``subagent_done`` and ``error`` -> ``subagent_error``
+    - Uses a shared part counter via the ``allocate_part_id`` callback
+    - Mirrors SSEStreamingHandler's accumulation logic exactly
+    """
+
+    def __init__(
+        self,
+        emit: Callable[[str, Any], None],
+        task_id: str,
+        allocate_part_id: Callable[[], int],
+    ) -> None:
+        self._emit = emit
+        self._task_id = task_id
+        self._allocate_part_id = allocate_part_id
+        self._active_reasoning_part_id: Optional[int] = None
+        self._active_text_part_id: Optional[int] = None
+        self._collected_content: str = ""
+        self._tool_call_buffers: dict[int, dict] = {}
+        self._collected_tool_calls: List[ToolCall] = []
+
+    def emit(self, event_name: str, data: Any) -> None:
+        if event_name == "agent_done":
+            namespaced = "subagent_done"
+        elif event_name == "error":
+            namespaced = "subagent_error"
+        else:
+            namespaced = f"subagent_{event_name}"
+        if isinstance(data, dict):
+            data = {**data, "task_id": self._task_id}
+        self._emit(namespaced, data)
+
+    def on_chunk(self, chunk: StreamChunk) -> None:
+        thinking = chunk.thinking_text or ""
+        delta = chunk.delta_text or ""
+
+        if thinking:
+            if self._active_reasoning_part_id is None:
+                part_id = self._allocate_part_id()
+                self._active_reasoning_part_id = part_id
+                self.emit("part_new", {
+                    "part_id": part_id,
+                    "part_type": "reasoning",
+                    "text": thinking,
+                })
+            else:
+                self.emit("part_delta", {
+                    "part_id": self._active_reasoning_part_id,
+                    "text": thinking,
+                })
+
+        # Close reasoning part when transitioning to text
+        if delta and self._active_reasoning_part_id is not None:
+            self.emit("part_close", {
+                "part_id": self._active_reasoning_part_id,
+            })
+            self._active_reasoning_part_id = None
+
+        if delta:
+            if self._active_text_part_id is None:
+                part_id = self._allocate_part_id()
+                self._active_text_part_id = part_id
+                self.emit("part_new", {
+                    "part_id": part_id,
+                    "part_type": "text",
+                    "text": delta,
+                })
+            else:
+                self.emit("part_delta", {
+                    "part_id": self._active_text_part_id,
+                    "text": delta,
+                })
+
+        if chunk.finish_reason:
+            if self._active_reasoning_part_id is not None:
+                self.emit("part_close", {
+                    "part_id": self._active_reasoning_part_id,
+                })
+                self._active_reasoning_part_id = None
+            if self._active_text_part_id is not None:
+                self.emit("part_close", {
+                    "part_id": self._active_text_part_id,
+                })
+                self._active_text_part_id = None
+
+        # Accumulate content
+        self._collected_content += chunk.delta_text or ""
+
+        # Accumulate tool call deltas
+        if chunk.tool_calls:
+            for tc_delta in chunk.tool_calls:
+                idx = tc_delta.index
+                if idx not in self._tool_call_buffers:
+                    self._tool_call_buffers[idx] = {"name": "", "arguments": "", "call_id": ""}
+                if hasattr(tc_delta, 'id') and tc_delta.id:
+                    self._tool_call_buffers[idx]["call_id"] = tc_delta.id
+                if hasattr(tc_delta, 'function') and tc_delta.function:
+                    if tc_delta.function.name:
+                        self._tool_call_buffers[idx]["name"] += tc_delta.function.name
+                    if tc_delta.function.arguments:
+                        self._tool_call_buffers[idx]["arguments"] += tc_delta.function.arguments
+
+        # Parse complete tool calls on finish
+        if chunk.finish_reason:
+            self._collected_tool_calls.clear()
+            for idx in sorted(self._tool_call_buffers.keys()):
+                buf = self._tool_call_buffers[idx]
+                args: dict = {}
+                if buf["arguments"]:
+                    try:
+                        args = json.loads(buf["arguments"])
+                    except json.JSONDecodeError:
+                        args = {"raw": buf["arguments"]}
+                self._collected_tool_calls.append(ToolCall(
+                    name=buf["name"],
+                    arguments=args,
+                    call_id=buf["call_id"],
+                ))
+
+    def get_content(self) -> str:
+        return self._collected_content
+
+    def get_tool_calls(self) -> List[ToolCall]:
+        return self._collected_tool_calls
+
+    def on_tool_start(self, tool_name: str, arguments: dict, call_id: str) -> int:
+        if tool_name == "spawn":
+            return 0
+        part_id = self._allocate_part_id()
         self.emit("tool_start", {
             "tool_name": tool_name,
             "arguments": arguments,

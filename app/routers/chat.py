@@ -131,6 +131,81 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
                 }),
             })
             done_event.set()
+        elif event_name == "subagent_start":
+            event_queue.put_nowait({
+                "event": "subagent_start",
+                "data": json.dumps({
+                    "part_id": data.get("part_id", 0),
+                    "task_id": data.get("task_id", ""),
+                    "label": data.get("label", ""),
+                    "description": data.get("description", ""),
+                }),
+            })
+        elif event_name == "subagent_part_new":
+            event_queue.put_nowait({
+                "event": "subagent_part_new",
+                "data": json.dumps({
+                    "part_id": data["part_id"],
+                    "task_id": data.get("task_id", ""),
+                    "part_type": data["part_type"],
+                    "text": data.get("text", ""),
+                }),
+            })
+        elif event_name == "subagent_part_delta":
+            event_queue.put_nowait({
+                "event": "subagent_part_delta",
+                "data": json.dumps({
+                    "part_id": data["part_id"],
+                    "task_id": data.get("task_id", ""),
+                    "text": data.get("text", ""),
+                }),
+            })
+        elif event_name == "subagent_part_close":
+            event_queue.put_nowait({
+                "event": "subagent_part_close",
+                "data": json.dumps({
+                    "part_id": data["part_id"],
+                    "task_id": data.get("task_id", ""),
+                }),
+            })
+        elif event_name == "subagent_tool_start":
+            event_queue.put_nowait({
+                "event": "subagent_tool_start",
+                "data": json.dumps({
+                    "part_id": data.get("part_id", 0),
+                    "task_id": data.get("task_id", ""),
+                    "tool_name": data["tool_name"],
+                    "arguments": data.get("arguments", {}),
+                    "call_id": data.get("call_id", ""),
+                }),
+            })
+        elif event_name == "subagent_tool_result":
+            event_queue.put_nowait({
+                "event": "subagent_tool_result",
+                "data": json.dumps({
+                    "part_id": data.get("part_id", 0),
+                    "task_id": data.get("task_id", ""),
+                    "tool_name": data["tool_name"],
+                    "result": data.get("result", ""),
+                    "call_id": data.get("call_id", ""),
+                }),
+            })
+        elif event_name == "subagent_done":
+            event_queue.put_nowait({
+                "event": "subagent_done",
+                "data": json.dumps({
+                    "task_id": data.get("task_id", ""),
+                    "success": data.get("success", True),
+                }),
+            })
+        elif event_name == "subagent_error":
+            event_queue.put_nowait({
+                "event": "subagent_error",
+                "data": json.dumps({
+                    "task_id": data.get("task_id", ""),
+                    "message": data.get("message", "Unknown error"),
+                }),
+            })
 
     async def run_delegate():
         try:

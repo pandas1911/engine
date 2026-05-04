@@ -24,11 +24,11 @@ engine/
 │   │   └── pacing.py          # AdaptivePacer, ResultTruncator, RegistrySizeMonitor
 │   ├── runtime/               # Agent execution core
 │   │   ├── __init__.py
-│   │   ├── agent.py           # Agent class — main execution loop (no SubAgentManager, uses ToolPack)
+│   │   ├── agent.py           # Agent class — main execution loop (no SubAgentManager, uses ToolPack), streaming_handler is public attribute
 │   │   ├── agent_models.py    # Data models (Session, Message, AgentResult, etc.)
 │   │   ├── state.py           # Agent state machine
 │   │   ├── task_registry.py   # Task CRUD with handler-based notification
-│   │   └── streaming_handler.py  # StreamingHandler Protocol + SSEStreamingHandler (streaming state extraction)
+│   │   └── streaming_handler.py  # StreamingHandler Protocol + SSEStreamingHandler + SubAgentStreamingWrapper (sub-agent streaming)
 │   ├── providers/             # LLM provider layer
 │   │   ├── __init__.py
 │   │   ├── llm_provider.py    # BaseLLMProvider / LLMProvider (OpenAI-compatible)
@@ -39,8 +39,8 @@ engine/
 │   │   └── chunk_types.py        # LLM streaming chunk types (StreamChunk dataclass)
 │   ├── subagent/              # Sub-agent spawning and lifecycle
 │   │   ├── __init__.py
-│   │   ├── manager.py         # SubAgentManager — spawn, gate-check, notify
-│   │   ├── spawn.py           # SpawnTool — lazy-caches SubAgentManager per agent
+│   │   ├── manager.py         # SubAgentManager — spawn, gate-check, notify; accepts root_streaming_handler for sub-agent streaming
+│   │   ├── spawn.py           # SpawnTool — lazy-caches SubAgentManager per agent, passes root_streaming_handler through
 │   │   ├── protocol.py        # Drainable protocol definition
 │   │   ├── events.py          # Event types (ChildCompletionEvent)
 │   │   └── subagent_models.py # AgentTask, CollectedChildResult
@@ -58,24 +58,28 @@ engine/
 │       └── sink.py            # Logger, formatters, async file handler
 ├── tests/                     # Test suite
 │   ├── test_easy_task.py      # Simple delegation test
-│   └── test_multilayer_subagent.py  # Multi-layer nesting test
+│   ├── test_multilayer_subagent.py  # Multi-layer nesting test
+│   ├── test_session_reuse.py  # Session reuse unit tests
+│   └── test_subagent_streaming.py  # Sub-agent streaming unit tests
 ├── app/                       # FastAPI web application
 │   ├── main.py                # FastAPI app factory, static file mount
 │   ├── _state.py              # Global streaming lock (single-request enforcement)
 │   ├── session_store.py       # In-memory session persistence (save/load Session objects)
 │   ├── models/
 │   │   ├── __init__.py
-│   │   └── sse_events.py      # Part-based SSE event dataclasses (StreamEvent + 8 event types)
+│   │   └── sse_events.py      # Part-based SSE event dataclasses (StreamEvent + 8 root + 8 sub-agent event types)
 │   └── routers/
 │       ├── __init__.py
-│       ├── chat.py            # POST /chat SSE endpoint with Part-based event mapping
+│       ├── chat.py            # POST /chat SSE endpoint with Part-based event mapping (root + sub-agent events)
 │       ├── sessions.py        # Session management endpoints
 │       └── health.py          # Health check endpoint
 ├── web/                       # Frontend static files
 │   ├── index.html             # Minimal HTML shell
-│   ├── styles.css             # CSS styles (extracted from monolithic index.html)
-│   ├── app.js                 # Main JS: SSE handling, Part data model, UI logic
-│   └── parts.js               # Part rendering: create/update/close DOM elements
+│   ├── styles.css             # CSS styles (extracted from monolithic index.html, includes sub-agent panel styles)
+│   ├── app.js                 # Main JS: SSE handling, Part data model, UI logic (root + sub-agent event handling)
+│   ├── parts.js               # Part rendering: create/update/close DOM elements (root + sub-agent parts)
+│   └── tests/
+│       └── subagent-streaming.test.js  # Frontend tests for sub-agent SSE event handling and rendering
 ├── docs/                      # Documentation
 │   └── codebase-structure.md  # This file
 ├── logs/                      # Runtime log output (JSONL)
@@ -350,6 +354,7 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
 
 - **ToolPack-based tools**: Agent receives a `ToolPack` (immutable tool view) at construction. Tool schemas are depth-filtered by `ToolPack.get_schemas()` (spawn hidden at max depth).
 - **Properties**: `state`, `result`, `event_queue`, `lane_queue`, `tool_pack` — all read-only via properties
+- **Streaming handler (public attribute)**: `streaming_handler` is a public attribute (renamed from `_streaming_handler`). The handler is passed through to `SubAgentManager` for sub-agent streaming via the `SpawnTool`.
 - **Emergency summary**: When iteration limit is reached without a text response, makes one final LLM call WITHOUT tools to force a summary
 - **Summary warning**: Injects a warning message N iterations before the limit
 - **Timestamp injection**: All user messages get timezone-aware timestamps
@@ -388,7 +393,7 @@ CRUD for `AgentTask` entries with handler-based notification.
 
 #### `streaming_handler.py` — Streaming Response Handler
 
-Defines the `StreamingHandler` Protocol and `SSEStreamingHandler` concrete implementation that encapsulates all streaming-specific concerns extracted from the Agent class.
+Defines the `StreamingHandler` Protocol and `SSEStreamingHandler` concrete implementation that encapsulates all streaming-specific concerns extracted from the Agent class. Also provides `SubAgentStreamingWrapper` for streaming sub-agent LLM output back through the root handler.
 
 **Protocol:**
 
@@ -404,15 +409,16 @@ Defines the `StreamingHandler` Protocol and `SSEStreamingHandler` concrete imple
 | `on_chunk(chunk)` | Process a StreamChunk: manages part events + accumulates content/tool_calls |
 | `get_content()` | Return accumulated text content |
 | `get_tool_calls()` | Return parsed ToolCall objects (after finish_reason) |
-| `on_tool_start(tool_name, arguments, call_id)` | Emit tool_start, return part_id |
+| `on_tool_start(tool_name, arguments, call_id)` | Emit tool_start, return part_id. Silently returns 0 for `tool_name == "spawn"` (no SSE event emitted). |
 | `on_tool_end(tool_name, result, call_id, part_id)` | Emit tool_end |
 | `reset()` | Reset per-call state (part IDs + data buffers). Does NOT reset counter. |
 
-**Concrete implementation:**
+**Concrete implementations:**
 
 | Class | Description |
 |---|---|
-| `SSEStreamingHandler` | Wraps `Callable[[str, Any], None]` callback. Owns part lifecycle state machine, content accumulation, and tool call buffering. `_part_counter` is monotonic across handler lifetime. |
+| `SSEStreamingHandler` | Wraps `Callable[[str, Any], None]` callback. Owns part lifecycle state machine, content accumulation, and tool call buffering. `_part_counter` is monotonic across handler lifetime. Accepts optional `allocate_part_id: Callable[[], int]` for delegating part ID assignment to a parent handler. Uses `_next_part_id()` helper to delegate or increment locally. |
+| `SubAgentStreamingWrapper` | Wraps the root handler's emit callback for sub-agent streaming. Receives `emit`, `task_id`, and `allocate_part_id` (required) at construction. Namespaces all events with `subagent_` prefix, converts `agent_done`→`subagent_done`, `error`→`subagent_error`, and injects `task_id` into every event. No local part counter — uses the shared `allocate_part_id` callback for globally unique IDs. |
 
 ---
 
@@ -564,14 +570,29 @@ Defines the unified chunk type yielded by `stream_chat()`.
 
 Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per agent (not owned by `Agent` directly). Receives `llm_provider` and `tool_pack` at construction and builds child agents directly. Prompt templates for sub-agent system prompts are defined in `engine/prompts.py` (Section 4).
 
+**Constructor parameters:**
+
+| Parameter | Description |
+|---|---|
+| `llm_provider` | Shared LLM provider for child agents |
+| `tool_pack` | Parent agent's ToolPack |
+| `root_streaming_handler` | Optional root-level `SSEStreamingHandler`. When set, depth-0 children receive a `SubAgentStreamingWrapper`; depth≥1 children receive `None`. Defaults to `None`. |
+
 **Key methods:**
 
 | Method | Description |
 |---|---|
-| `spawn()` | Create child session, register task, build system prompt, launch `asyncio.create_task` |
+| `spawn()` | Create child session, register task, build system prompt, emit `subagent_start` event (if streaming), create `SubAgentStreamingWrapper` for depth-0 children, launch `asyncio.create_task` |
 | `_run_child()` | Background execution with lane slot management |
+| `_execute_child()` | Wraps `_run_child()`: emits `subagent_done`/`subagent_error` lifecycle events after child completes |
 | `_on_child_complete()` | Gate-check handler: pending children? pending siblings? → collect results, notify parent |
 | `_format_child_results()` | Format collected child results as JSON prompt |
+
+**Sub-agent streaming logic:**
+
+- When `root_streaming_handler` is provided AND `parent_session.depth == 0`: creates a `SubAgentStreamingWrapper` wrapping the root handler's emit callback and `_next_part_id()` method
+- The wrapper is passed as `streaming_handler` to the child `Agent` constructor
+- Lifecycle events (`subagent_start`, `subagent_done`, `subagent_error`) are emitted directly via the root callback, not through the wrapper
 
 **Gate-check logic (`_on_child_complete()`):**
 
@@ -585,7 +606,7 @@ Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per a
 
 #### `spawn.py` — SpawnTool
 
-`Tool` subclass that lazy-creates a `SubAgentManager` per agent on first `execute()` call. Uses `asyncio.Lock` for concurrency safety. The `SubAgentManager` receives `llm_provider` and `tool_pack` from the parent agent and directly constructs child `Agent` instances. On agent completion, `release()` clears the cached manager.
+`Tool` subclass that lazy-creates a `SubAgentManager` per agent on first `execute()` call. Uses `asyncio.Lock` for concurrency safety. The `SubAgentManager` receives `llm_provider`, `tool_pack`, and `root_streaming_handler` (from `parent_agent.streaming_handler`) from the parent agent and directly constructs child `Agent` instances. On agent completion, `release()` clears the cached manager.
 
 #### `protocol.py` — Drainable Protocol
 
@@ -677,8 +698,15 @@ Auto-discovered custom tools directory. Place `Tool` subclasses here and they wi
 | `test_easy_task.py` | Tests `delegate()` with a structured city-comparison research prompt |
 | `test_multilayer_subagent.py` | Tests 3-child × 2-grandchild nesting with 3-level data provenance verification via JSONL logs |
 | `test_session_reuse.py` | Unit tests for `delegate()` session reuse — 8 tests covering backward compat, ID preservation, env block refresh, warning logging (all mocked, no live LLM calls) |
+| `test_subagent_streaming.py` | Unit tests for SubAgentStreamingWrapper, SSEStreamingHandler allocate_part_id, and spawn tool suppression |
 
 Both integration tests use `pytest-asyncio` and call the real `delegate()` function (requires valid `engine.json`).
+
+#### Frontend Tests
+
+| File | Description |
+|---|---|
+| `web/tests/subagent-streaming.test.js` | Tests for sub-agent SSE event handling, panel rendering, and part lifecycle |
 
 ---
 
@@ -713,8 +741,16 @@ Defines the wire-format SSE event types as dataclasses inheriting from `StreamEv
 | `ToolCallResultEvent` | `tool_call_result` | `part_id`, `tool_name`, `result`, `call_id` |
 | `DoneEvent` | `done` | `success`, `session_id` |
 | `ErrorEvent` | `error` | `message`, `session_id` |
+| `SubAgentStartEvent` | `subagent_start` | `part_id`, `task_id`, `label`, `description` |
+| `SubAgentPartNewEvent` | `subagent_part_new` | `part_id`, `task_id`, `part_type`, `text` |
+| `SubAgentPartDeltaEvent` | `subagent_part_delta` | `part_id`, `task_id`, `text` |
+| `SubAgentPartCloseEvent` | `subagent_part_close` | `part_id`, `task_id` |
+| `SubAgentToolStartEvent` | `subagent_tool_start` | `part_id`, `task_id`, `tool_name`, `arguments`, `call_id` |
+| `SubAgentToolResultEvent` | `subagent_tool_result` | `part_id`, `task_id`, `tool_name`, `result`, `call_id` |
+| `SubAgentDoneEvent` | `subagent_done` | `task_id`, `success` |
+| `SubAgentErrorEvent` | `subagent_error` | `task_id`, `message` |
 
-9 dataclasses total (1 base `StreamEvent` + 8 event types). The `DoneEvent` does not include a `content` field — text content is delivered incrementally via Part events.
+17 dataclasses total (1 base `StreamEvent` + 8 root event types + 8 sub-agent event types). The `DoneEvent` does not include a `content` field — text content is delivered incrementally via Part events. Sub-agent events carry an additional `task_id` field to identify which sub-agent they belong to.
 
 #### `routers/chat.py` — Chat SSE Endpoint
 
@@ -733,6 +769,14 @@ The `on_engine_event()` callback maps internal engine events to SSE wire format:
 | `tool_end` | `tool_call_result` | Renamed for clarity on wire |
 | `agent_done` | `done` | Adds `session_id` |
 | `error` | `error` | Adds `session_id` |
+| `subagent_start` | `subagent_start` | Sub-agent lifecycle start |
+| `subagent_part_new` | `subagent_part_new` | Sub-agent text/reasoning part |
+| `subagent_part_delta` | `subagent_part_delta` | Sub-agent content delta |
+| `subagent_part_close` | `subagent_part_close` | Sub-agent part close |
+| `subagent_tool_start` | `subagent_tool_start` | Sub-agent tool call start |
+| `subagent_tool_result` | `subagent_tool_result` | Sub-agent tool call result |
+| `subagent_done` | `subagent_done` | Sub-agent completion (does NOT set `done_event`) |
+| `subagent_error` | `subagent_error` | Sub-agent error (does NOT set `done_event`) |
 
 Additionally, `agent_start` is emitted immediately when the SSE connection opens, before `delegate()` begins execution.
 
@@ -777,10 +821,14 @@ delegate() (engine/runner.py)
     │     │     │     └── per tool call → handler.on_tool_start() → execute → handler.on_tool_end()
     │     │     └── spawn tool → SpawnTool.execute()
     │     │                       ├── Lazy SubAgentManager init (per agent, asyncio.Lock)
+    │     │                       │     └── passes root_streaming_handler from parent_agent.streaming_handler
     │     │                       ├── SubAgentManager.spawn()
     │     │                       │     ├── LaneConcurrencyQueue.acquire()
     │     │                       │     ├── Create child session + system prompt
     │     │                       │     ├── Build child Agent with shared llm_provider + tool_pack
+    │     │                       │     │     └── if depth==0: create SubAgentStreamingWrapper(root handler's _next_part_id)
+    │     │                       │     │         └── child Agent(streaming_handler=SubAgentStreamingWrapper)
+    │     │                       │     ├── Emit subagent_start event (if streaming active)
     │     │                       │     ├── Register in AgentTaskRegistry
     │     │                       │     └── asyncio.create_task(_run_child)
     │     │
@@ -837,6 +885,14 @@ The frontend communicates with the backend via Server-Sent Events (SSE) using a 
 | `tool_call_result` | Server → Client | `{part_id: int, tool_name: str, result: str, call_id: str}` |
 | `done` | Server → Client | `{success: bool, session_id: str}` |
 | `error` | Server → Client | `{message: str, session_id: str}` |
+| `subagent_start` | Server → Client | `{part_id: int, task_id: str, label: str, description: str}` |
+| `subagent_part_new` | Server → Client | `{part_id: int, task_id: str, part_type: str, text: str}` |
+| `subagent_part_delta` | Server → Client | `{part_id: int, task_id: str, text: str}` |
+| `subagent_part_close` | Server → Client | `{part_id: int, task_id: str}` |
+| `subagent_tool_start` | Server → Client | `{part_id: int, task_id: str, tool_name: str, arguments: dict, call_id: str}` |
+| `subagent_tool_result` | Server → Client | `{part_id: int, task_id: str, tool_name: str, result: str, call_id: str}` |
+| `subagent_done` | Server → Client | `{task_id: str, success: bool}` |
+| `subagent_error` | Server → Client | `{task_id: str, message: str}` |
 
 ### Part Types
 
@@ -850,14 +906,32 @@ The frontend communicates with the backend via Server-Sent Events (SSE) using a 
 
 Part IDs are simple incrementing integers assigned by `SSEStreamingHandler.on_tool_start()` and the part lifecycle logic in `on_chunk()`. The handler's `_part_counter` **never resets** — it increments monotonically across the handler's entire lifetime (including across multiple `_get_llm_response()` calls within a single agent run). This guarantees globally unique part IDs, preventing the frontend from misrouting events when the same agent produces multiple rounds of streaming output.
 
+**Shared counter for sub-agents:** When sub-agent streaming is active, the root `SSEStreamingHandler` exposes its `_next_part_id()` method via the optional `allocate_part_id` callback. The `SubAgentStreamingWrapper` uses this callback (no local counter), ensuring globally unique part IDs across both root and sub-agent streams. Depth-0 children share the root counter; depth≥1 children do not stream (handler is `None`).
+
 ### Event Flow
 
 ```
-StreamingHandler.on_chunk(chunk)
-  ├── thinking_text → part_new(reasoning) → part_delta → ... → part_close
-  ├── delta_text → part_new(text) → part_delta → ... → part_close
-  └── finish_reason → close any active Parts
+Root Agent:
+  StreamingHandler.on_chunk(chunk)
+    ├── thinking_text → part_new(reasoning) → part_delta → ... → part_close
+    ├── delta_text → part_new(text) → part_delta → ... → part_close
+    └── finish_reason → close any active Parts
 
-StreamingHandler.on_tool_start() / on_tool_end()
-  └── per tool call → counter++ → tool_start(part_id) → execute → tool_end(part_id)
+  StreamingHandler.on_tool_start() / on_tool_end()
+    └── per tool call → counter++ → tool_start(part_id) → execute → tool_end(part_id)
+                          (spawn tool calls silently return 0, no SSE event emitted)
+
+Sub-Agent (depth-0 children only):
+  SubAgentStreamingWrapper.on_chunk(chunk)
+    ├── thinking_text → subagent_part_new(reasoning) → subagent_part_delta → ... → subagent_part_close
+    ├── delta_text → subagent_part_new(text) → subagent_part_delta → ... → subagent_part_close
+    └── finish_reason → close any active Parts
+
+  SubAgentStreamingWrapper.on_tool_start() / on_tool_end()
+    └── per tool call → allocate_part_id() → subagent_tool_start → execute → subagent_tool_result
+
+  Lifecycle events (emitted by SubAgentManager, not wrapper):
+    ├── subagent_start(task_id, label, description) — on spawn
+    ├── subagent_done(task_id, success) — on completion
+    └── subagent_error(task_id, message) — on error
 ```

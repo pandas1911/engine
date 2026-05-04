@@ -67,7 +67,7 @@ class Agent:
             AgentEvent
         ] = []  # Deferred event queue (native list, Swift Array equivalent)
         self._tool_pack = tool_pack or ToolPack([])
-        self._streaming_handler = streaming_handler
+        self.streaming_handler = streaming_handler
 
         get_logger().info(
             self.label,
@@ -103,8 +103,8 @@ class Agent:
 
     def _emit(self, event_name: str, data: Any) -> None:
         """Emit an event via the streaming handler. No-op if no handler."""
-        if self._streaming_handler is not None:
-            self._streaming_handler.emit(event_name, data)
+        if self.streaming_handler is not None:
+            self.streaming_handler.emit(event_name, data)
 
     @property
     def event_queue(self) -> List[AgentEvent]:
@@ -174,7 +174,7 @@ class Agent:
         messages = self.session.get_messages()
         tools = self._get_tool_schemas()
 
-        if self._streaming_handler is None:
+        if self.streaming_handler is None:
             return await self.llm.chat(
                 messages=messages,
                 tools=tools,
@@ -183,7 +183,7 @@ class Agent:
                 depth=self.session.depth,
             )
 
-        self._streaming_handler.reset()
+        self.streaming_handler.reset()
 
         async for chunk in self.llm.stream_chat(
             messages=messages,
@@ -192,11 +192,11 @@ class Agent:
             task_id=self.task_id,
             depth=self.session.depth,
         ):
-            self._streaming_handler.on_chunk(chunk)
+            self.streaming_handler.on_chunk(chunk)
 
         return LLMResponse(
-            content=self._streaming_handler.get_content(),
-            tool_calls=self._streaming_handler.get_tool_calls(),
+            content=self.streaming_handler.get_content(),
+            tool_calls=self.streaming_handler.get_tool_calls(),
         )
 
     async def _process_tool_calls(self) -> None:
@@ -309,15 +309,15 @@ class Agent:
             )
 
             for tool_call in response.tool_calls:
-                if self._streaming_handler is not None:
-                    part_id = self._streaming_handler.on_tool_start(
+                if self.streaming_handler is not None:
+                    part_id = self.streaming_handler.on_tool_start(
                         tool_call.name, tool_call.arguments, tool_call.call_id,
                     )
                 else:
                     part_id = 0
                 result = await self._execute_tool(tool_call)
-                if self._streaming_handler is not None:
-                    self._streaming_handler.on_tool_end(
+                if self.streaming_handler is not None:
+                    self.streaming_handler.on_tool_end(
                         tool_call.name, str(result)[:2000], tool_call.call_id, part_id,
                     )
                 safe_result = result or "[Tool returned empty content]"
