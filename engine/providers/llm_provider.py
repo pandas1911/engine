@@ -4,6 +4,7 @@ This module provides abstract and concrete LLM provider implementations.
 """
 
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -86,6 +87,7 @@ class LLMProvider(BaseLLMProvider):
             api_key=provider_params.api_key,
             base_url=provider_params.base_url,
             max_retries=0,
+            timeout=120.0,
         )
         self.model = provider_params.model
         self._model_params = model_params or {}
@@ -129,8 +131,30 @@ class LLMProvider(BaseLLMProvider):
         )
 
         last_error: Optional[Exception] = None
+        _CUMULATIVE_TIMEOUT = 300.0
+        _retry_start = time.monotonic()
 
         for attempt in range(1, self._retry_engine.max_attempts + 1):
+            # Cumulative timeout guard
+            if time.monotonic() - _retry_start > _CUMULATIVE_TIMEOUT:
+                logger.error(
+                    agent_label,
+                    "LLM retry abandoned (cumulative timeout) | elapsed={:.1f}s, limit={}s, attempts={}".format(
+                        time.monotonic() - _retry_start, _CUMULATIVE_TIMEOUT, attempt - 1
+                    ),
+                    task_id=task_id, state="error", depth=depth,
+                    event_type="llm_cumulative_timeout",
+                    data={
+                        "elapsed_seconds": time.monotonic() - _retry_start,
+                        "limit_seconds": _CUMULATIVE_TIMEOUT,
+                        "attempts_made": attempt - 1,
+                        "model": self.model,
+                    },
+                )
+                raise LLMProviderError(
+                    TimeoutError("Cumulative retry timeout ({:.1f}s) exceeded".format(_CUMULATIVE_TIMEOUT))
+                ) from last_error
+
             try:
                 response = await self.client.chat.completions.create(**params)
 

@@ -168,7 +168,7 @@ Loads runtime configuration from `engine.json`.
 | `fallback` | `[]` | Optional list of fallback model references in `"provider/model"` format |
 | `strip_thinking` | `True` | Remove `<think/>` tags from LLM responses |
 | `max_depth` | `3` | Maximum sub-agent nesting depth |
-| `spawn_timeout` | `60.0` | Seconds to wait for a concurrency slot before rejecting spawn |
+| `spawn_timeout` | `30.0` | Seconds to wait for a concurrency slot before rejecting spawn |
 | `max_result_length` | `3000` | Max chars for child agent results before truncation |
 | `summary_warning_reserve` | `2` | Iterations before limit to inject summary warning |
 | `emergency_summary_enabled` | `True` | Force text-only LLM call when iteration limit reached |
@@ -299,7 +299,7 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 
 | Class | Description |
 |---|---|
-| `AdaptivePacer` | Dynamic throttling transitioning between HEALTHY/PRESSING/CRITICAL pace levels |
+| `AdaptivePacer` | Dynamic throttling transitioning between HEALTHY/PRESSING/CRITICAL pace levels. `wait_if_needed()` uses lock-outside-sleep pattern: computes delay and stamps projected timestamp inside `asyncio.Lock`, then sleeps and logs outside the lock to avoid serializing concurrent callers. |
 | `ResultTruncator` | Static utility for truncating oversized results |
 | `RegistrySizeMonitor` | Monitors task registry size and identifies completed tasks to purge |
 
@@ -447,7 +447,9 @@ Defines `BaseStreamingHandler` and two concrete implementations for handling str
 
 **LLMProvider features:**
 
+- Explicit 120s timeout on AsyncOpenAI client (prevents 600s default timeout black hole)
 - Per-call retry with configurable max attempts and exponential backoff
+- 300s cumulative retry timeout guard in `chat()` (abandons retries if total elapsed time exceeded)
 - Thinking tag stripping (`<think/>` removal)
 - Rate limit header extraction (`x-ratelimit-*`)
 - Token usage tracking (prompt_tokens, completion_tokens)
@@ -669,7 +671,7 @@ Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per a
 Auto-discovered custom tools directory. Place `Tool` subclasses here and they will be automatically loaded by `_discover_custom_tools()`. Currently contains:
 
 - **`web_search`** (`web_search.py`) — Web search tool using the `ddgs` metasearch library. Aggregates results from multiple search engines (DuckDuckGo, Bing, Brave, Google, etc.) with automatic failover via `backend="auto"`. Uses `asyncio.to_thread()` to wrap the synchronous `DDGS.text()` call. Lazy singleton DDGS instance for connection reuse.
-- **`web_fetch`** (`web_fetch.py`) — URL content fetching tool with configurable format (class variable `DEFAULT_FORMAT`, default: markdown), transient-error retry, Cloudflare handling, and response size limits.
+- **`web_fetch`** (`web_fetch.py`) — URL content fetching tool with configurable format (class variable `DEFAULT_FORMAT`, default: markdown), transient-error retry, Cloudflare handling, and response size limits. Content is truncated to 15,000 characters (`_MAX_CONTENT_LENGTH`) to prevent LLM context overflow.
 
 ---
 

@@ -205,14 +205,15 @@ class AdaptivePacer:
         """Enforce min interval and recommended delay before the next call.
 
         If the pacer is disabled, returns immediately.
-        Updates _last_call_timestamp after waiting.
+        Updates _last_call_timestamp inside lock; sleeps outside lock to
+        avoid serializing concurrent callers.
         """
         if not self._enabled:
             return
 
+        actual_delay_ms = 0.0
         async with self._lock:
             now = time.monotonic()
-            actual_delay_ms = 0.0
 
             if self._last_call_timestamp is not None:
                 elapsed_ms = (now - self._last_call_timestamp) * 1000.0
@@ -220,19 +221,21 @@ class AdaptivePacer:
                 actual_delay_ms += remaining_ms
             actual_delay_ms += self.get_recommended_delay()
 
-            if actual_delay_ms > 0:
-                await asyncio.sleep(actual_delay_ms / 1000.0)
-                get_logger().info(
-                    "RateControl",
-                    "pace_wait | delay_ms={:.1f} level={}".format(
-                        actual_delay_ms,
-                        self._pace_level.value,
-                    ),
-                    event_type="pace_wait",
-                    data={
-                        "delay_ms": actual_delay_ms,
-                        "pace_level": self._pace_level.value,
-                    },
-                )
+            # Stamp timestamp INSIDE lock so next caller sees correct schedule
+            self._last_call_timestamp = now + actual_delay_ms / 1000.0
 
-            self._last_call_timestamp = time.monotonic()
+        # Sleep and log OUTSIDE lock — other callers are not blocked
+        if actual_delay_ms > 0:
+            await asyncio.sleep(actual_delay_ms / 1000.0)
+            get_logger().info(
+                "RateControl",
+                "pace_wait | delay_ms={:.1f} level={}".format(
+                    actual_delay_ms,
+                    self._pace_level.value,
+                ),
+                event_type="pace_wait",
+                data={
+                    "delay_ms": actual_delay_ms,
+                    "pace_level": self._pace_level.value,
+                },
+            )

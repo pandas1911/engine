@@ -29,7 +29,7 @@ class Config:
 
     # Agent hierarchy
     max_depth: int = 3
-    spawn_timeout: float = 60.0
+    spawn_timeout: float = 30.0
     max_result_length: int = 3000
     max_reawaken_depth: int = 3  # max recursive re-awaken depth for Branch C
 
