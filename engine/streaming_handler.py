@@ -190,9 +190,12 @@ class SubAgentStreamingWrapper(BaseStreamingHandler):
     """Streaming handler wrapper that namespaces events for sub-agent streams.
 
     Wraps a parent BaseStreamingHandler and:
-    - Prefixes all event names with ``subagent_``
-    - Injects ``task_id`` into every emitted data dict
-    - Converts ``agent_done`` -> ``subagent_done`` and ``error`` -> ``subagent_error``
+    - Passes through ``subagent_*`` events without re-prefixing
+    - Maps both ``agent_done`` and ``subagent_done`` to ``subagent_done``
+    - Maps both ``error`` and ``subagent_error`` to ``subagent_error``
+    - Prefixes other events with ``subagent_``
+    - Injects ``task_id`` only when not already present in data dict
+    - No spawn suppression (inherits base class behavior)
     - Uses parent's part ID counter via _next_part_id()
     """
 
@@ -206,12 +209,15 @@ class SubAgentStreamingWrapper(BaseStreamingHandler):
         self._task_id = task_id
 
     def emit(self, event_name: str, data: Any) -> None:
-        if event_name == "agent_done":
+        if event_name in ("agent_done", "subagent_done"):
             namespaced = "subagent_done"
-        elif event_name == "error":
+        elif event_name in ("error", "subagent_error"):
             namespaced = "subagent_error"
+        elif event_name.startswith("subagent_"):
+            namespaced = event_name
         else:
             namespaced = f"subagent_{event_name}"
         if isinstance(data, dict):
-            data = {**data, "task_id": self._task_id}
+            if "task_id" not in data:
+                data = {**data, "task_id": self._task_id}
         self._parent.emit(namespaced, data)
