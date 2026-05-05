@@ -18,10 +18,9 @@ engine/
 │   │   ├── __init__.py        # Re-export layer for all safety classes
 │   │   ├── concurrency.py     # LaneConcurrencyQueue, LaneSlot, LaneStatus
 │   │   ├── rate_limit.py      # SlidingWindowRateLimiter
-│   │   ├── token_estimator.py # EmaTokenEstimator — adaptive chars→tokens estimator
+│   │   ├── token_estimator.py # EmaTokenEstimator — adaptive chars→tokens estimator; ResultTruncator
 │   │   ├── key_pool.py        # APIKeyPool
 │   │   ├── retry.py           # RetryEngine
-│   │   └── pacing.py          # AdaptivePacer, ResultTruncator, RegistrySizeMonitor
 │   ├── streaming_handler.py   # BaseStreamingHandler + SSEStreamingHandler + SubAgentStreamingWrapper (streaming event handling)
 │   ├── runtime/               # Agent execution core
 │   │   ├── __init__.py
@@ -135,7 +134,7 @@ The main entry point containing `delegate()` and all startup orchestration logic
 1. Load config via `get_config()` (auto-discovers `engine.json`)
 2. Create `TimeProvider`, inject timezone info into system prompt (or refresh env block if session is provided)
 3. Initialize logger with configured log directory
-4. Iterate `config.providers` dict — for each provider, create `SlidingWindowRateLimiter` and `AdaptivePacer`; for each model under that provider, create an `LLMProvider` keyed by `"provider/model"`
+4. Iterate `config.providers` dict — for each provider, create `SlidingWindowRateLimiter` (with optional pacing params); for each model under that provider, create an `LLMProvider` keyed by `"provider/model"`
 5. Build ordered key list from `config.primary` + `config.fallback`
 6. Create shared: `APIKeyPool` (with ordered composite key names), `RetryEngine`, `FallbackLLMProvider`
 7. Create `LaneConcurrencyQueue` (MAIN + SUBAGENT lanes)
@@ -243,13 +242,19 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 | `LaneStatus` | Data class for lane status queries |
 | `_LaneState` | Internal state per lane |
 
-#### `rate_limit.py` — Sliding Window Rate Limiter
+#### `rate_limit.py` — Sliding Window Rate Limiter (with Adaptive Pacing)
 
 | Class | Description |
 |---|---|
-| `SlidingWindowRateLimiter` | Dual RPM/TPM sliding window with event-driven scheduler (no busy waiting) |
+| `SlidingWindowRateLimiter` | Dual RPM/TPM sliding window with event-driven scheduler (no busy waiting). Includes integrated adaptive pacing via `pacing_enabled` and `min_interval_ms` constructor params. |
 
-**Key flow:** Fast path (capacity available, no waiters) → immediate return. Slow path → enqueue Future, background `_scheduler` task wakes waiters when capacity frees up.
+**Key flow:** When pacing is enabled, `acquire()` first applies a pacing delay (minimum interval + pace-level extra delay), then follows the standard rate limit path: fast path (capacity available, no waiters) → immediate return. Slow path → enqueue Future, background `_scheduler` task wakes waiters when capacity frees up.
+
+**Adaptive pacing (integrated):**
+
+- Constructor accepts `pacing_enabled` (default `False`) and `min_interval_ms` (default `500.0`). The effective minimum interval is the larger of `min_interval_ms` and `60000/rpm_limit` (RPM-derived floor).
+- `acquire()` calls `_wait_if_needed()` before the capacity check, which enforces the minimum interval between calls and adds pace-level delays.
+- `record_usage()` calls `_update_pace_level()` after recording tokens, which adjusts the pace level based on remaining capacity fraction: HEALTHY (>50%) → 0ms, PRESSING (20-50%) → 200ms, CRITICAL (<20%) → 1000ms.
 
 **Deadlock prevention:**
 
@@ -295,15 +300,14 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 | `RetryEngine` | Error classification (RATE_LIMITED/RETRYABLE/NON_RETRYABLE) with exponential backoff + jitter |
 | `T` | TypeVar used for generic retry return type |
 
-#### `pacing.py` — Adaptive Pacing
+#### `token_estimator.py` — Token Estimation & Result Truncation
 
 | Class | Description |
 |---|---|
-| `AdaptivePacer` | Dynamic throttling transitioning between HEALTHY/PRESSING/CRITICAL pace levels. `wait_if_needed()` uses lock-outside-sleep pattern: computes delay and stamps projected timestamp inside `asyncio.Lock`, then sleeps and logs outside the lock to avoid serializing concurrent callers. |
+| `EmaTokenEstimator` | Adaptive chars→tokens estimator using exponential moving average |
 | `ResultTruncator` | Static utility for truncating oversized results |
-| `RegistrySizeMonitor` | Monitors task registry size and identifies completed tasks to purge |
 
-**Pace levels:** HEALTHY (>50% remaining) → 0ms extra delay. PRESSING (20-50%) → 200ms. CRITICAL (<20%) → 1000ms.
+Adaptive pacing logic has been merged into `SlidingWindowRateLimiter` (see `rate_limit.py`). When `pacing_enabled=True`, the limiter applies a minimum interval delay and a pace-level-based extra delay (HEALTHY: 0ms, PRESSING: 200ms, CRITICAL: 1000ms) before each `acquire()` call. Pace level is updated after `record_usage()` based on the remaining capacity fraction.
 
 ---
 
@@ -474,7 +478,7 @@ Defines `BaseStreamingHandler` and two concrete implementations for handling str
 
 `FallbackLLMProvider` wraps multiple `LLMProvider` instances with automatic key rotation and sequential provider fallback.
 
-**Constructor:** `FallbackLLMProvider(providers: Dict[str, LLMProvider], key_pool: APIKeyPool, rate_limiters: Dict[str, SlidingWindowRateLimiter], pacers: Dict[str, AdaptivePacer], retry_engine: RetryEngine)`
+**Constructor:** `FallbackLLMProvider(providers: Dict[str, LLMProvider], key_pool: APIKeyPool, rate_limiters: Dict[str, SlidingWindowRateLimiter], retry_engine: RetryEngine)`
 
 Providers are ordered by the insertion order of the `providers` dict (primary first, then fallbacks). No weight-based selection — ordering is deterministic from config.
 
@@ -483,13 +487,12 @@ Providers are ordered by the insertion order of the `providers` dict (primary fi
 **Flow:**
 
 1. Acquire key from `APIKeyPool`
-2. Apply rate limiting (sliding window) — estimated_tokens is capped to prevent deadlock
-3. Apply adaptive pacing
-4. Execute chat request
-5. On success → record usage, update pacer, report success, feed actual tokens back to estimator
-6. On rate limit → report rate limited, rotate key, retry
-7. On retryable error → release reservation, propagate
-8. On non-retryable error → release reservation, raise
+2. Apply rate limiting with adaptive pacing (sliding window) — estimated_tokens is capped to prevent deadlock
+3. Execute chat request
+4. On success → record usage, report success, feed actual tokens back to estimator
+5. On rate limit → report rate limited, rotate key, retry
+6. On retryable error → release reservation, propagate
+7. On non-retryable error → release reservation, raise
 
 #### `thinking_strategy.py` — Provider-Specific Thinking Extraction
 
@@ -823,8 +826,7 @@ delegate() (engine/runner.py)
     │     │     │     │     └── Tool call buffering (get_tool_calls())
     │     │     │     └── FallbackLLMProvider.stream_chat()
     │     │     │           ├── APIKeyPool.acquire_key()
-    │     │     │           ├── SlidingWindowRateLimiter.acquire() ← estimated_tokens capped to tpm_limit
-    │     │     │           ├── AdaptivePacer.wait_if_needed()
+    │     │     │           ├── SlidingWindowRateLimiter.acquire() ← estimated_tokens capped to tpm_limit (includes adaptive pacing delay when enabled)
     │     │     │           └── LLMProvider.stream_chat() (OpenAI SDK)
     │     │     ├── Tool execution (ToolPack → Tool.execute())
     │     │     │     └── per tool call → handler.on_tool_start() → execute → handler.on_tool_end()
