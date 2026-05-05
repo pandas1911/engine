@@ -232,6 +232,7 @@ class SubAgentManager:
                 "task_id": task_id,
                 "label": label,
                 "description": task_desc,
+                "parent_task_id": self._agent_task_id,
             })
 
         from engine.runtime.agent import Agent

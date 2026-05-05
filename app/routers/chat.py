@@ -139,6 +139,7 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
                     "task_id": data.get("task_id", ""),
                     "label": data.get("label", ""),
                     "description": data.get("description", ""),
+                    "parent_task_id": data.get("parent_task_id", ""),
                 }),
             })
         elif event_name == "subagent_part_new":

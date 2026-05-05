@@ -420,7 +420,7 @@ Defines `BaseStreamingHandler` and two concrete implementations for handling str
 | Class | Description |
 |---|---|
 | `SSEStreamingHandler` | Extends BaseStreamingHandler with callback-based emit. Wraps `Callable[[str, Any], None]` callback. Overrides `on_tool_start` to silently return 0 for `tool_name == "spawn"` (spawn suppression). `_part_counter` is monotonic across handler lifetime. Accepts optional `allocate_part_id: Callable[[], int]` for delegating part ID assignment. |
-| `SubAgentStreamingWrapper` | Extends BaseStreamingHandler, receives `parent: BaseStreamingHandler` at construction. Uses parent's `_next_part_id()` via `allocate_part_id` callback for globally unique IDs. Namespaces all events with `subagent_` prefix, converts `agent_done`→`subagent_done`, `error`→`subagent_error`, and injects `task_id` into every event. No spawn suppression — inherits base class behavior. |
+| `SubAgentStreamingWrapper` | Extends BaseStreamingHandler, receives `parent: BaseStreamingHandler` at construction. Uses parent's `_next_part_id()` via `allocate_part_id` callback for globally unique IDs. Namespaces events with `subagent_` prefix but passes through already-prefixed `subagent_*` events without re-prefixing (double-prefix prevention). Maps both `agent_done` and `subagent_done` to `subagent_done`; maps both `error` and `subagent_error` to `subagent_error`. Only injects `task_id` into event data when not already present. No spawn suppression — inherits base class behavior. |
 
 ---
 
@@ -745,7 +745,7 @@ Defines the wire-format SSE event types as dataclasses inheriting from `StreamEv
 | `ToolCallResultEvent` | `tool_call_result` | `part_id`, `tool_name`, `result`, `call_id` |
 | `DoneEvent` | `done` | `success`, `session_id` |
 | `ErrorEvent` | `error` | `message`, `session_id` |
-| `SubAgentStartEvent` | `subagent_start` | `part_id`, `task_id`, `label`, `description` |
+| `SubAgentStartEvent` | `subagent_start` | `part_id`, `task_id`, `label`, `description`, `parent_task_id` |
 | `SubAgentPartNewEvent` | `subagent_part_new` | `part_id`, `task_id`, `part_type`, `text` |
 | `SubAgentPartDeltaEvent` | `subagent_part_delta` | `part_id`, `task_id`, `text` |
 | `SubAgentPartCloseEvent` | `subagent_part_close` | `part_id`, `task_id` |
@@ -889,7 +889,7 @@ The frontend communicates with the backend via Server-Sent Events (SSE) using a 
 | `tool_call_result` | Server → Client | `{part_id: int, tool_name: str, result: str, call_id: str}` |
 | `done` | Server → Client | `{success: bool, session_id: str}` |
 | `error` | Server → Client | `{message: str, session_id: str}` |
-| `subagent_start` | Server → Client | `{part_id: int, task_id: str, label: str, description: str}` |
+| `subagent_start` | Server → Client | `{part_id: int, task_id: str, label: str, description: str, parent_task_id: str}` |
 | `subagent_part_new` | Server → Client | `{part_id: int, task_id: str, part_type: str, text: str}` |
 | `subagent_part_delta` | Server → Client | `{part_id: int, task_id: str, text: str}` |
 | `subagent_part_close` | Server → Client | `{part_id: int, task_id: str}` |
