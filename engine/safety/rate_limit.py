@@ -115,6 +115,8 @@ class SlidingWindowRateLimiter:
         Slow path: enqueue a Future and wait outside the lock.
         """
         if self._pacing_enabled:
+            self._prune_stale()
+            self._update_pace_level()
             await self._wait_if_needed()
         loop = asyncio.get_running_loop()
 
@@ -259,9 +261,6 @@ class SlidingWindowRateLimiter:
                         "tpm_limit": self._tpm_limit,
                     },
                 )
-        if self._pacing_enabled:
-            self._update_pace_level()
-
     async def release_reserved(self, reservation_id: int) -> None:
         """Release a tentative TPM reservation.
 
