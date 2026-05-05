@@ -49,7 +49,7 @@ class Config:
     main_lane_concurrency: int = 4
     subagent_lane_concurrency: int = 5
 
-    # Adaptive pacing
+    # Rate-limit pacing (consumed by SlidingWindowRateLimiter)
     pacing_enabled: bool = True
     pacing_min_interval_ms: float = 500.0
 
