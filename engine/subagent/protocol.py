@@ -12,7 +12,7 @@ class Drainable(Protocol):
     """Protocol for objects that support async run and abort.
 
     Implementors must expose their current state, support running with
-    different triggers (start, children_settled), and support async abort.
+    different triggers (start, children_settled, reawaken), and support async abort.
     """
 
     @property

@@ -290,8 +290,7 @@ def get_concurrency_timeout_rejection(
         "Label: {label}\n"
         "Reason: Global concurrency limit reached ({active}/{max}), "
         "timed out waiting for a slot after {timeout}s.\n"
-        "Suggestion: Wait for existing sub-agents to complete and try again, "
-        "or consider completing this task yourself directly — "
+        "Suggestion: Consider completing this task yourself directly — "
         "you have full access to all tools and context needed."
     ).format(
         task_desc=task_desc,

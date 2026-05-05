@@ -31,6 +31,7 @@ class Config:
     max_depth: int = 3
     spawn_timeout: float = 60.0
     max_result_length: int = 3000
+    max_reawaken_depth: int = 3  # max recursive re-awaken depth for Branch C
 
     # Iteration guard
     summary_warning_reserve: int = 2
@@ -151,6 +152,7 @@ class ConfigLoader:
             "max_depth",
             "spawn_timeout",
             "max_result_length",
+            "max_reawaken_depth",
             "summary_warning_reserve",
             "emergency_summary_enabled",
             "emergency_summary_context_messages",

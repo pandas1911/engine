@@ -158,6 +158,25 @@ class Agent:
                         "session_msg_count": len(self.session.messages),
                     },
                 )
+            # >>> reawaken trigger — reset internal state before re-execution
+            elif trigger == "reawaken":
+                self._completion_event.clear()
+                self._final_result = None
+                get_logger().info(
+                    self.label,
+                    "Agent re-awakened | incoming_message_length={}, session_message_count={}".format(
+                        len(message) if message else 0,
+                        len(self.session.messages),
+                    ),
+                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                    event_type="agent_reawaken",
+                    data={
+                        "prev_state": prev_state.value,
+                        "message_length": len(message) if message else 0,
+                        "session_msg_count": len(self.session.messages),
+                    },
+                )
+            # <<< END reawaken
             get_logger().state_change(
                 self.label, prev_state.value, self.state.value, trigger,
                 task_id=self.task_id, state=self.state.value, depth=self.session.depth)

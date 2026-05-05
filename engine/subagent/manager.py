@@ -516,23 +516,61 @@ class SubAgentManager:
             event = ChildCompletionEvent(child_results=child_results, formatted_prompt=formatted)
             self._event_queue.append(event)
 
-        # [Branch C] Parent already completed → its earlier notification was blocked
-        # by Gate 1 (pending_children > 0). Now that this last child is done,
-        # re-propagate the notification upward to the grandparent.
+        # [Branch C] Parent already completed → re-awaken it to process child results,
+        # then its re-completion naturally re-propagates to the grandparent.
+        # Root agent (depth=0) is also re-awakened: its _final_result will be updated
+        # even though delegate() may have already returned (known behavior).
         elif parent_state == AgentState.COMPLETED:
             parent_task = self._task_registry.get_task(self._agent_task_id)
-            if parent_task and parent_task.result:
+            if not (parent_task and parent_task.result):
+                return
+
+            parent_depth = self._task_registry.get_task_depth(self._agent_task_id)
+
+            # Guard: respect max_reawaken_depth config.
+            # If exceeded, accept data loss and stop — do NOT re-propagate stale result.
+            max_reawaken_depth = (self._config.max_reawaken_depth
+                                  if self._config else 3)
+            # Use the agent tree depth as a natural bound:
+            # each re-awaken level has strictly decreasing depth,
+            # so depth itself limits the recursion chain length.
+            if parent_depth > max_reawaken_depth:
                 logger = get_logger()
-                logger.info(
-                    self._parent_label,
-                    "Parent already completed, re-propagating notification to grandparent | parent_task_id={}".format(
-                        self._agent_task_id),
-                    task_id=self._agent_task_id, state="completed",
-                    depth=self._task_registry.get_task_depth(self._agent_task_id),
-                    event_type="registry_repropagate_completed_parent",
-                    data={"parent_task_id": self._agent_task_id},
+                logger.warning(
+                    _child_label,
+                    "Re-awaken depth exceeds limit, child result discarded | parent_task_id={}, depth={}, max={}".format(
+                        self._agent_task_id, parent_depth, max_reawaken_depth),
+                    task_id=task_id, state="completed",
+                    depth=_child_depth,
+                    event_type="registry_reawaken_depth_exceeded",
+                    data={"parent_task_id": self._agent_task_id,
+                          "depth": parent_depth,
+                          "max_reawaken_depth": max_reawaken_depth},
                 )
-                await self._task_registry.complete(self._agent_task_id, parent_task.result)
+                return
+
+            # Re-awaken: fire the parent agent again with formatted child results.
+            # The parent transitions COMPLETED → RUNNING via "reawaken" trigger,
+            # processes child results through LLM, then _finish_and_notify()
+            # naturally calls task_registry.complete() which triggers grandparent handler.
+            logger = get_logger()
+            logger.info(
+                self._parent_label,
+                "Re-awakening completed parent with child results | parent_task_id={}, child_count={}, depth={}".format(
+                    self._agent_task_id, len(child_results), parent_depth),
+                task_id=self._agent_task_id, state="completed",
+                depth=parent_depth,
+                event_type="registry_reawaken_parent",
+                data={
+                    "parent_task_id": self._agent_task_id,
+                    "child_count": len(child_results),
+                    "child_ids": child_ids,
+                    "depth": parent_depth,
+                },
+            )
+            asyncio.create_task(
+                self._drainable.run(formatted, trigger="reawaken")
+            )
 
     # ------------------------------------------------------------------
     # _format_child_results() — formats child results into a JSON prompt

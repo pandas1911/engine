@@ -185,6 +185,7 @@ Loads runtime configuration from `engine.json`.
 | `cooldown_max_ms` | `300000.0` | Maximum key cooldown |
 | `user_timezone` | `None` | Timezone override (env var `USER_TIMEZONE` takes precedence) |
 | `tools` | `{}` | `Dict[str, bool]` — tool enable/disable mapping. Unlisted tools default to `True` (enabled). Use `config.is_tool_enabled(name)` to check. |
+| `max_reawaken_depth` | `3` | Maximum recursive re-awaken depth. Limits how many times a completed agent can be re-awakened to process child results, preventing infinite re-awaken chains. |
 
 **Config discovery strategy:**
 
@@ -341,6 +342,8 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
           WAITING_FOR_CHILDREN ──────────┘
                    ↓
                [error] → ERROR
+
+COMPLETED ──[reawaken]──→ RUNNING
 ```
 
 **Core loop (`_execute_cycle()`):**
@@ -374,7 +377,7 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
 
 #### `state.py` — State Machine
 
-`AgentStateMachine` with a static `TRANSITIONS` table mapping `(current_state, event)` → `next_state`. Raises `InvalidTransitionError` on invalid transitions.
+`AgentStateMachine` with a static `TRANSITIONS` table mapping `(current_state, event)` → `next_state`. Includes the `(COMPLETED, "reawaken") → RUNNING` transition that enables re-awakening a completed agent to process child results. Raises `InvalidTransitionError` on invalid transitions.
 
 #### `task_registry.py` — Task Registry
 
@@ -604,7 +607,7 @@ Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per a
 4. All gates passed → collect results, determine branch:
    - **Branch A**: Parent in `WAITING_FOR_CHILDREN` → direct resume via `run(trigger="children_settled")`
    - **Branch B**: Parent in `RUNNING` → enqueue `ChildCompletionEvent` for self-drain
-   - **Branch C**: Parent already `COMPLETED` → re-propagate notification to grandparent
+   - **Branch C**: Parent already `COMPLETED` → re-awaken parent via `drainable.run(formatted, trigger="reawaken")` so it processes child results through the LLM. The re-awakened agent transitions `COMPLETED → RUNNING`, runs a new LLM cycle with the child results injected, and its subsequent completion naturally triggers the grandparent handler. Recursive re-awaken depth is guarded by `max_reawaken_depth` config (default: 3).
 
 #### `spawn.py` — SpawnTool
 
@@ -939,3 +942,11 @@ Sub-Agent (depth-0 children only):
     ├── subagent_done(task_id, success) — on completion
     └── subagent_error(task_id, message) — on error
 ```
+
+---
+
+## Known Limitations
+
+### Streaming handler does not re-emit events on re-awaken
+
+When an agent is re-awakened (Branch C), the streaming handler does not emit new lifecycle events. The `subagent_done` SSE event has already been emitted for the agent's original completion. Re-awaken execution proceeds without emitting additional `subagent_start`/`subagent_done` events to the frontend. The LLM response from the re-awaken cycle is still streamed normally if a handler is present, but the agent-level lifecycle events are not re-emitted.
