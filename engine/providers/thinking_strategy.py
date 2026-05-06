@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
 
@@ -160,11 +160,16 @@ _DOMAIN_EXTRACTORS: dict[str, type[ThinkingExtractor]] = {
 _DEFAULT_EXTRACTOR = TagParserExtractor
 
 
-def get_thinking_extractor(base_url: str) -> ThinkingExtractor:
+def get_thinking_extractor(
+    base_url: str,
+    model_params: Optional[Dict[str, Any]] = None,
+) -> ThinkingExtractor:
     """Create the appropriate thinking extractor for a provider's base_url.
 
     Args:
         base_url: The provider's API base URL (e.g., "https://api.minimaxi.com/v1")
+        model_params: Optional model-specific parameters dict. Used to determine
+                      provider-specific feature flags (e.g. MiniMax reasoning_split).
 
     Returns:
         A ThinkingExtractor instance ready to use.
@@ -173,5 +178,14 @@ def get_thinking_extractor(base_url: str) -> ThinkingExtractor:
         hostname = urlparse(base_url).hostname or ""
     except Exception:
         return _DEFAULT_EXTRACTOR()
+
+    # MiniMax: use ReasoningDetailsExtractor only when reasoning_split is
+    # explicitly enabled.  When disabled (the default), reasoning content
+    # appears as <think/> tags in content, so we fall back to TagParserExtractor.
+    if hostname == "api.minimaxi.com":
+        if model_params and model_params.get("reasoning_split"):
+            return ReasoningDetailsExtractor()
+        return _DEFAULT_EXTRACTOR()
+
     extractor_cls = _DOMAIN_EXTRACTORS.get(hostname, _DEFAULT_EXTRACTOR)
     return extractor_cls()

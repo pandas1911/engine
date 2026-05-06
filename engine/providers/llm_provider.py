@@ -375,7 +375,7 @@ class LLMProvider(BaseLLMProvider):
         )
 
         # One extractor per stream — stateful, matched to provider
-        extractor = get_thinking_extractor(str(self.client.base_url))
+        extractor = get_thinking_extractor(str(self.client.base_url), self._model_params)
 
         try:
             response = await self.client.chat.completions.create(**params)
