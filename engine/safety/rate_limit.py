@@ -62,7 +62,7 @@ class SlidingWindowRateLimiter:
         self._scheduler_task = None  # background scheduler
         self._next_reservation_id: int = 1  # 0 is sentinel for "no reservation"
 
-        # Pacing fields (merging AdaptivePacer logic)
+        # Pacing fields
         self._pacing_enabled = pacing_enabled
         self._pace_level = PaceLevel.HEALTHY
         self._last_call_timestamp: Optional[float] = None
@@ -362,32 +362,6 @@ class SlidingWindowRateLimiter:
 
             # Sleep OUTSIDE the lock
             await asyncio.sleep(sleep_time)
-
-    def get_snapshot(self):
-        """Return current RPM/TPM remaining counts.
-
-        Uses lazy import to avoid circular dependencies.
-        """
-        from engine.providers.provider_models import RateLimitSnapshot
-
-        remaining_rpm = (
-            None
-            if self._rpm_limit <= 0
-            else max(0, int(self._rpm_limit - len(self._rpm_entries)))
-        )
-        remaining_tpm = (
-            None
-            if self._tpm_limit <= 0
-            else max(0, int(self._tpm_limit - self._current_tpm()))
-        )
-        limit_rpm = None if self._rpm_limit <= 0 else int(self._rpm_limit)
-        limit_tpm = None if self._tpm_limit <= 0 else int(self._tpm_limit)
-        return RateLimitSnapshot(
-            remaining_rpm=remaining_rpm,
-            remaining_tpm=remaining_tpm,
-            limit_rpm=limit_rpm,
-            limit_tpm=limit_tpm,
-        )
 
     def get_remaining_fraction(self) -> float:
         """Return the minimum of RPM and TPM remaining fractions."""

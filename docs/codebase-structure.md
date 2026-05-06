@@ -471,7 +471,6 @@ Defines `BaseStreamingHandler` and two concrete implementations for handling str
 | `ProviderConfig` | Provider entry: name, api_key, base_url, rpm_limit (default 100), tpm_limit (default 100000), models dict (model_name → model_params dict) |
 | `ProviderParams` | Resolved call params: api_key, base_url, model |
 | `resolve_model_ref()` | Splits `"provider/model"` string on first `/` into `(provider, model)` tuple |
-| `RateLimitSnapshot` | Remaining/limit for RPM and TPM |
 | `ProviderHealth` | Per-key health: consecutive errors, cooldown, pace level |
 
 #### `fallback_provider.py`

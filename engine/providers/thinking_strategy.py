@@ -183,7 +183,11 @@ def get_thinking_extractor(
     # explicitly enabled.  When disabled (the default), reasoning content
     # appears as <think/> tags in content, so we fall back to TagParserExtractor.
     if hostname == "api.minimaxi.com":
-        if model_params and model_params.get("reasoning_split"):
+        if model_params and (
+            model_params.get("reasoning_split")
+            or isinstance(model_params.get("extra_body"), dict)
+            and model_params["extra_body"].get("reasoning_split")
+        ):
             return ReasoningDetailsExtractor()
         return _DEFAULT_EXTRACTOR()
 

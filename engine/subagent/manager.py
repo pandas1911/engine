@@ -610,6 +610,6 @@ class SubAgentManager:
                 "result": truncated,
             }, ensure_ascii=False))
 
-        return get_child_results_prompt("\n".join(entries))
+        return get_child_results_prompt("\n".join(entries), completed_count=len(child_results))
 
 

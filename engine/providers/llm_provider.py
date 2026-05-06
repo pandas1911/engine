@@ -96,7 +96,6 @@ class LLMProvider(BaseLLMProvider):
             max_attempts=runtime_config.llm_retry_max_attempts,
             base_delay=runtime_config.llm_retry_base_delay,
         )
-        self._last_snapshot = None
         self._last_usage = None
 
     async def chat(
@@ -158,7 +157,6 @@ class LLMProvider(BaseLLMProvider):
             try:
                 response = await self.client.chat.completions.create(**params)
 
-                self._extract_rate_limit_headers(response)
                 self._extract_usage(response)
 
                 # --- Success path ---
@@ -259,48 +257,6 @@ class LLMProvider(BaseLLMProvider):
         )
         raise LLMProviderError(last_error) from last_error
 
-    def _extract_rate_limit_headers(self, response) -> None:
-        """Extract rate limit info from response headers (best-effort, provider-agnostic)."""
-        try:
-            headers = {}
-            if hasattr(response, 'headers'):
-                headers = response.headers
-            elif hasattr(response, 'raw_response') and hasattr(response.raw_response, 'headers'):
-                headers = response.raw_response.headers
-
-            if not headers:
-                self._last_snapshot = None
-                return
-
-            def _safe_int(val, default=None):
-                try:
-                    return int(val)
-                except (TypeError, ValueError):
-                    return default
-
-            remaining_rpm = _safe_int(headers.get('x-ratelimit-remaining-requests'))
-            remaining_tpm = _safe_int(headers.get('x-ratelimit-remaining-tokens'))
-            limit_rpm = _safe_int(headers.get('x-ratelimit-limit-requests'))
-            limit_tpm = _safe_int(headers.get('x-ratelimit-limit-tokens'))
-
-            if remaining_rpm is None:
-                remaining_rpm = _safe_int(headers.get('ratelimit-remaining'))
-            if limit_rpm is None:
-                limit_rpm = _safe_int(headers.get('ratelimit-limit'))
-
-            if remaining_rpm is not None or remaining_tpm is not None:
-                from engine.providers.provider_models import RateLimitSnapshot
-                self._last_snapshot = RateLimitSnapshot(
-                    remaining_rpm=remaining_rpm,
-                    remaining_tpm=remaining_tpm,
-                    limit_rpm=limit_rpm,
-                    limit_tpm=limit_tpm,
-                )
-            else:
-                self._last_snapshot = None
-        except Exception:
-            self._last_snapshot = None
-
     def _extract_usage(self, response) -> None:
         """Extract token usage from response."""
         try:
@@ -312,10 +268,6 @@ class LLMProvider(BaseLLMProvider):
                 )
         except Exception:
             self._last_usage = None
-
-    def get_rate_limit_snapshot(self):
-        """Return last known rate limit snapshot from response headers."""
-        return self._last_snapshot
 
     def get_last_usage(self):
         """Return (prompt_tokens, completion_tokens) from last response."""

@@ -87,17 +87,6 @@ def resolve_model_ref(ref: str) -> Tuple[str, str]:
 
 
 @dataclass
-class RateLimitSnapshot:
-    """Snapshot of rate limit headers from a provider response."""
-
-    remaining_rpm: Optional[int] = None
-    remaining_tpm: Optional[int] = None
-    limit_rpm: Optional[int] = None
-    limit_tpm: Optional[int] = None
-    retry_after_ms: Optional[float] = None
-
-
-@dataclass
 class ProviderHealth:
     """Health state for a provider instance."""
 
@@ -117,6 +106,5 @@ __all__ = [
     "ProviderConfig",
     "ProviderParams",
     "resolve_model_ref",
-    "RateLimitSnapshot",
     "ProviderHealth",
 ]

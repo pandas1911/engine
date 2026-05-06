@@ -219,16 +219,17 @@ def get_emergency_summary_prompt() -> str:
 
 # [Purpose] Formats collected child results into a JSON prompt for the parent agent
 # [Usage] engine/subagent/manager.py _format_child_results() L602
-def get_child_results_prompt(child_results_json: str) -> str:
+def get_child_results_prompt(child_results_json: str, completed_count: int) -> str:
     """Wrap pre-formatted child result JSON with a header for parent consumption.
 
     Args:
         child_results_json: Pre-built JSON string containing child results.
+        completed_count: Number of sub-agents that have completed so far.
 
     Returns:
         Formatted prompt ready to be injected as a user message.
     """
-    return "All sub-agents have completed their tasks. Below are their results.\n\n" + child_results_json
+    return "{} sub-agent(s) have completed their tasks. Below are their results.\n\n".format(completed_count) + child_results_json
 
 
 # [Purpose] Warning when all children completed but no results were collected
@@ -239,7 +240,7 @@ def get_child_results_empty_warning() -> str:
     Returns:
         Warning message string.
     """
-    return "[WARNING] All sub-agents have completed their tasks, but no results were collected."
+    return "[WARNING] Sub-agent(s) have completed their tasks, but no results were collected."
 
 
 # [Purpose] Confirmation message returned to parent after successful spawn
