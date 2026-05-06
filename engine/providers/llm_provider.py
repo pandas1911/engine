@@ -4,6 +4,7 @@ This module provides abstract and concrete LLM provider implementations.
 """
 
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -86,6 +87,7 @@ class LLMProvider(BaseLLMProvider):
             api_key=provider_params.api_key,
             base_url=provider_params.base_url,
             max_retries=0,
+            timeout=120.0,
         )
         self.model = provider_params.model
         self._model_params = model_params or {}
@@ -94,7 +96,6 @@ class LLMProvider(BaseLLMProvider):
             max_attempts=runtime_config.llm_retry_max_attempts,
             base_delay=runtime_config.llm_retry_base_delay,
         )
-        self._last_snapshot = None
         self._last_usage = None
 
     async def chat(
@@ -129,12 +130,33 @@ class LLMProvider(BaseLLMProvider):
         )
 
         last_error: Optional[Exception] = None
+        _CUMULATIVE_TIMEOUT = 300.0
+        _retry_start = time.monotonic()
 
         for attempt in range(1, self._retry_engine.max_attempts + 1):
+            # Cumulative timeout guard
+            if time.monotonic() - _retry_start > _CUMULATIVE_TIMEOUT:
+                logger.error(
+                    agent_label,
+                    "LLM retry abandoned (cumulative timeout) | elapsed={:.1f}s, limit={}s, attempts={}".format(
+                        time.monotonic() - _retry_start, _CUMULATIVE_TIMEOUT, attempt - 1
+                    ),
+                    task_id=task_id, state="error", depth=depth,
+                    event_type="llm_cumulative_timeout",
+                    data={
+                        "elapsed_seconds": time.monotonic() - _retry_start,
+                        "limit_seconds": _CUMULATIVE_TIMEOUT,
+                        "attempts_made": attempt - 1,
+                        "model": self.model,
+                    },
+                )
+                raise LLMProviderError(
+                    TimeoutError("Cumulative retry timeout ({:.1f}s) exceeded".format(_CUMULATIVE_TIMEOUT))
+                ) from last_error
+
             try:
                 response = await self.client.chat.completions.create(**params)
 
-                self._extract_rate_limit_headers(response)
                 self._extract_usage(response)
 
                 # --- Success path ---
@@ -235,48 +257,6 @@ class LLMProvider(BaseLLMProvider):
         )
         raise LLMProviderError(last_error) from last_error
 
-    def _extract_rate_limit_headers(self, response) -> None:
-        """Extract rate limit info from response headers (best-effort, provider-agnostic)."""
-        try:
-            headers = {}
-            if hasattr(response, 'headers'):
-                headers = response.headers
-            elif hasattr(response, 'raw_response') and hasattr(response.raw_response, 'headers'):
-                headers = response.raw_response.headers
-
-            if not headers:
-                self._last_snapshot = None
-                return
-
-            def _safe_int(val, default=None):
-                try:
-                    return int(val)
-                except (TypeError, ValueError):
-                    return default
-
-            remaining_rpm = _safe_int(headers.get('x-ratelimit-remaining-requests'))
-            remaining_tpm = _safe_int(headers.get('x-ratelimit-remaining-tokens'))
-            limit_rpm = _safe_int(headers.get('x-ratelimit-limit-requests'))
-            limit_tpm = _safe_int(headers.get('x-ratelimit-limit-tokens'))
-
-            if remaining_rpm is None:
-                remaining_rpm = _safe_int(headers.get('ratelimit-remaining'))
-            if limit_rpm is None:
-                limit_rpm = _safe_int(headers.get('ratelimit-limit'))
-
-            if remaining_rpm is not None or remaining_tpm is not None:
-                from engine.providers.provider_models import RateLimitSnapshot
-                self._last_snapshot = RateLimitSnapshot(
-                    remaining_rpm=remaining_rpm,
-                    remaining_tpm=remaining_tpm,
-                    limit_rpm=limit_rpm,
-                    limit_tpm=limit_tpm,
-                )
-            else:
-                self._last_snapshot = None
-        except Exception:
-            self._last_snapshot = None
-
     def _extract_usage(self, response) -> None:
         """Extract token usage from response."""
         try:
@@ -288,10 +268,6 @@ class LLMProvider(BaseLLMProvider):
                 )
         except Exception:
             self._last_usage = None
-
-    def get_rate_limit_snapshot(self):
-        """Return last known rate limit snapshot from response headers."""
-        return self._last_snapshot
 
     def get_last_usage(self):
         """Return (prompt_tokens, completion_tokens) from last response."""
@@ -351,7 +327,7 @@ class LLMProvider(BaseLLMProvider):
         )
 
         # One extractor per stream — stateful, matched to provider
-        extractor = get_thinking_extractor(str(self.client.base_url))
+        extractor = get_thinking_extractor(str(self.client.base_url), self._model_params)
 
         try:
             response = await self.client.chat.completions.create(**params)

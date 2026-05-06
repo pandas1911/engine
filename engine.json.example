@@ -25,7 +25,8 @@
   ],
   "strip_thinking": true,
   "max_depth": 3,
-  "spawn_timeout": 60.0,
+  "max_reawaken_depth": 4
+  "spawn_timeout": 30.0,
   "max_result_length": 3000,
   "summary_warning_reserve": 2,
   "emergency_summary_enabled": true,

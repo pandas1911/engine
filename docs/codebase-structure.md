@@ -18,10 +18,10 @@ engine/
 │   │   ├── __init__.py        # Re-export layer for all safety classes
 │   │   ├── concurrency.py     # LaneConcurrencyQueue, LaneSlot, LaneStatus
 │   │   ├── rate_limit.py      # SlidingWindowRateLimiter
-│   │   ├── token_estimator.py # EmaTokenEstimator — adaptive chars→tokens estimator
+│   │   ├── context_truncation.py  # TPM-based context truncation for long conversations
+│   │   ├── token_estimator.py # EmaTokenEstimator — adaptive chars→tokens estimator; ResultTruncator
 │   │   ├── key_pool.py        # APIKeyPool
 │   │   ├── retry.py           # RetryEngine
-│   │   └── pacing.py          # AdaptivePacer, ResultTruncator, RegistrySizeMonitor
 │   ├── streaming_handler.py   # BaseStreamingHandler + SSEStreamingHandler + SubAgentStreamingWrapper (streaming event handling)
 │   ├── runtime/               # Agent execution core
 │   │   ├── __init__.py
@@ -135,7 +135,7 @@ The main entry point containing `delegate()` and all startup orchestration logic
 1. Load config via `get_config()` (auto-discovers `engine.json`)
 2. Create `TimeProvider`, inject timezone info into system prompt (or refresh env block if session is provided)
 3. Initialize logger with configured log directory
-4. Iterate `config.providers` dict — for each provider, create `SlidingWindowRateLimiter` and `AdaptivePacer`; for each model under that provider, create an `LLMProvider` keyed by `"provider/model"`
+4. Iterate `config.providers` dict — for each provider, create `SlidingWindowRateLimiter` (with optional pacing params); for each model under that provider, create an `LLMProvider` keyed by `"provider/model"`
 5. Build ordered key list from `config.primary` + `config.fallback`
 6. Create shared: `APIKeyPool` (with ordered composite key names), `RetryEngine`, `FallbackLLMProvider`
 7. Create `LaneConcurrencyQueue` (MAIN + SUBAGENT lanes)
@@ -168,7 +168,7 @@ Loads runtime configuration from `engine.json`.
 | `fallback` | `[]` | Optional list of fallback model references in `"provider/model"` format |
 | `strip_thinking` | `True` | Remove `<think/>` tags from LLM responses |
 | `max_depth` | `3` | Maximum sub-agent nesting depth |
-| `spawn_timeout` | `60.0` | Seconds to wait for a concurrency slot before rejecting spawn |
+| `spawn_timeout` | `30.0` | Seconds to wait for a concurrency slot before rejecting spawn |
 | `max_result_length` | `3000` | Max chars for child agent results before truncation |
 | `summary_warning_reserve` | `2` | Iterations before limit to inject summary warning |
 | `emergency_summary_enabled` | `True` | Force text-only LLM call when iteration limit reached |
@@ -185,6 +185,7 @@ Loads runtime configuration from `engine.json`.
 | `cooldown_max_ms` | `300000.0` | Maximum key cooldown |
 | `user_timezone` | `None` | Timezone override (env var `USER_TIMEZONE` takes precedence) |
 | `tools` | `{}` | `Dict[str, bool]` — tool enable/disable mapping. Unlisted tools default to `True` (enabled). Use `config.is_tool_enabled(name)` to check. |
+| `max_reawaken_depth` | `3` | Maximum recursive re-awaken depth. Limits how many times a completed agent can be re-awakened to process child results, preventing infinite re-awaken chains. |
 
 **Config discovery strategy:**
 
@@ -231,7 +232,7 @@ A package providing resource protection mechanisms for the agent system. Split i
 
 #### `__init__.py` — Re-export Layer
 
-Re-exports all classes from sub-modules so that `from engine.safety import ...` continues to work without changes.
+Re-exports all classes from sub-modules so that `from engine.safety import ...` continues to work without changes. Includes `TruncationResult` and `truncate_messages_for_tpm` from `context_truncation.py`.
 
 #### `concurrency.py` — Concurrency Control
 
@@ -242,13 +243,19 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 | `LaneStatus` | Data class for lane status queries |
 | `_LaneState` | Internal state per lane |
 
-#### `rate_limit.py` — Sliding Window Rate Limiter
+#### `rate_limit.py` — Sliding Window Rate Limiter (with Adaptive Pacing)
 
 | Class | Description |
 |---|---|
-| `SlidingWindowRateLimiter` | Dual RPM/TPM sliding window with event-driven scheduler (no busy waiting) |
+| `SlidingWindowRateLimiter` | Dual RPM/TPM sliding window with event-driven scheduler (no busy waiting). Includes integrated adaptive pacing via `pacing_enabled` and `min_interval_ms` constructor params. |
 
-**Key flow:** Fast path (capacity available, no waiters) → immediate return. Slow path → enqueue Future, background `_scheduler` task wakes waiters when capacity frees up.
+**Key flow:** When pacing is enabled, `acquire()` first applies a pacing delay (minimum interval + pace-level extra delay), then follows the standard rate limit path: fast path (capacity available, no waiters) → immediate return. Slow path → enqueue Future, background `_scheduler` task wakes waiters when capacity frees up.
+
+**Adaptive pacing (integrated):**
+
+- Constructor accepts `pacing_enabled` (default `False`) and `min_interval_ms` (default `500.0`). The effective minimum interval is the larger of `min_interval_ms` and `60000/rpm_limit` (RPM-derived floor).
+- `acquire()` calls `_wait_if_needed()` before the capacity check, which enforces the minimum interval between calls and adds pace-level delays.
+- `record_usage()` calls `_update_pace_level()` after recording tokens, which adjusts the pace level based on remaining capacity fraction: HEALTHY (>50%) → 0ms, PRESSING (20-50%) → 200ms, CRITICAL (<20%) → 1000ms.
 
 **Deadlock prevention:**
 
@@ -256,6 +263,14 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 - `_scheduler()` includes deadlock detection: when the sliding window is empty but a waiter still cannot proceed (because its estimated request exceeds the full capacity), the scheduler force-releases the waiter to prevent permanent stall.
 - `acquire()` wait is bounded by a configurable timeout derived from `2 * window_seconds`, raising `asyncio.TimeoutError` on expiry.
 - Private helper `_remove_tpm_entry_by_rid()` consolidates TPM entry cleanup logic.
+
+#### `context_truncation.py` — TPM-Based Context Truncation
+
+| Class / Function | Description |
+|---|---|
+| `TruncationResult` | Dataclass: `messages` (truncated list), `rounds_removed` (int), `original_tokens` (int), `truncated_tokens` (int) |
+| `truncate_messages_for_tpm(messages, tools, tpm_limit, token_estimator)` | Pure function that truncates conversation history by removing complete rounds (oldest first) to fit under a provider's TPM limit. Always preserves system prompt (messages[0] if role=="system") and the last round. Returns new list, never mutates input. |
+| `_find_round_boundaries(messages)` | Private helper: returns indices of all user messages (round start positions) |
 
 #### `token_estimator.py` — EMA Token Estimator
 
@@ -294,15 +309,14 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 | `RetryEngine` | Error classification (RATE_LIMITED/RETRYABLE/NON_RETRYABLE) with exponential backoff + jitter |
 | `T` | TypeVar used for generic retry return type |
 
-#### `pacing.py` — Adaptive Pacing
+#### `token_estimator.py` — Token Estimation & Result Truncation
 
 | Class | Description |
 |---|---|
-| `AdaptivePacer` | Dynamic throttling transitioning between HEALTHY/PRESSING/CRITICAL pace levels |
+| `EmaTokenEstimator` | Adaptive chars→tokens estimator using exponential moving average |
 | `ResultTruncator` | Static utility for truncating oversized results |
-| `RegistrySizeMonitor` | Monitors task registry size and identifies completed tasks to purge |
 
-**Pace levels:** HEALTHY (>50% remaining) → 0ms extra delay. PRESSING (20-50%) → 200ms. CRITICAL (<20%) → 1000ms.
+Adaptive pacing logic has been merged into `SlidingWindowRateLimiter` (see `rate_limit.py`). When `pacing_enabled=True`, the limiter applies a minimum interval delay and a pace-level-based extra delay (HEALTHY: 0ms, PRESSING: 200ms, CRITICAL: 1000ms) before each `acquire()` call. Pace level is updated after `record_usage()` based on the remaining capacity fraction.
 
 ---
 
@@ -341,6 +355,8 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
           WAITING_FOR_CHILDREN ──────────┘
                    ↓
                [error] → ERROR
+
+COMPLETED ──[reawaken]──→ RUNNING
 ```
 
 **Core loop (`_execute_cycle()`):**
@@ -374,7 +390,7 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
 
 #### `state.py` — State Machine
 
-`AgentStateMachine` with a static `TRANSITIONS` table mapping `(current_state, event)` → `next_state`. Raises `InvalidTransitionError` on invalid transitions.
+`AgentStateMachine` with a static `TRANSITIONS` table mapping `(current_state, event)` → `next_state`. Includes the `(COMPLETED, "reawaken") → RUNNING` transition that enables re-awakening a completed agent to process child results. Raises `InvalidTransitionError` on invalid transitions.
 
 #### `task_registry.py` — Task Registry
 
@@ -444,7 +460,9 @@ Defines `BaseStreamingHandler` and two concrete implementations for handling str
 
 **LLMProvider features:**
 
+- Explicit 120s timeout on AsyncOpenAI client (prevents 600s default timeout black hole)
 - Per-call retry with configurable max attempts and exponential backoff
+- 300s cumulative retry timeout guard in `chat()` (abandons retries if total elapsed time exceeded)
 - Thinking tag stripping (`<think/>` removal)
 - Rate limit header extraction (`x-ratelimit-*`)
 - Token usage tracking (prompt_tokens, completion_tokens)
@@ -462,14 +480,13 @@ Defines `BaseStreamingHandler` and two concrete implementations for handling str
 | `ProviderConfig` | Provider entry: name, api_key, base_url, rpm_limit (default 100), tpm_limit (default 100000), models dict (model_name → model_params dict) |
 | `ProviderParams` | Resolved call params: api_key, base_url, model |
 | `resolve_model_ref()` | Splits `"provider/model"` string on first `/` into `(provider, model)` tuple |
-| `RateLimitSnapshot` | Remaining/limit for RPM and TPM |
 | `ProviderHealth` | Per-key health: consecutive errors, cooldown, pace level |
 
 #### `fallback_provider.py`
 
 `FallbackLLMProvider` wraps multiple `LLMProvider` instances with automatic key rotation and sequential provider fallback.
 
-**Constructor:** `FallbackLLMProvider(providers: Dict[str, LLMProvider], key_pool: APIKeyPool, rate_limiters: Dict[str, SlidingWindowRateLimiter], pacers: Dict[str, AdaptivePacer], retry_engine: RetryEngine)`
+**Constructor:** `FallbackLLMProvider(providers: Dict[str, LLMProvider], key_pool: APIKeyPool, rate_limiters: Dict[str, SlidingWindowRateLimiter], retry_engine: RetryEngine)`
 
 Providers are ordered by the insertion order of the `providers` dict (primary first, then fallbacks). No weight-based selection — ordering is deterministic from config.
 
@@ -478,13 +495,12 @@ Providers are ordered by the insertion order of the `providers` dict (primary fi
 **Flow:**
 
 1. Acquire key from `APIKeyPool`
-2. Apply rate limiting (sliding window) — estimated_tokens is capped to prevent deadlock
-3. Apply adaptive pacing
-4. Execute chat request
-5. On success → record usage, update pacer, report success, feed actual tokens back to estimator
-6. On rate limit → report rate limited, rotate key, retry
-7. On retryable error → release reservation, propagate
-8. On non-retryable error → release reservation, raise
+2. Apply rate limiting with adaptive pacing (sliding window) — estimated_tokens is capped to prevent deadlock
+3. Execute chat request
+4. On success → record usage, report success, feed actual tokens back to estimator
+5. On rate limit → report rate limited, rotate key, retry
+6. On retryable error → release reservation, propagate
+7. On non-retryable error → release reservation, raise
 
 #### `thinking_strategy.py` — Provider-Specific Thinking Extraction
 
@@ -604,7 +620,7 @@ Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per a
 4. All gates passed → collect results, determine branch:
    - **Branch A**: Parent in `WAITING_FOR_CHILDREN` → direct resume via `run(trigger="children_settled")`
    - **Branch B**: Parent in `RUNNING` → enqueue `ChildCompletionEvent` for self-drain
-   - **Branch C**: Parent already `COMPLETED` → re-propagate notification to grandparent
+   - **Branch C**: Parent already `COMPLETED` → re-awaken parent via `drainable.run(formatted, trigger="reawaken")` so it processes child results through the LLM. The re-awakened agent transitions `COMPLETED → RUNNING`, runs a new LLM cycle with the child results injected, and its subsequent completion naturally triggers the grandparent handler. Recursive re-awaken depth is guarded by `max_reawaken_depth` config (default: 3).
 
 #### `spawn.py` — SpawnTool
 
@@ -666,7 +682,7 @@ Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per a
 Auto-discovered custom tools directory. Place `Tool` subclasses here and they will be automatically loaded by `_discover_custom_tools()`. Currently contains:
 
 - **`web_search`** (`web_search.py`) — Web search tool using the `ddgs` metasearch library. Aggregates results from multiple search engines (DuckDuckGo, Bing, Brave, Google, etc.) with automatic failover via `backend="auto"`. Uses `asyncio.to_thread()` to wrap the synchronous `DDGS.text()` call. Lazy singleton DDGS instance for connection reuse.
-- **`web_fetch`** (`web_fetch.py`) — URL content fetching tool with configurable format (class variable `DEFAULT_FORMAT`, default: markdown), transient-error retry, Cloudflare handling, and response size limits.
+- **`web_fetch`** (`web_fetch.py`) — URL content fetching tool with configurable format (class variable `DEFAULT_FORMAT`, default: markdown), transient-error retry, Cloudflare handling, and response size limits. Content is truncated to 15,000 characters (`_MAX_CONTENT_LENGTH`) to prevent LLM context overflow.
 
 ---
 
@@ -703,6 +719,7 @@ Auto-discovered custom tools directory. Place `Tool` subclasses here and they wi
 | `test_subagent_streaming.py` | Unit tests for SubAgentStreamingWrapper, SSEStreamingHandler, and spawn tool suppression |
 | `test_streaming_handler.py` | Unit tests for SSEStreamingHandler and BaseStreamingHandler |
 | `test_event_callback.py` | Unit tests for Agent event callback pattern |
+| `test_context_truncation.py` | Unit tests for TPM-based context truncation |
 
 Both integration tests use `pytest-asyncio` and call the real `delegate()` function (requires valid `engine.json`).
 
@@ -818,8 +835,8 @@ delegate() (engine/runner.py)
     │     │     │     │     └── Tool call buffering (get_tool_calls())
     │     │     │     └── FallbackLLMProvider.stream_chat()
     │     │     │           ├── APIKeyPool.acquire_key()
-    │     │     │           ├── SlidingWindowRateLimiter.acquire() ← estimated_tokens capped to tpm_limit
-    │     │     │           ├── AdaptivePacer.wait_if_needed()
+    │     │     │           ├── SlidingWindowRateLimiter.acquire() ← estimated_tokens capped to tpm_limit (includes adaptive pacing delay when enabled)
+    │     │     │           ├── truncate_messages_for_tpm() ← removes oldest rounds when estimated tokens exceed provider TPM
     │     │     │           └── LLMProvider.stream_chat() (OpenAI SDK)
     │     │     ├── Tool execution (ToolPack → Tool.execute())
     │     │     │     └── per tool call → handler.on_tool_start() → execute → handler.on_tool_end()
@@ -939,3 +956,11 @@ Sub-Agent (depth-0 children only):
     ├── subagent_done(task_id, success) — on completion
     └── subagent_error(task_id, message) — on error
 ```
+
+---
+
+## Known Limitations
+
+### Streaming handler does not re-emit events on re-awaken
+
+When an agent is re-awakened (Branch C), the streaming handler does not emit new lifecycle events. The `subagent_done` SSE event has already been emitted for the agent's original completion. Re-awaken execution proceeds without emitting additional `subagent_start`/`subagent_done` events to the frontend. The LLM response from the re-awaken cycle is still streamed normally if a handler is present, but the agent-level lifecycle events are not re-emitted.

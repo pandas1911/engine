@@ -6,13 +6,14 @@ falling back between providers when all keys are exhausted.
 """
 
 import asyncio
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import AsyncGenerator, Dict, List, Optional
 
 from engine.providers.llm_provider import BaseLLMProvider, LLMProvider, LLMProviderError
 from engine.providers.provider_models import LLMResponse, ErrorClass
 from engine.providers.chunk_types import StreamChunk
-from engine.safety import APIKeyPool, SlidingWindowRateLimiter, AdaptivePacer, RetryEngine
+from engine.safety import APIKeyPool, SlidingWindowRateLimiter, RetryEngine
 from engine.safety.token_estimator import EmaTokenEstimator
+from engine.safety.context_truncation import truncate_messages_for_tpm
 from engine.logging import get_logger
 
 
@@ -31,14 +32,12 @@ class FallbackLLMProvider(BaseLLMProvider):
         providers: Dict[str, LLMProvider],
         key_pool: APIKeyPool,
         rate_limiters: Dict[str, SlidingWindowRateLimiter],
-        pacers: Dict[str, AdaptivePacer],
         retry_engine: RetryEngine,
         max_profile_rotations: int = 3,
     ):
         self._providers = providers
         self._key_pool = key_pool
         self._rate_limiters = rate_limiters
-        self._pacers = pacers
         self._retry_engine = retry_engine
         self._max_profile_rotations = max_profile_rotations
         self._current_profile: Optional[str] = None
@@ -48,6 +47,45 @@ class FallbackLLMProvider(BaseLLMProvider):
 
     def _estimate_tokens(self, messages: List[Dict], tools: Optional[List[Dict]]) -> int:
         return self._token_estimator.estimate(messages, tools)
+
+    def _apply_tpm_truncation(
+        self,
+        messages: List[Dict],
+        tools: Optional[List[Dict]],
+        estimated_tokens: int,
+        limiter,  # SlidingWindowRateLimiter or None
+        profile_name: str,
+    ) -> tuple:
+        """Apply TPM-based context truncation if needed.
+
+        Returns (local_messages, local_estimated_tokens).
+        """
+        local_messages = messages
+        local_estimated_tokens = estimated_tokens
+        if limiter is not None and limiter.tpm_limit > 0:
+            truncation = truncate_messages_for_tpm(
+                messages, tools, limiter.tpm_limit, self._token_estimator
+            )
+            if truncation.rounds_removed > 0:
+                self._logger.warning(
+                    "RateControl",
+                    "Context truncated for TPM | profile={}, rounds_removed={}, tokens={}/{}".format(
+                        profile_name,
+                        truncation.rounds_removed,
+                        truncation.original_tokens,
+                        truncation.truncated_tokens,
+                    ),
+                    event_type="context_truncated",
+                    data={
+                        "profile": profile_name,
+                        "rounds_removed": truncation.rounds_removed,
+                        "original_tokens": truncation.original_tokens,
+                        "truncated_tokens": truncation.truncated_tokens,
+                    },
+                )
+            local_messages = truncation.messages
+            local_estimated_tokens = truncation.truncated_tokens
+        return local_messages, local_estimated_tokens
 
     async def chat(
         self,
@@ -73,23 +111,24 @@ class FallbackLLMProvider(BaseLLMProvider):
                     "No provider found for profile: {}".format(profile_name)
                 )
 
-            # Extract provider name from composite key for limiter/pacer lookup.
-            # Rate limiters and pacers are keyed by provider name (e.g., "aliyun"),
+            # Extract provider name from composite key for limiter lookup.
+            # Rate limiters are keyed by provider name (e.g., "aliyun"),
             # while profile_name is a composite key (e.g., "aliyun/deepseek-v4-pro").
             provider_name = profile_name.split("/", 1)[0]
 
             limiter = self._rate_limiters.get(provider_name)
+
+            local_messages, local_estimated_tokens = self._apply_tpm_truncation(
+                messages, tools, estimated_tokens, limiter, profile_name
+            )
+
             reservation_id = 0
             if limiter is not None:
-                reservation_id = await limiter.acquire(estimated_tokens=estimated_tokens)
-
-            pacer = self._pacers.get(provider_name)
-            if pacer is not None:
-                await pacer.wait_if_needed()
+                reservation_id = await limiter.acquire(estimated_tokens=local_estimated_tokens)
 
             try:
                 result = await provider.chat(
-                    messages=messages,
+                    messages=local_messages,
                     tools=tools,
                     agent_label=agent_label,
                     task_id=task_id,
@@ -106,11 +145,6 @@ class FallbackLLMProvider(BaseLLMProvider):
                         total_tokens = prompt_tokens + completion_tokens
                         await limiter.record_usage(total_tokens, reservation_id=reservation_id)
                         self._token_estimator.feedback(estimated_tokens, total_tokens)
-
-                if pacer is not None:
-                    snapshot = provider.get_rate_limit_snapshot()
-                    if snapshot is not None:
-                        pacer.update_from_snapshot(snapshot)
 
                 self._logger.info(
                     agent_label,
@@ -230,7 +264,7 @@ class FallbackLLMProvider(BaseLLMProvider):
         """Stream a chat request with key rotation and provider fallback.
 
         Follows the same safety mechanism pattern as chat():
-        acquire_key -> rate_limiter -> pacer -> stream_chat -> report.
+        acquire_key -> rate_limiter -> stream_chat -> report.
         On rate limit: rotate key and continue loop.
         On other errors: release reservation and raise.
         """
@@ -253,17 +287,18 @@ class FallbackLLMProvider(BaseLLMProvider):
             provider_name = profile_name.split("/", 1)[0]
 
             limiter = self._rate_limiters.get(provider_name)
+
+            local_messages, local_estimated_tokens = self._apply_tpm_truncation(
+                messages, tools, estimated_tokens, limiter, profile_name
+            )
+
             reservation_id = 0
             if limiter is not None:
-                reservation_id = await limiter.acquire(estimated_tokens=estimated_tokens)
-
-            pacer = self._pacers.get(provider_name)
-            if pacer is not None:
-                await pacer.wait_if_needed()
+                reservation_id = await limiter.acquire(estimated_tokens=local_estimated_tokens)
 
             try:
                 async for chunk in provider.stream_chat(
-                    messages=messages,
+                    messages=local_messages,
                     tools=tools,
                     agent_label=agent_label,
                     task_id=task_id,
@@ -281,11 +316,6 @@ class FallbackLLMProvider(BaseLLMProvider):
                         total_tokens = prompt_tokens + completion_tokens
                         await limiter.record_usage(total_tokens, reservation_id=reservation_id)
                         self._token_estimator.feedback(estimated_tokens, total_tokens)
-
-                if pacer is not None:
-                    snapshot = provider.get_rate_limit_snapshot()
-                    if snapshot is not None:
-                        pacer.update_from_snapshot(snapshot)
 
                 self._logger.info(
                     agent_label,

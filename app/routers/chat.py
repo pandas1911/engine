@@ -15,7 +15,7 @@ from engine.runtime.agent_models import Session
 router = APIRouter()
 session_store = SessionStore()
 
-MAX_MESSAGES = 20
+MAX_MESSAGES = 50
 
 
 class ChatRequest(BaseModel):

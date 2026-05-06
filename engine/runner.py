@@ -17,7 +17,7 @@ from engine.runtime.task_registry import AgentTaskRegistry
 from engine.tools.base import Tool
 from engine.tools.pack import ToolPack
 from engine.subagent.spawn import SpawnTool
-from engine.safety import LaneConcurrencyQueue, SlidingWindowRateLimiter, AdaptivePacer, APIKeyPool, RetryEngine
+from engine.safety import LaneConcurrencyQueue, SlidingWindowRateLimiter, APIKeyPool, RetryEngine
 from engine.providers.fallback_provider import FallbackLLMProvider
 from engine.providers.provider_models import ProviderParams, Lane
 from engine.time import TimeProvider
@@ -145,7 +145,6 @@ async def delegate(
         # Build LLMProvider instances — one per provider/model combination
         providers = {}       # composite_key "provider/model" → LLMProvider
         rate_limiters = {}   # provider_name → SlidingWindowRateLimiter
-        pacers = {}          # provider_name → AdaptivePacer
 
         for prov_name, prov_config in config.providers.items():
             limiter = None
@@ -154,17 +153,10 @@ async def delegate(
                     rpm_limit=prov_config.rpm_limit,
                     tpm_limit=prov_config.tpm_limit,
                     profile_name=prov_name,
+                    pacing_enabled=config.pacing_enabled,
+                    min_interval_ms=config.pacing_min_interval_ms,
                 )
             rate_limiters[prov_name] = limiter
-
-            pacer = None
-            if config.pacing_enabled:
-                pacer = AdaptivePacer(
-                    min_interval_ms=config.pacing_min_interval_ms,
-                    enabled=True,
-                    rpm_limit=prov_config.rpm_limit,
-                )
-            pacers[prov_name] = pacer
 
             for model_name, model_params in prov_config.models.items():
                 composite_key = f"{prov_name}/{model_name}"
@@ -198,7 +190,6 @@ async def delegate(
             providers=ordered_providers,
             key_pool=key_pool,
             rate_limiters=rate_limiters,
-            pacers=pacers,
             retry_engine=shared_retry_engine,
         )
 
