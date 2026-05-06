@@ -18,6 +18,7 @@ engine/
 │   │   ├── __init__.py        # Re-export layer for all safety classes
 │   │   ├── concurrency.py     # LaneConcurrencyQueue, LaneSlot, LaneStatus
 │   │   ├── rate_limit.py      # SlidingWindowRateLimiter
+│   │   ├── context_truncation.py  # TPM-based context truncation for long conversations
 │   │   ├── token_estimator.py # EmaTokenEstimator — adaptive chars→tokens estimator; ResultTruncator
 │   │   ├── key_pool.py        # APIKeyPool
 │   │   ├── retry.py           # RetryEngine
@@ -231,7 +232,7 @@ A package providing resource protection mechanisms for the agent system. Split i
 
 #### `__init__.py` — Re-export Layer
 
-Re-exports all classes from sub-modules so that `from engine.safety import ...` continues to work without changes.
+Re-exports all classes from sub-modules so that `from engine.safety import ...` continues to work without changes. Includes `TruncationResult` and `truncate_messages_for_tpm` from `context_truncation.py`.
 
 #### `concurrency.py` — Concurrency Control
 
@@ -262,6 +263,14 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 - `_scheduler()` includes deadlock detection: when the sliding window is empty but a waiter still cannot proceed (because its estimated request exceeds the full capacity), the scheduler force-releases the waiter to prevent permanent stall.
 - `acquire()` wait is bounded by a configurable timeout derived from `2 * window_seconds`, raising `asyncio.TimeoutError` on expiry.
 - Private helper `_remove_tpm_entry_by_rid()` consolidates TPM entry cleanup logic.
+
+#### `context_truncation.py` — TPM-Based Context Truncation
+
+| Class / Function | Description |
+|---|---|
+| `TruncationResult` | Dataclass: `messages` (truncated list), `rounds_removed` (int), `original_tokens` (int), `truncated_tokens` (int) |
+| `truncate_messages_for_tpm(messages, tools, tpm_limit, token_estimator)` | Pure function that truncates conversation history by removing complete rounds (oldest first) to fit under a provider's TPM limit. Always preserves system prompt (messages[0] if role=="system") and the last round. Returns new list, never mutates input. |
+| `_find_round_boundaries(messages)` | Private helper: returns indices of all user messages (round start positions) |
 
 #### `token_estimator.py` — EMA Token Estimator
 
@@ -710,6 +719,7 @@ Auto-discovered custom tools directory. Place `Tool` subclasses here and they wi
 | `test_subagent_streaming.py` | Unit tests for SubAgentStreamingWrapper, SSEStreamingHandler, and spawn tool suppression |
 | `test_streaming_handler.py` | Unit tests for SSEStreamingHandler and BaseStreamingHandler |
 | `test_event_callback.py` | Unit tests for Agent event callback pattern |
+| `test_context_truncation.py` | Unit tests for TPM-based context truncation |
 
 Both integration tests use `pytest-asyncio` and call the real `delegate()` function (requires valid `engine.json`).
 
@@ -826,6 +836,7 @@ delegate() (engine/runner.py)
     │     │     │     └── FallbackLLMProvider.stream_chat()
     │     │     │           ├── APIKeyPool.acquire_key()
     │     │     │           ├── SlidingWindowRateLimiter.acquire() ← estimated_tokens capped to tpm_limit (includes adaptive pacing delay when enabled)
+    │     │     │           ├── truncate_messages_for_tpm() ← removes oldest rounds when estimated tokens exceed provider TPM
     │     │     │           └── LLMProvider.stream_chat() (OpenAI SDK)
     │     │     ├── Tool execution (ToolPack → Tool.execute())
     │     │     │     └── per tool call → handler.on_tool_start() → execute → handler.on_tool_end()
