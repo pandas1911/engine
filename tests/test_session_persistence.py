@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from engine.runtime.agent_models import Session, Message
-from engine.session_store import SessionStore, ChildSessionInfo
+from engine.session_store import SessionStore
 
 
 @pytest.fixture
@@ -159,47 +159,6 @@ class TestRoundTrip:
         assert store.read_child_session("task_nothing") is None
 
 
-class TestListChildren:
-    def test_returns_child_info(self, store, child_session):
-        _init_store(store)
-        _write_child(store, "task_alpha", child_session)
-        _write_child(store, "task_beta", child_session)
-
-        children = store.list_children()
-
-        assert len(children) == 2
-        task_ids = {c.task_id for c in children}
-        assert task_ids == {"task_alpha", "task_beta"}
-
-    def test_child_info_metadata(self, store, child_session):
-        _init_store(store)
-        _write_child(store, "task_abc", child_session)
-
-        info = store.list_children()[0]
-
-        assert isinstance(info, ChildSessionInfo)
-        assert info.task_id == "task_abc"
-        assert info.message_count == 2
-        assert info.file_size_bytes > 0
-        assert "task_abc.jsonl" in info.file_path
-
-    def test_empty_directory(self, store):
-        _init_store(store)
-
-        assert store.list_children() == []
-
-    def test_prefers_jsonl_over_json(self, store, child_session):
-        _init_store(store)
-        _write_child(store, "task_both", child_session)
-        # Also create a legacy .json file
-        json_path = store.sessions_dir / "task_both.json"
-        json_path.write_text('{"id":"old","depth":0,"messages":[]}', encoding="utf-8")
-
-        children = store.list_children()
-        assert len(children) == 1
-        assert children[0].message_count == 2  # from .jsonl, not .json
-
-
 class TestPartialSession:
     def test_partial_session_valid_jsonl(self, store, child_session):
         _init_store(store)
@@ -232,17 +191,6 @@ class TestPartialSession:
         bad_file.write_text("not json at all\n", encoding="utf-8")
 
         assert store.read_child_session("task_bad_header") is None
-
-    def test_corrupted_file_list_children(self, store):
-        _init_store(store)
-        bad_file = store.sessions_dir / "task_bad.jsonl"
-        bad_file.write_text("not json at all", encoding="utf-8")
-
-        children = store.list_children()
-        assert len(children) == 1
-        # JSONL list_children counts non-empty lines minus header (1 line)
-        # A single corrupted line yields max(0, 1-1) = 0
-        assert children[0].message_count == 0
 
 
 class TestLegacyJsonCompat:

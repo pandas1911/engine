@@ -88,7 +88,6 @@ async def register_parent(
         task_id=task_id,
         session_id=f"sess_{task_id}",
         description="Parent task",
-        parent_agent=None,
         parent_task_id=None,
         depth=0,
     )
@@ -131,7 +130,6 @@ async def register_child(
         task_id=child_task_id,
         session_id=f"sess_{child_task_id}",
         description=description,
-        parent_agent=None,
         parent_task_id=parent_task_id,
         depth=depth,
     )
@@ -370,7 +368,7 @@ async def test_no_agent_no_result_status_completed(registry, config):
 
 
 def test_to_prompt_contains_all_sections():
-    """to_prompt() output contains [Child Agent Report], status, task, summary, read_session hint."""
+    """to_prompt() output contains [Child Agent Report], status, task, summary."""
     notif = ChildCompletionNotification(
         task_id="task_abc123",
         label="Sub-1(d:1)",
@@ -388,8 +386,6 @@ def test_to_prompt_contains_all_sections():
     assert "Status: completed" in prompt
     assert "Task: Analyze the data" in prompt
     assert "Summary: Analysis complete with 42 results" in prompt
-    assert 'read_session' in prompt
-    assert '"task_abc123"' in prompt
 
 
 def test_to_prompt_error_status():
@@ -408,7 +404,6 @@ def test_to_prompt_error_status():
     assert "[Child Agent Report]" in prompt
     assert "Status: error" in prompt
     assert "Summary: API rate limit exceeded" in prompt
-    assert '"task_err"' in prompt
 
 
 def test_to_prompt_with_empty_summary():
@@ -492,8 +487,6 @@ async def test_branch_a_notification_to_prompt_in_run_call(registry, config):
     assert "Status: completed" in message
     assert "Branch A summary" in message
     assert "Branch A task" in message
-    assert "read_session" in message
-
     # No events enqueued (Branch A doesn't enqueue)
     assert len(event_queue) == 0
 
@@ -716,4 +709,3 @@ async def test_notification_directly_on_child_completion_branch_b(registry, conf
     assert "Status: completed" in prompt
     assert "End-to-end test task" in prompt
     assert "Here is my final answer: 42" in prompt
-    assert '"child_e2e"' in prompt

@@ -38,7 +38,6 @@ class TestChildCompletionNotification:
         assert "- Status: completed" in prompt
         assert "- Task: Analyze the codebase" in prompt
         assert "- Summary: Found 3 issues in the parser module." in prompt
-        assert 'read_session` with task_id="task_abc123"' in prompt
 
     def test_to_prompt_error_status(self):
         notif = ChildCompletionNotification(

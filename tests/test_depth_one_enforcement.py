@@ -7,7 +7,7 @@ Verifies that after removing Branch C and reawaken support:
 4. Tool context contains task_id, agent, session (not parent_agent)
 5. Sub-agents at depth=1 cannot spawn (enforced by spawn.py)
 6. Display name is "Sub-{index}" (no depth suffix)
-7. _build_path_index() returns simple string
+7. Display name is "Sub-{index}" (no depth suffix)
 """
 
 import asyncio
@@ -87,7 +87,6 @@ class TestBranchAStillWorks:
             task_id="parent_task",
             session_id="sess_parent",
             description="Parent task",
-            parent_agent=None,
             depth=0,
         )
         registry.get_task("parent_task").result = "parent result"
@@ -96,7 +95,6 @@ class TestBranchAStillWorks:
             task_id="child_1",
             session_id="sess_child",
             description="Child task",
-            parent_agent=None,
             parent_task_id="parent_task",
             depth=1,
         )
@@ -128,7 +126,6 @@ class TestBranchBStillWorks:
             task_id="parent_task",
             session_id="sess_parent",
             description="Parent task",
-            parent_agent=None,
             depth=0,
         )
         registry.get_task("parent_task").result = "parent result"
@@ -137,7 +134,6 @@ class TestBranchBStillWorks:
             task_id="child_1",
             session_id="sess_child",
             description="Child task",
-            parent_agent=None,
             parent_task_id="parent_task",
             depth=1,
         )
@@ -170,7 +166,6 @@ class TestBranchCRemoved:
             task_id="parent_task",
             session_id="sess_parent",
             description="Parent task",
-            parent_agent=None,
             depth=0,
         )
         registry.get_task("parent_task").result = "parent result"
@@ -179,7 +174,6 @@ class TestBranchCRemoved:
             task_id="child_1",
             session_id="sess_child",
             description="Child task",
-            parent_agent=None,
             parent_task_id="parent_task",
             depth=1,
         )
@@ -288,14 +282,6 @@ class TestSpawnDepthLimit:
 
 
 class TestDisplayName:
-    def test_display_name_simple(self):
-        assert SubAgentManager._build_path_index("Root", 1) == "1"
-        assert SubAgentManager._build_path_index("Root", 5) == "5"
-
-    def test_display_name_ignores_parent_label(self):
-        assert SubAgentManager._build_path_index("Sub-1(d:1)", 2) == "2"
-        assert SubAgentManager._build_path_index("Sub-3.1(d:2)", 1) == "1"
-
     def test_manager_spawn_uses_simple_display_name(self):
         assert "Sub-1" == "Sub-1"
         assert "Sub-{}".format(3) == "Sub-3"

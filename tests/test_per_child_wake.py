@@ -80,7 +80,6 @@ async def register_parent(
         task_id=task_id,
         session_id=f"sess_{task_id}",
         description="Parent task",
-        parent_agent=None,
         parent_task_id=None,
         depth=0,
     )
@@ -100,7 +99,6 @@ async def register_child_with_agent(
         task_id=child_task_id,
         session_id=f"sess_{child_task_id}",
         description=f"Task for {child_task_id}",
-        parent_agent=None,
         parent_task_id=parent_task_id,
         depth=1,
     )

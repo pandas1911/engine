@@ -3,8 +3,6 @@
 Validates the complete lifecycle:
   - Root agent spawning children via SubAgentManager
   - Per-child immediate wake (Branch A and Branch B)
-  - list_children tool reflecting correct statuses at each stage
-  - read_session tool with full / summary / last_n scopes
   - Session persistence via SessionStore (files on disk)
   - Depth=1 enforcement (spawn rejected, root-only tools filtered)
 
@@ -25,8 +23,6 @@ from engine.subagent.events import ChildCompletionEvent
 from engine.subagent.manager import SubAgentManager
 from engine.session_store import SessionStore
 from engine.subagent.subagent_models import ChildCompletionNotification
-from engine.tools.builtin.list_children import ListChildrenTool
-from engine.tools.builtin.read_session import ReadSessionTool
 from engine.tools.pack import ToolPack, _ROOT_ONLY_TOOLS
 
 
@@ -107,7 +103,6 @@ async def _register_parent(registry: AgentTaskRegistry, task_id: str = "parent_t
         task_id=task_id,
         session_id=f"sess_{task_id}",
         description="Parent task",
-        parent_agent=None,
         parent_task_id=None,
         depth=0,
     )
@@ -128,7 +123,6 @@ async def _register_child(
         task_id=child_task_id,
         session_id=f"sess_{child_task_id}",
         description=f"Task for {child_task_id}",
-        parent_agent=None,
         parent_task_id=parent_task_id,
         depth=1,
     )
@@ -158,10 +152,7 @@ async def _register_child(
 
 # ===================================================================
 # Test 1: Root agent spawns children, each returns a summary
-# ===================================================================
-
-
-class TestSpawnChildrenAndSummaries:
+# ===================================================================class TestSpawnChildrenAndSummaries:
     """Root agent spawns 2 children; both complete with structured notifications."""
 
     @pytest.mark.asyncio
@@ -215,172 +206,7 @@ class TestSpawnChildrenAndSummaries:
 
 
 # ===================================================================
-# Test 2: list_children shows correct statuses at each stage
-# ===================================================================
-
-
-class TestListChildrenStatuses:
-    """list_children reflects running/completed/error as children progress."""
-
-    @pytest.mark.asyncio
-    async def test_status_transitions(self, registry, config):
-        tool = ListChildrenTool()
-        drainable = MockDrainable(state=AgentState.RUNNING)
-        manager, event_queue = _make_manager(registry, drainable, config)
-
-        await _register_parent(registry)
-
-        # Stage 1: both running (no result, agent present)
-        await _register_child(
-            registry, "child_1",
-            result=None, agent_state=AgentState.RUNNING,
-            agent_label="Sub-1",
-        )
-        await _register_child(
-            registry, "child_2",
-            result=None, agent_state=AgentState.RUNNING,
-            agent_label="Sub-2",
-        )
-
-        ctx = {"agent": MagicMock(task_registry=registry), "task_id": "parent_task"}
-        output = await tool.execute({}, ctx)
-        assert "status=running" in output
-        assert output.count("status=running") == 2
-
-        # Stage 2: complete child_1
-        child_1 = registry.get_task("child_1")
-        child_1.result = "done"
-
-        output = await tool.execute({}, ctx)
-        assert "status=completed" in output
-        assert "status=running" in output
-
-        # Stage 3: complete child_2
-        child_2 = registry.get_task("child_2")
-        child_2.result = "also done"
-
-        output = await tool.execute({}, ctx)
-        assert output.count("status=completed") == 2
-        assert "status=running" not in output
-
-    @pytest.mark.asyncio
-    async def test_error_status_shown(self, registry, config):
-        tool = ListChildrenTool()
-        await _register_parent(registry)
-
-        await _register_child(
-            registry, "child_err",
-            result=None, agent_state=AgentState.ERROR,
-            agent_label="Sub-err",
-        )
-
-        ctx = {"agent": MagicMock(task_registry=registry), "task_id": "parent_task"}
-        output = await tool.execute({}, ctx)
-        assert "status=error" in output
-
-
-# ===================================================================
-# Test 3: read_session with different scopes
-# ===================================================================
-
-
-class TestReadSessionScopes:
-    """read_session returns correct data for full / summary / last_n."""
-
-    @pytest.mark.asyncio
-    async def test_scope_full_excludes_thinking(self, registry, config):
-        tool = ReadSessionTool()
-        await _register_parent(registry)
-
-        messages = [
-            Message(role="system", content="system prompt"),
-            Message(role="user", content="Hello"),
-            Message(role="reasoning", content="Let me think..."),
-            Message(role="assistant", content="Partial answer", metadata={"thinking": "reasoning"}),
-            Message(role="assistant", content="Final answer"),
-        ]
-        await _register_child(
-            registry, "child_rs",
-            agent_label="Sub-rs",
-            extra_messages=[],
-        )
-        # Set up session with mixed messages
-        child_task = registry.get_task("child_rs")
-        child_task.agent.session = Session(
-            id="sess_child_rs", messages=messages,
-        )
-
-        ctx = {"agent": MagicMock(task_registry=registry), "task_id": "parent_task"}
-        output = await tool.execute(
-            {"task_id": "child_rs", "scope": "full"}, ctx,
-        )
-
-        assert "[user] Hello" in output
-        assert "[assistant] Final answer" in output
-        assert "system prompt" not in output
-        assert "[think]reasoning[/think]" in output
-        assert "[assistant] [think]reasoning[/think] Partial answer" in output
-
-    @pytest.mark.asyncio
-    async def test_scope_summary_returns_last_assistant(self, registry, config):
-        tool = ReadSessionTool()
-        await _register_parent(registry)
-
-        messages = [
-            Message(role="user", content="Q1"),
-            Message(role="assistant", content="A1"),
-            Message(role="user", content="Q2"),
-            Message(role="assistant", content="A2 final"),
-        ]
-        await _register_child(
-            registry, "child_summary",
-            agent_label="Sub-sum",
-        )
-        child_task = registry.get_task("child_summary")
-        child_task.agent.session = Session(
-            id="sess_child_summary", messages=messages,
-        )
-
-        ctx = {"agent": MagicMock(task_registry=registry), "task_id": "parent_task"}
-        output = await tool.execute(
-            {"task_id": "child_summary", "scope": "summary"}, ctx,
-        )
-
-        assert output == "A2 final"
-
-    @pytest.mark.asyncio
-    async def test_scope_last_n_returns_correct_count(self, registry, config):
-        tool = ReadSessionTool()
-        await _register_parent(registry)
-
-        messages = [
-            Message(role="user", content="m{}".format(i))
-            for i in range(10)
-        ]
-        await _register_child(
-            registry, "child_lastn",
-            agent_label="Sub-ln",
-        )
-        child_task = registry.get_task("child_lastn")
-        child_task.agent.session = Session(
-            id="sess_child_lastn", messages=messages,
-        )
-
-        ctx = {"agent": MagicMock(task_registry=registry), "task_id": "parent_task"}
-        output = await tool.execute(
-            {"task_id": "child_lastn", "scope": "last_n", "count": 3}, ctx,
-        )
-
-        lines = [l for l in output.split("\n") if l.strip()]
-        assert len(lines) == 3
-        assert "m7" in output
-        assert "m8" in output
-        assert "m9" in output
-        assert "m0" not in output
-
-
-# ===================================================================
-# Test 4: Session persistence — files exist in correct directory
+# Test 2: Session persistence — files exist in correct directory
 # ===================================================================
 
 
@@ -406,12 +232,10 @@ class TestSessionPersistence:
                         )
 
         # Verify session file was created
-        children = store.list_children()
-        assert len(children) == 1
-        child_info = children[0]
-        assert child_info.task_id.startswith("task_")
-        # create_file writes header only; real-time callback appends messages as they arrive
-        assert child_info.message_count >= 0
+        import glob as glob_mod
+        jsonl_files = glob_mod.glob(str(store.sessions_dir / "task_*.jsonl"))
+        assert len(jsonl_files) == 1
+        assert jsonl_files[0].endswith(".jsonl")
 
     @pytest.mark.asyncio
     async def test_completion_saves_final_session(self, registry, config, store):
@@ -438,9 +262,10 @@ class TestSessionPersistence:
         await manager._on_child_complete("task_persist", info)
 
         # SessionStore should now have the child session file
-        children = store.list_children()
-        task_ids = {c.task_id for c in children}
-        assert "task_persist" in task_ids
+        import glob as glob_mod
+        jsonl_files = glob_mod.glob(str(store.sessions_dir / "task_*.jsonl"))
+        task_file_names = {f.rsplit("/", 1)[-1] for f in jsonl_files}
+        assert "task_persist.jsonl" in task_file_names
 
         # Verify round-trip
         restored = store.read_child_session("task_persist")
@@ -471,7 +296,7 @@ class TestSessionPersistence:
 
 
 # ===================================================================
-# Test 5: Depth=1 enforcement
+# Test 3: Depth=1 enforcement
 # ===================================================================
 
 
@@ -492,7 +317,7 @@ class TestDepthOneEnforcement:
         assert "cannot spawn" in result.lower()
 
     def test_root_only_tools_filtered_from_subagent(self):
-        """ToolPack hides spawn, list_children, read_session from depth=1 sessions."""
+        """ToolPack hides spawn from depth=1 sessions."""
         from engine.tools.base import Tool
 
         class FakeTool(Tool):
@@ -508,14 +333,14 @@ class TestDepthOneEnforcement:
             async def execute(self, arguments, context):
                 return "ok"
 
-        tools = [FakeTool(n) for n in ["spawn", "list_children", "read_session", "write", "search"]]
+        tools = [FakeTool(n) for n in ["spawn", "write", "search"]]
         pack = ToolPack(tools)
 
         # Root session sees all tools
         root_session = Session(id="root", depth=0)
         root_schemas = pack.get_schemas(session=root_session)
         root_names = {s["function"]["name"] for s in root_schemas}
-        assert root_names == {"spawn", "list_children", "read_session", "write", "search"}
+        assert root_names == {"spawn", "write", "search"}
 
         # Sub-agent session does NOT see root-only tools
         sub_session = Session(id="sub", depth=1)
@@ -526,11 +351,11 @@ class TestDepthOneEnforcement:
 
     def test_root_only_set_is_correct(self):
         """Verify the _ROOT_ONLY_TOOLS set matches expected tool names."""
-        assert _ROOT_ONLY_TOOLS == {"spawn", "list_children", "read_session"}
+        assert _ROOT_ONLY_TOOLS == {"spawn"}
 
 
 # ===================================================================
-# Test 6: Per-child wake — children notify parent independently
+# Test 4: Per-child wake — children notify parent independently
 # ===================================================================
 
 

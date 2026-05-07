@@ -8,7 +8,7 @@ import pytest
 from engine import delegate
 
 TEST_PROMPT = """
-    帮我查一下五一节上海的天气怎么样
+    当前有哪些工具可用
 """
 
 
