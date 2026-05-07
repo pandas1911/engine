@@ -62,11 +62,7 @@ SPAWN_PROMPT: str = """\
 - Include sufficient context in the task description — the child agent starts isolated.
 - Do NOT spawn a child for tasks that require a single tool call you can make yourself.
 
-## Monitoring Sub-Agents
-
-- Use `list_children` to see all spawned sub-agents' statuses (running/completed/error) and message counts.
-- Use `read_session` with a child's `task_id` to inspect its full session content. Scopes: `full` (all messages), `summary` (final answer only), `last_n` (recent N messages).
-- Each child returns a summary upon completion. Use `read_session` when you need more detail than the summary provides.
+Each child returns a summary upon completion.
 """
 
 
@@ -157,7 +153,7 @@ A one-line summary at the top is encouraged when the result is complex — skip 
 You are a leaf worker. You cannot spawn sub-agents.
 
 ## Summary Constraint
-When your task is complete, provide a concise summary of your findings. The summary will be sent to the main agent. Your full session (including all tool calls and intermediate steps) is automatically saved and the main agent can inspect it at any time.
+When your task is complete, provide a concise summary of your findings. The summary will be sent to the main agent. Your full session (including all tool calls and intermediate steps) is automatically saved.
 
 ## Session Context
 - Label: {label}

@@ -40,7 +40,6 @@ class PaceLevel(Enum):
 class Lane(Enum):
     """Traffic lane for request routing."""
 
-    MAIN = "main"
     SUBAGENT = "subagent"
 
 

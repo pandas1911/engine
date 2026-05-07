@@ -6,6 +6,8 @@ from typing import Any, Dict, TYPE_CHECKING
 from engine.tools.base import Tool
 from engine.logging import get_logger
 from engine.config import get_config
+from engine.safety import LaneConcurrencyQueue
+from engine.providers.provider_models import Lane
 
 if TYPE_CHECKING:
     from engine.subagent.manager import SubAgentManager
@@ -44,6 +46,9 @@ class SpawnTool(Tool):
     def __init__(self):
         self._managers: Dict[str, "SubAgentManager"] = {}
         self._lock = asyncio.Lock()
+        config = get_config()
+        self._lane_queue = LaneConcurrencyQueue()
+        self._lane_queue.configure_lane(Lane.SUBAGENT, max_concurrent=config.subagent_lane_concurrency)
 
     async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> str:
         session = context["session"]
@@ -78,7 +83,7 @@ class SpawnTool(Tool):
                     agent_task_id=task_id,
                     parent_label=agent.label,
                     config=config,
-                    lane_queue=agent.lane_queue,
+                    lane_queue=self._lane_queue,
                     llm_provider=agent.llm,
                     tool_pack=agent.tool_pack,
                     root_streaming_handler=agent.streaming_handler,

@@ -17,9 +17,9 @@ from engine.runtime.task_registry import AgentTaskRegistry
 from engine.tools.base import Tool
 from engine.tools.pack import ToolPack
 from engine.tools.builtin import BUILTIN_TOOLS
-from engine.safety import LaneConcurrencyQueue, SlidingWindowRateLimiter, APIKeyPool, RetryEngine
+from engine.safety import SlidingWindowRateLimiter, APIKeyPool, RetryEngine
 from engine.providers.fallback_provider import FallbackLLMProvider
-from engine.providers.provider_models import ProviderParams, Lane
+from engine.providers.provider_models import ProviderParams
 from engine.time import TimeProvider
 from engine.prompts import build_root_system_prompt
 from engine.streaming_handler import SSEStreamingHandler
@@ -207,11 +207,6 @@ async def delegate(
 
         tool_pack = ToolPack(enabled_tools)
 
-        # Create Lane Concurrency Queue
-        lane_queue = LaneConcurrencyQueue()
-        lane_queue.configure_lane(Lane.MAIN, max_concurrent=config.main_lane_concurrency)
-        lane_queue.configure_lane(Lane.SUBAGENT, max_concurrent=config.subagent_lane_concurrency)
-
         streaming_handler = SSEStreamingHandler(event_callback) if event_callback else None
 
         # --- Create SessionStore for this root conversation ---
@@ -225,7 +220,6 @@ async def delegate(
             llm_provider=llm_provider,
             task_registry=task_registry,
             tool_pack=tool_pack,
-            lane_queue=lane_queue,
             streaming_handler=streaming_handler,
         )
 
@@ -240,7 +234,6 @@ async def delegate(
             task_id=agent.task_id,
             session_id=session.id,
             description="root task",
-            parent_agent=None,
             agent=agent,
             depth=0,
         )

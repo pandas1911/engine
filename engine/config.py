@@ -44,7 +44,6 @@ class Config:
     llm_retry_base_delay: float = 1.0
 
     # Lane concurrency
-    main_lane_concurrency: int = 4
     subagent_lane_concurrency: int = 5
 
     # Rate-limit pacing (consumed by SlidingWindowRateLimiter)
@@ -155,7 +154,6 @@ class ConfigLoader:
             "log_dir",
             "llm_retry_max_attempts",
             "llm_retry_base_delay",
-            "main_lane_concurrency",
             "subagent_lane_concurrency",
             "pacing_enabled",
             "pacing_min_interval_ms",
