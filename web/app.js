@@ -238,6 +238,9 @@
                             part.content = part.content.trimEnd();
                             part.element.textContent = part.content;
                         }
+                        if (part.type === 'text' && part.element && part.content && typeof marked !== 'undefined') {
+                            part.element.innerHTML = marked.parse(part.content);
+                        }
                     }
                     break;
                 }

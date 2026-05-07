@@ -350,7 +350,7 @@
 
         .subagent-thinking {
             color: var(--text-weak);
-            font-size: var(--font-size-small);
+            font-size: 12.5px;
             font-style: italic;
             border-left: 2px solid var(--text-weaker);
             padding-left: 12px;
@@ -360,11 +360,58 @@
 
         .subagent-text {
             color: var(--text-base);
-            font-size: var(--font-size-small);
-            line-height: 1.7;
+            font-size: 13.5px;
+            line-height: 1.6;
             word-break: break-word;
             white-space: normal;
         }
+
+        .subagent-text p { margin-bottom: 6px; }
+        .subagent-text p:last-child { margin-bottom: 0; }
+        .subagent-text code {
+            background: var(--bg-user);
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-size: 13px;
+            font-family: "SF Mono", "Fira Code", monospace;
+        }
+        .subagent-text pre {
+            background: var(--bg-user);
+            border-radius: var(--radius);
+            padding: 10px;
+            overflow-x: auto;
+            margin: 6px 0;
+        }
+        .subagent-text pre code {
+            background: none;
+            padding: 0;
+        }
+        .subagent-text ul, .subagent-text ol {
+            padding-left: 18px;
+            margin: 6px 0;
+        }
+        .subagent-text blockquote {
+            border-left: 2px solid var(--text-weaker);
+            padding-left: 10px;
+            color: var(--text-weak);
+            margin: 6px 0;
+        }
+        .subagent-text h1 { font-size: 17px; margin: 10px 0 4px; }
+        .subagent-text h2 { font-size: 16px; margin: 8px 0 4px; }
+        .subagent-text h3 { font-size: 15px; margin: 8px 0 4px; }
+        .subagent-text h4, .subagent-text h5, .subagent-text h6 {
+            font-size: 14px;
+            font-weight: 600;
+            margin: 6px 0 4px;
+        }
+        .subagent-text hr {
+            border: none;
+            border-top: 1px solid var(--border-color);
+            margin: 8px 0;
+        }
+        .subagent-text strong { font-weight: 600; color: var(--text-strong); }
+        .subagent-text em { font-style: italic; }
+        .subagent-text a { color: var(--text-base); text-decoration: underline; }
 
         .subagent-tool-row {
             display: flex;
