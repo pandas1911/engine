@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
-if TYPE_CHECKING:
-    from engine.subagent.subagent_models import CollectedChildResult
+
 
 
 class AgentState(Enum):
@@ -79,8 +78,8 @@ class Session:
 
 @dataclass
 class QueueEvent:
-    trigger_task_id: str  # Trigger child task_id (debug/log)
-    child_results: Dict[str, CollectedChildResult]  # All child task_id → enriched result
+    trigger_task_id: str
+    child_summary: str
     error: bool
 
 

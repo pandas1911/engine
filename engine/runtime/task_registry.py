@@ -8,10 +8,10 @@ removed — that responsibility moves to SubAgentManager.
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Set
+from typing import TYPE_CHECKING, Callable, Dict, Optional, Set
 
 from engine.logging import get_logger
-from engine.subagent.subagent_models import CollectedChildResult, AgentTask
+from engine.subagent.subagent_models import AgentTask
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -227,15 +227,7 @@ class AgentTaskRegistry:
         """
         return self._tasks.get(task_id)
 
-    def collect_child_results(self, parent_task_id: str) -> Dict[str, CollectedChildResult]:
-        """Collect all direct child results with task_description.
-
-        Args:
-            parent_task_id: The parent task ID to collect results for
-
-        Returns:
-            Dictionary mapping child task IDs to their CollectedChildResult
-        """
+    def collect_child_results(self, parent_task_id: str) -> Dict[str, Dict[str, str]]:
         parent = self._tasks.get(parent_task_id)
         if not parent:
             return {}
@@ -243,10 +235,10 @@ class AgentTaskRegistry:
         for child_id in parent.child_task_ids:
             child_task = self._tasks.get(child_id)
             if child_task and child_task.result is not None:
-                results[child_id] = CollectedChildResult(
-                    task_description=child_task.task_description,
-                    result=child_task.result,
-                )
+                results[child_id] = {
+                    "task_description": child_task.task_description,
+                    "result": child_task.result,
+                }
         return results
 
     def get_task_depth(self, task_id: str) -> int:
@@ -263,17 +255,7 @@ class AgentTaskRegistry:
 
     async def collect_and_cleanup(
         self, parent_task_id: str
-    ) -> Dict[str, CollectedChildResult]:
-        """Atomically collect child results, clear parent's child list, and remove child tasks.
-
-        All operations are performed inside the registry lock for consistency.
-
-        Args:
-            parent_task_id: The parent task whose children should be collected and cleaned.
-
-        Returns:
-            Mapping from child task ID to CollectedChildResult.
-        """
+    ) -> Dict[str, Dict[str, str]]:
         async with self._lock:
             results = self.collect_child_results(parent_task_id)
             parent = self._tasks.get(parent_task_id)

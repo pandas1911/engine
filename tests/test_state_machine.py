@@ -1,7 +1,6 @@
 """Unit tests for AgentStateMachine.
 
-Validates all 7 valid transitions, multiple invalid transition attempts,
-the reawaken lifecycle cycle, and the full agent lifecycle including reawaken.
+Validates all 6 valid transitions and multiple invalid transition attempts.
 Pure in-memory tests — no mocks, no LLM, no network.
 """
 
@@ -65,12 +64,6 @@ class TestValidTransitions:
         sm.trigger("error")
         assert sm.current_state == AgentState.ERROR
 
-    def test_reawaken_from_completed(self) -> None:
-        """(COMPLETED, 'reawaken') -> RUNNING — the new transition."""
-        sm = _sm(AgentState.COMPLETED)
-        sm.trigger("reawaken")
-        assert sm.current_state == AgentState.RUNNING
-
 
 # ---------------------------------------------------------------------------
 # Invalid transitions
@@ -79,20 +72,6 @@ class TestValidTransitions:
 
 class TestInvalidTransitions:
     """Verify that disallowed events raise InvalidTransitionError."""
-
-    def test_reawaken_from_non_completed_states(self) -> None:
-        """'reawaken' must only be accepted from COMPLETED."""
-        disallowed = [
-            AgentState.IDLE,
-            AgentState.RUNNING,
-            AgentState.WAITING_FOR_CHILDREN,
-            AgentState.ERROR,
-        ]
-        for state in disallowed:
-            sm = _sm(state)
-            assert not sm.can_trigger("reawaken")
-            with pytest.raises(InvalidTransitionError):
-                sm.trigger("reawaken")
 
     def test_start_from_running(self) -> None:
         """RUNNING rejects 'start' (already started)."""
@@ -107,7 +86,7 @@ class TestInvalidTransitions:
             sm.trigger("finish")
 
     def test_start_from_completed(self) -> None:
-        """COMPLETED rejects 'start' (must use 'reawaken')."""
+        """COMPLETED rejects 'start' (terminal state)."""
         sm = _sm(AgentState.COMPLETED)
         with pytest.raises(InvalidTransitionError):
             sm.trigger("start")
@@ -153,13 +132,11 @@ class TestCanTrigger:
         """Representative invalid combos should return False."""
         invalid_combos = [
             (AgentState.IDLE, "finish"),
-            (AgentState.IDLE, "reawaken"),
             (AgentState.RUNNING, "start"),
             (AgentState.RUNNING, "children_settled"),
             (AgentState.COMPLETED, "start"),
             (AgentState.ERROR, "start"),
             (AgentState.ERROR, "finish"),
-            (AgentState.ERROR, "reawaken"),
         ]
         for state, event in invalid_combos:
             sm = _sm(state)
@@ -176,54 +153,6 @@ class TestCanTrigger:
 class TestLifecycle:
     """Multi-step sequences that exercise the state machine end-to-end."""
 
-    def test_reawaken_lifecycle_cycle(self) -> None:
-        """IDLE -> RUNNING -> COMPLETED -> RUNNING(reawaken) -> COMPLETED, loop 3x.
-
-        Demonstrates that an agent can be reawakened repeatedly after
-        completing, cycling between COMPLETED and RUNNING.
-        """
-        sm = _sm(AgentState.IDLE)
-        sm.trigger("start")
-        assert sm.current_state == AgentState.RUNNING
-
-        for i in range(3):
-            sm.trigger("finish")
-            assert sm.current_state == AgentState.COMPLETED, f"iteration {i}"
-
-            sm.trigger("reawaken")
-            assert sm.current_state == AgentState.RUNNING, f"iteration {i}"
-
-        # Final finish leaves it in COMPLETED
-        sm.trigger("finish")
-        assert sm.current_state == AgentState.COMPLETED
-
-    def test_full_agent_lifecycle_with_reawaken(self) -> None:
-        """Full lifecycle: IDLE -> start -> RUNNING -> spawn -> WAITING_FOR_CHILDREN
-        -> children_settled -> RUNNING -> finish -> COMPLETED -> reawaken -> RUNNING
-        -> finish -> COMPLETED.
-        """
-        sm = _sm(AgentState.IDLE)
-
-        # Initial lifecycle
-        sm.trigger("start")
-        assert sm.current_state == AgentState.RUNNING
-
-        sm.trigger("spawn_children")
-        assert sm.current_state == AgentState.WAITING_FOR_CHILDREN
-
-        sm.trigger("children_settled")
-        assert sm.current_state == AgentState.RUNNING
-
-        sm.trigger("finish")
-        assert sm.current_state == AgentState.COMPLETED
-
-        # Reawaken and finish again
-        sm.trigger("reawaken")
-        assert sm.current_state == AgentState.RUNNING
-
-        sm.trigger("finish")
-        assert sm.current_state == AgentState.COMPLETED
-
     def test_error_halts_lifecycle(self) -> None:
         """An error transition leads to the terminal ERROR state."""
         sm = _sm(AgentState.IDLE)
@@ -232,7 +161,7 @@ class TestLifecycle:
         assert sm.current_state == AgentState.ERROR
 
         # ERROR is terminal — nothing works
-        for event in ("start", "finish", "reawaken", "spawn_children",
+        for event in ("start", "finish", "spawn_children",
                        "children_settled", "error"):
             assert not sm.can_trigger(event)
 

@@ -195,7 +195,7 @@ class SubAgentStreamingWrapper(BaseStreamingHandler):
     - Maps both ``error`` and ``subagent_error`` to ``subagent_error``
     - Prefixes other events with ``subagent_``
     - Injects ``task_id`` only when not already present in data dict
-    - No spawn suppression (inherits base class behavior)
+    - No spawn suppression needed (sub-agents at depth=1 never spawn)
     - Uses parent's part ID counter via _next_part_id()
     """
 

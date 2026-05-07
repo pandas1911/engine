@@ -23,7 +23,7 @@ class Tool(ABC):
 
         Args:
             arguments: Tool arguments from LLM
-            context: Execution context (session, config, parent_agent, etc.)
+            context: Execution context (session, agent, task_id, etc.)
 
         Returns:
             Result string to be passed back to the LLM

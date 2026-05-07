@@ -243,19 +243,4 @@ function updateSubAgentToolResult(partId, result, toolName, element) {
     if (!element) return;
     const spinner = element.querySelector('.spinner-svg');
     if (spinner) spinner.remove();
-
-    if (toolName === 'spawn' && result) {
-        const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
-        const taskIdMatch = resultStr.match(/Task ID:\s*(\S+)/);
-        const labelMatch = resultStr.match(/Agent Label:\s*(.+)/);
-        const argsSpan = element.querySelector('.tool-args');
-        if (argsSpan) {
-            if (taskIdMatch && labelMatch) {
-                argsSpan.textContent = '(Task ID: ' + taskIdMatch[1] + ', Agent Label: ' + labelMatch[1].trim() + ')';
-            } else {
-                element.remove();
-                return 'removed';
-            }
-        }
-    }
 }

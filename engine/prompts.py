@@ -8,7 +8,6 @@ __all__ = [
     # Constants
     "BASE_PROMPT",
     "SPAWN_PROMPT",
-    "DEPTH_LIMIT_REJECTION",
     # Functions / derived values
     "build_root_system_prompt",
     "DEFAULT_SYSTEM_PROMPT",
@@ -19,7 +18,6 @@ __all__ = [
     "get_child_results_empty_warning",
     "get_spawn_confirmation",
     "get_concurrency_timeout_rejection",
-    "get_runtime_depth_rejection",
 ]
 
 
@@ -62,17 +60,14 @@ SPAWN_PROMPT: str = """\
 
 - One `spawn` call = one focused subtask with clear completion criteria.
 - Include sufficient context in the task description — the child agent starts isolated.
-- Respect the depth limit: at maximum depth, complete the task yourself.
 - Do NOT spawn a child for tasks that require a single tool call you can make yourself.
-"""
 
-# [Purpose] Rejection message when maximum nesting depth is reached (format template)
-# [Usage] engine/subagent/manager.py spawn() L116, engine/subagent/spawn.py execute() L65-68
-#         Callers must .format(depth=..., max_depth=...) or use get_runtime_depth_rejection()
-DEPTH_LIMIT_REJECTION: str = (
-    "[Spawn Failed] Maximum nesting depth reached (current: {depth}/{max_depth}). "
-    "Please complete the task at the current level — no further child agents can be spawned."
-)
+## Monitoring Sub-Agents
+
+- Use `list_children` to see all spawned sub-agents' statuses (running/completed/error) and message counts.
+- Use `read_session` with a child's `task_id` to inspect its full session content. Scopes: `full` (all messages), `summary` (final answer only), `last_n` (recent N messages).
+- Each child returns a summary upon completion. Use `read_session` when you need more detail than the summary provides.
+"""
 
 
 # ── Dynamic Prompt Functions ─────────────────────────────────────────────
@@ -106,7 +101,6 @@ def get_subagent_system_prompt(
     parent_label: str,
     task_desc: str,
     depth: int,
-    max_depth: int,
     can_spawn: bool,
     task_id: str,
     label: str = "",
@@ -116,20 +110,14 @@ def get_subagent_system_prompt(
     Args:
         parent_label: Display label of the parent agent.
         task_desc: Task description assigned to the sub-agent.
-        depth: Current nesting depth of the sub-agent.
-        max_depth: Maximum allowed nesting depth.
-        can_spawn: Whether this sub-agent is allowed to spawn further children.
+        depth: Current nesting depth of the sub-agent (retained for logging).
+        can_spawn: Kept for API compatibility; always False in depth=1 architecture.
         task_id: Task ID assigned to the sub-agent.
         label: Short descriptive label for the sub-agent (shown in Session Context).
 
     Returns:
         Complete system prompt string for the sub-agent.
     """
-    if can_spawn:
-        spawn_section = "You CAN spawn your own sub-agents."
-    else:
-        spawn_section = "You are a leaf worker and CANNOT spawn further sub-agents."
-
     return (
         """\
 # Subagent Context
@@ -145,7 +133,6 @@ You are a **subagent** spawned by the {parent_label} for a specific task.
 1. **Stay focused** - Do your assigned task, nothing else
 2. **Complete the task** - Your final message will be automatically reported to the {parent_label}
 3. **Be ephemeral** - You may be terminated after task completion. That's fine.
-4. **Trust push-based completion** - Descendant results are auto-announced back to you
 
 ## Output Format
 
@@ -167,20 +154,19 @@ Adapt your output to the task. Use what fits, drop what doesn't:
 A one-line summary at the top is encouraged when the result is complex — skip it for simple answers.
 
 ## Sub-Agent Spawning
-{spawn_section}
+You are a leaf worker. You cannot spawn sub-agents.
+
+## Summary Constraint
+When your task is complete, provide a concise summary of your findings. The summary will be sent to the main agent. Your full session (including all tool calls and intermediate steps) is automatically saved and the main agent can inspect it at any time.
 
 ## Session Context
 - Label: {label}
-- Depth: {depth}/{max_depth}
-        - Your task ID: {task_id}"""
+- Your task ID: {task_id}"""
     ).format(
         parent_label=parent_label,
         task_desc=task_desc,
-        depth=depth,
-        max_depth=max_depth,
         task_id=task_id,
         label=label,
-        spawn_section=spawn_section,
     )
 
 
@@ -301,19 +287,3 @@ def get_concurrency_timeout_rejection(
         timeout=timeout,
     )
 
-
-# [Purpose] Runtime depth-limit rejection (formatted version of DEPTH_LIMIT_REJECTION)
-# [Usage] engine/subagent/spawn.py execute() L65-68 — replaces inline f-string
-def get_runtime_depth_rejection(depth: int, max_depth: int) -> str:
-    """Return the formatted depth-limit rejection message.
-
-    This is a convenience wrapper around DEPTH_LIMIT_REJECTION.format().
-
-    Args:
-        depth: Current nesting depth.
-        max_depth: Maximum allowed nesting depth.
-
-    Returns:
-        Formatted rejection message string.
-    """
-    return DEPTH_LIMIT_REJECTION.format(depth=depth, max_depth=max_depth)

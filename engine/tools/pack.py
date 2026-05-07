@@ -1,7 +1,10 @@
 from typing import Any, Dict, List, Optional
 
 from engine.tools.base import Tool, ToolRegistry, ToolRegistrationError
-from engine.config import get_config
+
+
+# Tools that only the root agent (depth=0) should have access to.
+_ROOT_ONLY_TOOLS = {"spawn", "list_children", "read_session"}
 
 
 class ToolPack:
@@ -25,15 +28,13 @@ class ToolPack:
     def get_schemas(self, session=None) -> List[Dict[str, Any]]:
         """Get OpenAI function calling schemas, filtered by session depth.
 
-        Config is obtained via get_config() internally.
-        If session is provided and its depth >= config.max_depth, 'spawn' schema is filtered out.
+        Root-only tools (spawn, list_children, read_session) are hidden from
+        sub-agents (depth >= 1) since depth=1 is enforced at architecture level.
         """
         all_schemas = self._registry.get_schemas()
 
-        if session is not None:
-            config = get_config()
-            if session.depth >= config.max_depth:
-                return [s for s in all_schemas if s["function"]["name"] != "spawn"]
+        if session is not None and session.depth >= 1:
+            return [s for s in all_schemas if s["function"]["name"] not in _ROOT_ONLY_TOOLS]
 
         return all_schemas
 

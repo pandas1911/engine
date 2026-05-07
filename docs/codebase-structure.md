@@ -1,6 +1,6 @@
 # Engine Codebase Structure
 
-> A multi-agent orchestration framework that supports nested sub-agent spawning, multi-provider LLM routing with primary/fallback ordering, and per-provider rate limiting.
+> A multi-agent orchestration framework that supports single-level sub-agent spawning (depth=1 architecture), multi-provider LLM routing with primary/fallback ordering, and per-provider rate limiting.
 
 ---
 
@@ -39,17 +39,21 @@ engine/
 │   │   └── chunk_types.py        # LLM streaming chunk types (StreamChunk dataclass)
 │   ├── subagent/              # Sub-agent spawning and lifecycle
 │   │   ├── __init__.py
-│   │   ├── manager.py         # SubAgentManager — spawn, gate-check, notify; accepts root_streaming_handler for sub-agent streaming
-│   │   ├── spawn.py           # SpawnTool — lazy-caches SubAgentManager per agent, passes root_streaming_handler through
+│   │   ├── manager.py         # SubAgentManager — spawn, per-child wake, notify; accepts root_streaming_handler for sub-agent streaming
+│   │   ├── spawn.py           # Backward compat shim — re-exports SpawnTool from engine.tools.builtin.spawn
+│   │   ├── session_store.py   # SessionStore — JSON file persistence layer for sub-agent sessions
 │   │   ├── protocol.py        # Drainable protocol definition
 │   │   ├── events.py          # Event types (ChildCompletionEvent)
-│   │   └── subagent_models.py # AgentTask, CollectedChildResult
+│   │   └── subagent_models.py # AgentTask, ChildCompletionNotification
 │   ├── tools/                 # Extensible tool system
 │   │   ├── __init__.py
 │   │   ├── base.py            # Tool ABC, FunctionTool, ToolRegistry (pure storage)
 │   │   ├── pack.py            # ToolPack — immutable view over ToolRegistry with depth-aware schema filtering
-│   │   ├── builtin/           # Built-in tools (empty, reserved)
-│   │   │   └── __init__.py
+│   │   ├── builtin/           # Built-in tools
+│   │   │   ├── __init__.py    # BUILTIN_TOOLS list, re-exports
+│   │   │   ├── spawn.py       # SpawnTool — lazy-caches SubAgentManager per agent, passes root_streaming_handler through
+│   │   │   ├── list_children.py # ListChildrenTool — lists all child agents with status/progress
+│   │   │   └── read_session.py  # ReadSessionTool — reads child session content (full/summary/last_n scopes)
 │   │   └── custom/            # Auto-discovered custom tools (web search, web fetch)
 │   │       ├── __init__.py
 │   │       └── web_fetch.py   # URL content fetching with HTML→Markdown/Text conversion
@@ -58,9 +62,17 @@ engine/
 │       └── sink.py            # Logger, formatters, async file handler
 ├── tests/                     # Test suite
 │   ├── test_easy_task.py      # Simple delegation test
-│   ├── test_multilayer_subagent.py  # Multi-layer nesting test
-│   ├── test_session_reuse.py  # Session reuse unit tests
-│   └── test_subagent_streaming.py  # Sub-agent streaming unit tests
+│   ├── test_state_machine.py  # State machine unit tests
+│   ├── test_per_child_wake.py  # Per-child wake gate-check unit tests
+│   ├── test_child_notification.py  # Child notification formatting unit tests
+│   ├── test_child_notification_models.py  # ChildCompletionNotification model tests
+│   ├── test_depth_one_enforcement.py  # depth=1 enforcement unit tests
+│   ├── test_list_children_tool.py  # ListChildrenTool unit tests
+│   ├── test_read_session_tool.py  # ReadSessionTool unit tests
+│   ├── test_session_persistence.py  # SessionStore file persistence tests
+│   ├── test_context_truncation.py  # TPM-based context truncation tests
+│   ├── test_fallback_truncation.py  # Fallback provider truncation tests
+│   └── test_rate_limiter.py  # Rate limiter unit tests
 ├── app/                       # FastAPI web application
 │   ├── main.py                # FastAPI app factory, static file mount
 │   ├── _state.py              # Global streaming lock (single-request enforcement)
@@ -142,7 +154,9 @@ The main entry point containing `delegate()` and all startup orchestration logic
 8. Discover and merge custom tools
 9. Filter tools by `config.is_tool_enabled()` — unlisted tools default to enabled
 10. Conditionally add `SpawnTool` (if `"spawn"` is enabled)
-11. Build `ToolPack` from enabled tools
+11. Merge built-in tools (`BUILTIN_TOOLS` from `engine/tools/builtin/`) with custom tools
+12. Filter tools by `config.is_tool_enabled()` — unlisted tools default to enabled
+13. Build `ToolPack` from enabled tools
 12. Create root `Agent` with `ToolPack`, register in `AgentTaskRegistry`
 13. Run the agent, return `AgentResult`
 
@@ -167,7 +181,6 @@ Loads runtime configuration from `engine.json`.
 | `primary` | `""` | Required. Primary model reference in `"provider/model"` format |
 | `fallback` | `[]` | Optional list of fallback model references in `"provider/model"` format |
 | `strip_thinking` | `True` | Remove `<think/>` tags from LLM responses |
-| `max_depth` | `3` | Maximum sub-agent nesting depth |
 | `spawn_timeout` | `30.0` | Seconds to wait for a concurrency slot before rejecting spawn |
 | `max_result_length` | `3000` | Max chars for child agent results before truncation |
 | `summary_warning_reserve` | `2` | Iterations before limit to inject summary warning |
@@ -185,7 +198,8 @@ Loads runtime configuration from `engine.json`.
 | `cooldown_max_ms` | `300000.0` | Maximum key cooldown |
 | `user_timezone` | `None` | Timezone override (env var `USER_TIMEZONE` takes precedence) |
 | `tools` | `{}` | `Dict[str, bool]` — tool enable/disable mapping. Unlisted tools default to `True` (enabled). Use `config.is_tool_enabled(name)` to check. |
-| `max_reawaken_depth` | `3` | Maximum recursive re-awaken depth. Limits how many times a completed agent can be re-awakened to process child results, preventing infinite re-awaken chains. |
+
+**Note:** Sub-agent nesting depth is fixed at depth=1 (leaf workers only). Enforced at architecture level in `SpawnTool` and `SubAgentManager.spawn()`, not via config.
 
 **Config discovery strategy:**
 
@@ -204,22 +218,20 @@ A pure leaf module (zero `engine.*` imports) serving as the single source of tru
 | Constant | Description |
 |---|---|
 | `BASE_PROMPT` | Root agent base execution strategy |
-| `SPAWN_PROMPT` | Root agent sub-agent spawning rules |
-| `DEPTH_LIMIT_REJECTION` | Depth limit rejection message template (format string) |
+| `SPAWN_PROMPT` | Root agent sub-agent spawning rules (includes list_children and read_session instructions) |
 
 **Dynamic Functions:**
 
 | Function | Description |
 |---|---|
 | `build_root_system_prompt(include_spawn)` | Assemble root agent prompt (BASE + optional SPAWN) |
-| `get_subagent_system_prompt(parent_label, task_desc, depth, max_depth, can_spawn, task_id, label)` | Build sub-agent system prompt |
+| `get_subagent_system_prompt(parent_label, task_desc, depth, can_spawn, task_id, label)` | Build sub-agent system prompt. `can_spawn` is always `False` in depth=1 architecture. `depth` retained for logging. |
 | `get_summary_warning(remaining_iterations)` | Iteration limit warning message |
 | `get_emergency_summary_prompt()` | Emergency summary forcing final answer |
 | `get_child_results_prompt(child_results_json)` | Format child results for parent consumption |
 | `get_child_results_empty_warning()` | Warning when no child results collected |
 | `get_spawn_confirmation(task_id, label)` | Spawn success confirmation message |
 | `get_concurrency_timeout_rejection(task_desc, label, active, max_concurrent, timeout)` | Concurrency limit rejection (unified from two templates) |
-| `get_runtime_depth_rejection(depth, max_depth)` | Runtime depth safety net rejection |
 
 **Derived values:**
 - `DEFAULT_SYSTEM_PROMPT` = `build_root_system_prompt(include_spawn=True)` — backward-compatible alias
@@ -343,7 +355,7 @@ Timezone-aware time formatting for the agent framework.
 
 #### `agent.py` — Agent Class
 
-The central execution engine. Each agent owns a session, tool pack, state machine, and event queue. No `SubAgentManager` — spawning is handled by `SpawnTool` within the `ToolPack`.
+The central execution engine. Each agent owns a session, tool pack, state machine, and event queue. Spawning is handled by `SpawnTool` within the `ToolPack`, which lazily creates a `SubAgentManager`.
 
 **State machine:**
 
@@ -355,20 +367,18 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
           WAITING_FOR_CHILDREN ──────────┘
                    ↓
                [error] → ERROR
-
-COMPLETED ──[reawaken]──→ RUNNING
 ```
 
 **Core loop (`_execute_cycle()`):**
 
-1. Process tool calls iteratively (max 20 iterations)
-2. Drain queued events (ChildCompletionEvents from sub-agents)
-3. If pending children exist → transition to `WAITING_FOR_CHILDREN`
+1. Process tool calls iteratively (max 15 iterations)
+2. Drain queued `ChildCompletionEvent`s one at a time — for each, inject the child's `ChildCompletionNotification.to_prompt()` as a user message and re-enter tool call processing
+3. If pending children remain → transition to `WAITING_FOR_CHILDREN`
 4. If no pending children → finalize and notify parent
 
 **Key features:**
 
-- **ToolPack-based tools**: Agent receives a `ToolPack` (immutable tool view) at construction. Tool schemas are depth-filtered by `ToolPack.get_schemas()` (spawn hidden at max depth).
+- **ToolPack-based tools**: Agent receives a `ToolPack` (immutable tool view) at construction. Spawn tool is filtered out for sub-agents (depth ≥ 1) via `ToolPack.get_schemas()`. Tool context passes `agent` (the Agent instance), `session`, and `task_id`.
 - **Properties**: `state`, `result`, `event_queue`, `lane_queue`, `tool_pack` — all read-only via properties
 - **Streaming handler (public attribute)**: `streaming_handler` is a public attribute (renamed from `_streaming_handler`). The handler is passed through to `SubAgentManager` for sub-agent streaming via the `SpawnTool`.
 - **Emergency summary**: When iteration limit is reached without a text response, makes one final LLM call WITHOUT tools to force a summary
@@ -390,7 +400,7 @@ COMPLETED ──[reawaken]──→ RUNNING
 
 #### `state.py` — State Machine
 
-`AgentStateMachine` with a static `TRANSITIONS` table mapping `(current_state, event)` → `next_state`. Includes the `(COMPLETED, "reawaken") → RUNNING` transition that enables re-awakening a completed agent to process child results. Raises `InvalidTransitionError` on invalid transitions.
+`AgentStateMachine` with a static `TRANSITIONS` table mapping `(current_state, event)` → `next_state`. No re-awaken transition. Raises `InvalidTransitionError` on invalid transitions.
 
 #### `task_registry.py` — Task Registry
 
@@ -586,7 +596,7 @@ Defines the unified chunk type yielded by `stream_chat()`.
 
 #### `manager.py` — SubAgentManager
 
-Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per agent (not owned by `Agent` directly). Receives `llm_provider` and `tool_pack` at construction and builds child agents directly. Prompt templates for sub-agent system prompts are defined in `engine/prompts.py` (Section 4).
+Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per agent (not owned by `Agent` directly). Receives `llm_provider`, `tool_pack`, and `session_store` at construction and builds child agents directly. Prompt templates for sub-agent system prompts are defined in `engine/prompts.py` (Section 4).
 
 **Constructor parameters:**
 
@@ -595,16 +605,17 @@ Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per a
 | `llm_provider` | Shared LLM provider for child agents |
 | `tool_pack` | Parent agent's ToolPack |
 | `root_streaming_handler` | Optional root-level `SSEStreamingHandler`. When set, depth-0 children receive a `SubAgentStreamingWrapper`; depth≥1 children receive `None`. Defaults to `None`. |
+| `session_store` | Optional `SessionStore` for persisting child sessions to disk |
 
 **Key methods:**
 
 | Method | Description |
 |---|---|
-| `spawn()` | Create child session, register task, build system prompt, emit `subagent_start` event (if streaming), create `SubAgentStreamingWrapper` for depth-0 children, launch `asyncio.create_task` |
+| `spawn()` | Create child session, register task, build system prompt, emit `subagent_start` event (if streaming), create `SubAgentStreamingWrapper` for depth-0 children, persist session to `SessionStore`, launch `asyncio.create_task` |
 | `_run_child()` | Background execution with lane slot management |
 | `_execute_child()` | Wraps `_run_child()`: emits `subagent_done`/`subagent_error` lifecycle events after child completes |
-| `_on_child_complete()` | Gate-check handler: pending children? pending siblings? → collect results, notify parent |
-| `_format_child_results()` | Format collected child results as JSON prompt |
+| `_on_child_complete()` | Per-child immediate wake handler: build `ChildCompletionNotification`, resume or enqueue parent |
+| `_build_child_notification()` | Extract label, status, summary from child task; persist session; return `ChildCompletionNotification` |
 
 **Sub-agent streaming logic:**
 
@@ -612,19 +623,32 @@ Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per a
 - The wrapper is passed as `streaming_handler` to the child `Agent` constructor
 - Lifecycle events (`subagent_start`, `subagent_done`, `subagent_error`) are emitted directly via `root_streaming_handler.emit()`, not through the wrapper
 
-**Gate-check logic (`_on_child_complete()`):**
+**Per-child wake logic (`_on_child_complete()`):**
 
-1. **Gate 1**: Still have pending children → return (wait)
-2. **Gate 2**: Parent doesn't exist → return
-3. **Gate 3**: Still have pending siblings → return (wait)
-4. All gates passed → collect results, determine branch:
-   - **Branch A**: Parent in `WAITING_FOR_CHILDREN` → direct resume via `run(trigger="children_settled")`
-   - **Branch B**: Parent in `RUNNING` → enqueue `ChildCompletionEvent` for self-drain
-   - **Branch C**: Parent already `COMPLETED` → re-awaken parent via `drainable.run(formatted, trigger="reawaken")` so it processes child results through the LLM. The re-awakened agent transitions `COMPLETED → RUNNING`, runs a new LLM cycle with the child results injected, and its subsequent completion naturally triggers the grandparent handler. Recursive re-awaken depth is guarded by `max_reawaken_depth` config (default: 3).
+Each child independently triggers notification to the parent. No sibling gates, no batch collection.
 
-#### `spawn.py` — SpawnTool
+1. **Gate**: Parent doesn't exist or not registered → return
+2. Build `ChildCompletionNotification` for this child (label, status, summary, session_file)
+3. Persist child session to `SessionStore`
+4. Determine parent state and branch:
+   - **Branch A**: Parent in `WAITING_FOR_CHILDREN` → direct resume via `run(formatted, trigger="children_settled")`
+   - **Branch B**: Parent in `RUNNING` → enqueue `ChildCompletionEvent` for self-drain in `_execute_cycle()`
+   - Parent in `COMPLETED`/`ERROR`/`IDLE` → skip (no Branch C re-awaken)
 
-`Tool` subclass that lazy-creates a `SubAgentManager` per agent on first `execute()` call. Uses `asyncio.Lock` for concurrency safety. The `SubAgentManager` receives `llm_provider`, `tool_pack`, and `root_streaming_handler` (from `parent_agent.streaming_handler`) from the parent agent and directly constructs child `Agent` instances. On agent completion, `release()` clears the cached manager.
+#### `spawn.py` — Backward Compatibility Shim
+
+Single-line re-export: `from engine.tools.builtin.spawn import SpawnTool`. The actual `SpawnTool` implementation now lives in `engine/tools/builtin/spawn.py` (Section 11).
+
+#### `session_store.py` — Session File Persistence
+
+Manages session persistence as JSON files on disk. Directory layout: `sessions/{root_session_id}/main.json` (root) and `sessions/{root_session_id}/{task_id}.json` (children).
+
+| Class | Description |
+|---|---|
+| `SessionStore` | File-based session persistence with atomic writes (tmp + rename). Methods: `create_root()`, `save_main_session()`, `save_child_session()`, `append_message()`, `read_child_session()`, `list_children()` |
+| `ChildSessionInfo` | Metadata dataclass: `task_id`, `file_path`, `message_count`, `file_size_bytes` |
+
+**Key design:** Designed for single-process asyncio (no file locking). `read_child_session()` returns `None` for missing or corrupted files. `list_children()` scans `task_*.json` files without reading full session content.
 
 #### `protocol.py` — Drainable Protocol
 
@@ -641,8 +665,8 @@ Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per a
 
 | Model | Description |
 |---|---|
-| `AgentTask` | Task entry: task_id, session_id, description, parent references, child_task_ids, result |
-| `CollectedChildResult` | Collected output: task_description + result string |
+| `AgentTask` | Task entry: task_id, session_id, description, parent references, child_task_ids, result, agent reference |
+| `ChildCompletionNotification` | Per-child notification: task_id, label, task description, status (completed/error), summary, session_file. Has `to_prompt()` method that formats a user message for the parent agent |
 
 ---
 
@@ -673,7 +697,7 @@ Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per a
 | Method | Description |
 |---|---|
 | `get(name)` | Get a tool by name. Returns `None` if not found. |
-| `get_schemas(session?)` | Get OpenAI function calling schemas. If session is provided and `depth >= config.max_depth`, the `spawn` schema is filtered out. |
+| `get_schemas(session?)` | Get OpenAI function calling schemas. If session is provided and `depth >= 1`, the `spawn` schema is filtered out (depth=1 enforcement). |
 | `release_spawn(agent_task_id)` | Forward `release()` to `SpawnTool` if present, cleaning up cached `SubAgentManager`. |
 | `__len__` / `__contains__` | Standard container protocol. |
 
@@ -683,6 +707,18 @@ Auto-discovered custom tools directory. Place `Tool` subclasses here and they wi
 
 - **`web_search`** (`web_search.py`) — Web search tool using the `ddgs` metasearch library. Aggregates results from multiple search engines (DuckDuckGo, Bing, Brave, Google, etc.) with automatic failover via `backend="auto"`. Uses `asyncio.to_thread()` to wrap the synchronous `DDGS.text()` call. Lazy singleton DDGS instance for connection reuse.
 - **`web_fetch`** (`web_fetch.py`) — URL content fetching tool with configurable format (class variable `DEFAULT_FORMAT`, default: markdown), transient-error retry, Cloudflare handling, and response size limits. Content is truncated to 15,000 characters (`_MAX_CONTENT_LENGTH`) to prevent LLM context overflow.
+
+#### `builtin/` — Built-in Tools
+
+Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS` list in `__init__.py`.
+
+| Class | Name | Description |
+|---|---|---|
+| `ListChildrenTool` | `list_children` | Lists all child agents spawned by the current agent with status, message count, and task description. No parameters. Root-only tool. |
+| `ReadSessionTool` | `read_session` | Reads a child agent's session content. Parameters: `task_id` (required), `scope` (`full`/`summary`/`last_n`), `count` (for `last_n`). Data source priority: live session (in-memory) > persisted file (SessionStore). Root-only tool. |
+| `SpawnTool` | `spawn` | Creates child agents via `SubAgentManager`. Lazy-creates manager per agent on first `execute()` call using `asyncio.Lock`. Parameters: `task` (required), `label` (optional). |
+
+**Root-only tools:** `list_children` and `read_session` are root-only (not useful for sub-agents in depth=1 architecture). `SpawnTool` is filtered out for sub-agents by `ToolPack.get_schemas()` based on session depth.
 
 ---
 
@@ -714,14 +750,19 @@ Auto-discovered custom tools directory. Place `Tool` subclasses here and they wi
 | File | Description |
 |---|---|
 | `test_easy_task.py` | Tests `delegate()` with a structured city-comparison research prompt |
-| `test_multilayer_subagent.py` | Tests 3-child × 2-grandchild nesting with 3-level data provenance verification via JSONL logs |
-| `test_session_reuse.py` | Unit tests for `delegate()` session reuse — 8 tests covering backward compat, ID preservation, env block refresh, warning logging (all mocked, no live LLM calls) |
-| `test_subagent_streaming.py` | Unit tests for SubAgentStreamingWrapper, SSEStreamingHandler, and spawn tool suppression |
-| `test_streaming_handler.py` | Unit tests for SSEStreamingHandler and BaseStreamingHandler |
-| `test_event_callback.py` | Unit tests for Agent event callback pattern |
+| `test_state_machine.py` | Unit tests for `AgentStateMachine` transitions and `InvalidTransitionError` |
+| `test_per_child_wake.py` | Unit tests for per-child wake gate-check logic (Branch A/B/skip) |
+| `test_child_notification.py` | Unit tests for child notification formatting and handler invocation |
+| `test_child_notification_models.py` | Unit tests for `ChildCompletionNotification.to_prompt()` formatting |
+| `test_depth_one_enforcement.py` | Unit tests for depth=1 enforcement in SpawnTool and SubAgentManager |
+| `test_list_children_tool.py` | Unit tests for `ListChildrenTool` status classification and output formatting |
+| `test_read_session_tool.py` | Unit tests for `ReadSessionTool` scope modes and message resolution |
+| `test_session_persistence.py` | Unit tests for `SessionStore` file persistence and deserialization |
 | `test_context_truncation.py` | Unit tests for TPM-based context truncation |
+| `test_fallback_truncation.py` | Unit tests for fallback provider truncation |
+| `test_rate_limiter.py` | Unit tests for `SlidingWindowRateLimiter` |
 
-Both integration tests use `pytest-asyncio` and call the real `delegate()` function (requires valid `engine.json`).
+All tests use `pytest-asyncio` and are pure unit tests (mocked, no live LLM calls).
 
 #### Frontend Tests
 
@@ -842,7 +883,8 @@ delegate() (engine/runner.py)
     │     │     │     └── per tool call → handler.on_tool_start() → execute → handler.on_tool_end()
     │     │     └── spawn tool → SpawnTool.execute()
     │     │                       ├── Lazy SubAgentManager init (per agent, asyncio.Lock)
-    │     │                       │     └── passes root_streaming_handler from parent_agent.streaming_handler (BaseStreamingHandler)
+    │     │                       │     └── passes root_streaming_handler from agent.streaming_handler (BaseStreamingHandler)
+    │     │                       │     └── passes session_store for child session persistence
     │     │                       ├── SubAgentManager.spawn()
     │     │                       │     ├── LaneConcurrencyQueue.acquire()
     │     │                       │     ├── Create child session + system prompt
@@ -853,7 +895,7 @@ delegate() (engine/runner.py)
     │     │                       │     ├── Register in AgentTaskRegistry
     │     │                       │     └── asyncio.create_task(_run_child)
     │     │
-    │     ├── Drain ChildCompletionEvents
+    │     ├── Drain ChildCompletionEvents (per-child notifications, one at a time)
     │     └── State decision: WAITING_FOR_CHILDREN or COMPLETED
     │
     ├── _finish_and_notify() → ToolPack.release_spawn() + AgentTaskRegistry.complete()
@@ -872,7 +914,7 @@ delegate() (engine/runner.py)
 
 4. **Staircase cooldown**: `APIKeyPool` escalates cooldown (30s → 60s → 300s) on repeated rate limits, with automatic recovery on success.
 
-5. **Self-draining events**: Agents drain their own event queue iteratively, processing `ChildCompletionEvent`s one at a time without recursion.
+5. **Per-child wake**: Each completing child independently notifies its parent via `_on_child_complete()`. No sibling gates or batch collection. The parent is woken immediately for every completing child, either via direct resume (Branch A: parent in `WAITING_FOR_CHILDREN`) or event queue enqueue (Branch B: parent still `RUNNING`).
 
 6. **Tool auto-discovery**: Custom tools in `engine/tools/custom/` are automatically discovered and registered by `engine/runner.py`.
 
@@ -961,6 +1003,10 @@ Sub-Agent (depth-0 children only):
 
 ## Known Limitations
 
-### Streaming handler does not re-emit events on re-awaken
+### Sub-agents cannot spawn further children
 
-When an agent is re-awakened (Branch C), the streaming handler does not emit new lifecycle events. The `subagent_done` SSE event has already been emitted for the agent's original completion. Re-awaken execution proceeds without emitting additional `subagent_start`/`subagent_done` events to the frontend. The LLM response from the re-awaken cycle is still streamed normally if a handler is present, but the agent-level lifecycle events are not re-emitted.
+Depth=1 is enforced at architecture level. Sub-agents (depth ≥ 1) are leaf workers that cannot spawn children of their own. The spawn tool is filtered from their tool schemas, and `SubAgentManager.spawn()` rejects any spawn attempt with `depth >= 1`.
+
+### SessionStore is single-process
+
+`SessionStore` is designed for single-process asyncio with no file locking. Concurrent writes from multiple processes could cause data loss.

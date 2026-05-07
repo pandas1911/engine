@@ -16,7 +16,7 @@ from engine.runtime.agent_models import AgentError, AgentResult, AgentState, Err
 from engine.runtime.task_registry import AgentTaskRegistry
 from engine.tools.base import Tool
 from engine.tools.pack import ToolPack
-from engine.subagent.spawn import SpawnTool
+from engine.tools.builtin import BUILTIN_TOOLS
 from engine.safety import LaneConcurrencyQueue, SlidingWindowRateLimiter, APIKeyPool, RetryEngine
 from engine.providers.fallback_provider import FallbackLLMProvider
 from engine.providers.provider_models import ProviderParams, Lane
@@ -196,17 +196,14 @@ async def delegate(
         task_registry = AgentTaskRegistry()
 
         custom_tools = _discover_custom_tools()
-        all_tool_instances = custom_tools + (tools or [])
+        builtin_tool_instances = [cls() for cls in BUILTIN_TOOLS]
 
-        # Filter by config.tools (enable/disable)
+        all_tool_instances = builtin_tool_instances + custom_tools + (tools or [])
+
         enabled_tools = [
             t for t in all_tool_instances
             if config.is_tool_enabled(t.name)
         ]
-    
-        # Conditionally add SpawnTool
-        if config.is_tool_enabled("spawn"):
-            enabled_tools.append(SpawnTool())
 
         tool_pack = ToolPack(enabled_tools)
 
@@ -217,6 +214,11 @@ async def delegate(
 
         streaming_handler = SSEStreamingHandler(event_callback) if event_callback else None
 
+        # --- Create SessionStore for this root conversation ---
+        from engine.subagent.session_store import SessionStore
+        session_store = SessionStore(root_dir="sessions")
+        session_store.create_root(session.id)
+
         agent = Agent(
             session=session,
             config=config,
@@ -226,6 +228,9 @@ async def delegate(
             lane_queue=lane_queue,
             streaming_handler=streaming_handler,
         )
+
+        # Attach SessionStore so builtin tools can pass it to SubAgentManager
+        agent.session_store = session_store
 
         await task_registry.register(
             task_id=agent.task_id,

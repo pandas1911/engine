@@ -1,4 +1,4 @@
-"""Agent implementation with multi-level nesting support.
+"""Agent implementation with single-level sub-agent support.
 
 This module provides the Agent class with async callbacks and error propagation.
 """
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 
 class Agent:
-    """Core Agent class with multi-level nesting support.
+    """Core Agent class with single-level sub-agent support.
 
     # Implements: Drainable protocol (engine.subagent.protocol)
     """
@@ -74,7 +74,7 @@ class Agent:
             "Agent instance created | session_id={}, depth={}, parent_task_id={}, spawn_enabled={}, tool_count={}, max_iterations={}".format(
                 self.session.id, self.session.depth,
                 self.parent_task_id or "None (root)",
-                self.session.depth < self.config.max_depth,
+                self.session.depth == 0,
                 len(self._tool_pack), self.MAX_TOOL_ITERATIONS,
             ),
             task_id=self.task_id, state=self.state.value, depth=self.session.depth,
@@ -82,7 +82,7 @@ class Agent:
             data={
                 "session_id": self.session.id,
                 "parent_task_id": self.parent_task_id,
-                "spawn_enabled": self.session.depth < self.config.max_depth,
+                "spawn_enabled": self.session.depth == 0,
                 "tool_count": len(self._tool_pack),
             },
         )
@@ -158,25 +158,6 @@ class Agent:
                         "session_msg_count": len(self.session.messages),
                     },
                 )
-            # >>> reawaken trigger — reset internal state before re-execution
-            elif trigger == "reawaken":
-                self._completion_event.clear()
-                self._final_result = None
-                get_logger().info(
-                    self.label,
-                    "Agent re-awakened | incoming_message_length={}, session_message_count={}".format(
-                        len(message) if message else 0,
-                        len(self.session.messages),
-                    ),
-                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                    event_type="agent_reawaken",
-                    data={
-                        "prev_state": prev_state.value,
-                        "message_length": len(message) if message else 0,
-                        "session_msg_count": len(self.session.messages),
-                    },
-                )
-            # <<< END reawaken
             get_logger().state_change(
                 self.label, prev_state.value, self.state.value, trigger,
                 task_id=self.task_id, state=self.state.value, depth=self.session.depth)
@@ -497,20 +478,21 @@ class Agent:
                 break
 
             if isinstance(event, ChildCompletionEvent):
+                notif = event.notification
                 get_logger().info(
                     self.label,
-                    "Draining deferred event | trigger_task_id={}, child_result_count={}".format(
-                        getattr(event, 'trigger_task_id', 'N/A'), len(getattr(event, 'child_results', {}))
+                    "Draining child notification | child_task_id={}, status={}".format(
+                        notif.task_id, notif.status,
                     ),
                     task_id=self.task_id, state=self.state.value, depth=self.session.depth,
                     event_type="drain_event",
                     data={
-                        "trigger_task_id": getattr(event, 'trigger_task_id', 'N/A'),
-                        "child_result_count": len(getattr(event, 'child_results', {})),
-                        "error": getattr(event, 'error', False),
+                        "child_task_id": notif.task_id,
+                        "child_status": notif.status,
+                        "child_label": notif.label,
                     },
                 )
-                formatted = self._time_provider.inject_timestamp(event.formatted_prompt)
+                formatted = self._time_provider.inject_timestamp(notif.to_prompt())
                 self.session.add_message("user", formatted)
                 await self._process_tool_calls()
                 # Loop continues — processes any events queued during _process_tool_calls
@@ -573,7 +555,8 @@ class Agent:
 
         context = {
             "session": self.session,
-            "parent_agent": self,
+            "agent": self,
+            "task_id": self.task_id,
         }
 
         try:

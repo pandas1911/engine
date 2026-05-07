@@ -32,8 +32,6 @@ class AgentStateMachine:
         (AgentState.RUNNING, "error"): AgentState.ERROR,
         (AgentState.WAITING_FOR_CHILDREN, "children_settled"): AgentState.RUNNING,
         (AgentState.WAITING_FOR_CHILDREN, "error"): AgentState.ERROR,
-        # --- NEW: re-awaken a completed agent (Branch C fallback) ---
-        (AgentState.COMPLETED, "reawaken"): AgentState.RUNNING,
     }
 
     def __init__(self, initial_state: AgentState) -> None:
