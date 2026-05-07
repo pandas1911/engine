@@ -50,9 +50,7 @@ engine/
 │   │   ├── pack.py            # ToolPack — immutable view over ToolRegistry with depth-aware schema filtering
 │   │   ├── builtin/           # Built-in tools
 │   │   │   ├── __init__.py    # BUILTIN_TOOLS list, re-exports
-│   │   │   ├── spawn.py       # SpawnTool — lazy-caches SubAgentManager per agent, passes root_streaming_handler through
-│   │   │   ├── list_children.py # ListChildrenTool — lists all child agents with status/progress
-│   │   │   └── read_session.py  # ReadSessionTool — reads child session content (full/summary/last_n scopes)
+│   │   │   └── spawn.py       # SpawnTool — lazy-caches SubAgentManager per agent, passes root_streaming_handler through
 │   │   └── custom/            # Auto-discovered custom tools (web search, web fetch)
 │   │       ├── __init__.py
 │   │       └── web_fetch.py   # URL content fetching with HTML→Markdown/Text conversion
@@ -66,8 +64,6 @@ engine/
 │   ├── test_child_notification.py  # Child notification formatting unit tests
 │   ├── test_child_notification_models.py  # ChildCompletionNotification model tests
 │   ├── test_depth_one_enforcement.py  # depth=1 enforcement unit tests
-│   ├── test_list_children_tool.py  # ListChildrenTool unit tests
-│   ├── test_read_session_tool.py  # ReadSessionTool unit tests
 │   ├── test_session_persistence.py  # SessionStore file persistence tests
 │   ├── test_context_truncation.py  # TPM-based context truncation tests
 │   ├── test_fallback_truncation.py  # Fallback provider truncation tests
@@ -148,7 +144,7 @@ The main entry point containing `delegate()` and all startup orchestration logic
 4. Iterate `config.providers` dict — for each provider, create `SlidingWindowRateLimiter` (with optional pacing params); for each model under that provider, create an `LLMProvider` keyed by `"provider/model"`
 5. Build ordered key list from `config.primary` + `config.fallback`
 6. Create shared: `APIKeyPool` (with ordered composite key names), `RetryEngine`, `FallbackLLMProvider`
-7. Create `LaneConcurrencyQueue` (MAIN + SUBAGENT lanes)
+7. Create `LaneConcurrencyQueue` (SUBAGENT lane only; owned by `SpawnTool`)
 8. Discover and merge custom tools
 9. Filter tools by `config.is_tool_enabled()` — unlisted tools default to enabled
 10. Conditionally add `SpawnTool` (if `"spawn"` is enabled)
@@ -187,7 +183,6 @@ Loads runtime configuration from `engine.json`.
 | `log_dir` | `None` | Directory for JSONL log files (defaults to `logs/`) |
 | `llm_retry_max_attempts` | `3` | Max retry attempts per LLM call |
 | `llm_retry_base_delay` | `1.0` | Base delay in seconds for exponential backoff |
-| `main_lane_concurrency` | `4` | Max concurrent agents in the MAIN lane |
 | `subagent_lane_concurrency` | `5` | Max concurrent sub-agents in the SUBAGENT lane |
 | `pacing_enabled` | `True` | Enable adaptive request pacing |
 | `pacing_min_interval_ms` | `500.0` | Minimum interval between LLM calls |
@@ -217,7 +212,7 @@ A pure leaf module (zero `engine.*` imports) serving as the single source of tru
 | Constant | Description |
 |---|---|
 | `BASE_PROMPT` | Root agent base execution strategy |
-| `SPAWN_PROMPT` | Root agent sub-agent spawning rules (includes list_children and read_session instructions) |
+| `SPAWN_PROMPT` | Root agent sub-agent spawning rules |
 
 **Dynamic Functions:**
 
@@ -254,7 +249,6 @@ sessions/{root_session_id}/
 | Class | Description |
 |---|---|
 | `SessionStore` | Manages session persistence as JSONL files on disk. Constructor takes `root_dir` (default `"./sessions"`). JSONL format: line 1 = session header (`id`, `depth`, `parent_id`), lines 2+ = messages. Designed for single-process asyncio (no file locking). |
-| `ChildSessionInfo` | Metadata dataclass: `task_id`, `file_path`, `message_count`, `file_size_bytes` |
 
 **Engine-facing API (requires `create_root()` first):**
 
@@ -266,7 +260,6 @@ sessions/{root_session_id}/
 | `rewrite_file(name, session)` | Full rewrite: header + all messages. Atomic write via tmp + rename. Used for final checkpoint/compaction. |
 | `read_session_file(name)` | Read session from `.jsonl` or legacy `.json`. Returns `Session` object or `None`. |
 | `read_child_session(task_id)` | Convenience wrapper: reads a child session by task_id. |
-| `list_children()` | List all child session files (`task_*.jsonl` and `task_*.json`) with metadata. Does NOT read full session content. |
 
 **App-facing API (manages its own paths):**
 
@@ -298,7 +291,7 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 
 | Class | Description |
 |---|---|
-| `LaneConcurrencyQueue` | Per-lane (MAIN/SUBAGENT) concurrency control with FIFO queuing via `asyncio.Condition` |
+| `LaneConcurrencyQueue` | Per-lane (SUBAGENT) concurrency control with FIFO queuing via `asyncio.Condition` |
 | `LaneSlot` | Async context manager representing a concurrency slot |
 | `LaneStatus` | Data class for lane status queries |
 | `_LaneState` | Internal state per lane |
@@ -427,7 +420,7 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
 **Key features:**
 
 - **ToolPack-based tools**: Agent receives a `ToolPack` (immutable tool view) at construction. Spawn tool is filtered out for sub-agents (depth ≥ 1) via `ToolPack.get_schemas()`. Tool context passes `agent` (the Agent instance), `session`, and `task_id`.
-- **Properties**: `state`, `result`, `event_queue`, `lane_queue`, `tool_pack` — all read-only via properties
+- **Properties**: `state`, `result`, `event_queue`, `tool_pack` — all read-only via properties
 - **Streaming handler (public attribute)**: `streaming_handler` is a public attribute (renamed from `_streaming_handler`). The handler is passed through to `SubAgentManager` for sub-agent streaming via the `SpawnTool`.
 - **Emergency summary**: When iteration limit is reached without a text response, makes one final LLM call WITHOUT tools to force a summary
 - **Summary warning**: Injects a warning message N iterations before the limit
@@ -461,8 +454,6 @@ CRUD for `AgentTask` entries with handler-based notification.
 | `register()` | Create a task with cycle detection |
 | `store_result()` | Store result, return `CompleteInfo` (pending counts) |
 | `complete()` | Store result + notify registered handler |
-| `collect_child_results()` | Gather all direct child results |
-| `collect_and_cleanup()` | Atomic: collect results, clear children, remove child tasks |
 | `get_all_ancestors()` | BFS traversal up the task hierarchy |
 | `register_handler()` | Map parent_task_id → completion callback |
 
@@ -536,7 +527,7 @@ Defines `BaseStreamingHandler` and two concrete implementations for handling str
 | `ToolCall` | LLM tool call: name, arguments, call_id |
 | `LLMResponse` | LLM response: content + optional thinking + optional tool_calls. The `thinking` field contains extracted thinking/reasoning content from LLM responses (DeepSeek `<think/>` tags, MiniMax `reasoning_details`, Qwen `reasoning_content`). |
 | `PaceLevel` | Enum: `HEALTHY`, `PRESSING`, `CRITICAL` |
-| `Lane` | Enum: `MAIN`, `SUBAGENT` |
+| `Lane` | Enum: `SUBAGENT` |
 | `ErrorClass` | Enum: `RETRYABLE`, `NON_RETRYABLE`, `RATE_LIMITED` |
 | `ProviderConfig` | Provider entry: name, api_key, base_url, rpm_limit (default 100), tpm_limit (default 100000), models dict (model_name → model_params dict) |
 | `ProviderParams` | Resolved call params: api_key, base_url, model |
@@ -758,11 +749,9 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 
 | Class | Name | Description |
 |---|---|---|
-| `ListChildrenTool` | `list_children` | Lists all child agents spawned by the current agent with status, message count, and task description. Output format: `[task_id] status=... \| messages=... \| task: ...`. No parameters. Root-only tool. |
-| `ReadSessionTool` | `read_session` | Reads a child agent's session content with per-message truncation from newest to oldest. Formats output as `[role] content` with thinking shown as `[think]...[/think]` inside `[assistant]` blocks and tool calls as `[tool] name(args)\nresult`. Blank lines separate messages. Backward compatible with old session data. Parameters: `task_id` (required), `scope` (`full`/`summary`/`last_n`), `count` (for `last_n`). Data source priority: live session (in-memory) > persisted file (SessionStore). Root-only tool. |
-| `SpawnTool` | `spawn` | Creates child agents via `SubAgentManager`. Lazy-creates manager per agent on first `execute()` call using `asyncio.Lock`. Parameters: `task` (required), `label` (optional). |
+| `SpawnTool` | `spawn` | Creates child agents via `SubAgentManager`. Lazy-creates manager per agent on first `execute()` call using `asyncio.Lock`. Owns the `LaneConcurrencyQueue` for SUBAGENT concurrency. Parameters: `task` (required), `label` (optional). |
 
-**Root-only tools:** `list_children` and `read_session` are root-only (not useful for sub-agents in depth=1 architecture). `SpawnTool` is filtered out for sub-agents by `ToolPack.get_schemas()` based on session depth.
+**Root-only tools:** `spawn` is the only built-in tool. It is filtered out for sub-agents by `ToolPack.get_schemas()` based on session depth.
 
 ---
 
@@ -799,8 +788,6 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 | `test_child_notification.py` | Unit tests for child notification formatting and handler invocation |
 | `test_child_notification_models.py` | Unit tests for `ChildCompletionNotification.to_prompt()` formatting |
 | `test_depth_one_enforcement.py` | Unit tests for depth=1 enforcement in SpawnTool and SubAgentManager |
-| `test_list_children_tool.py` | Unit tests for `ListChildrenTool` status classification and output formatting |
-| `test_read_session_tool.py` | Unit tests for `ReadSessionTool` scope modes and message resolution |
 | `test_session_persistence.py` | Unit tests for `SessionStore` file persistence and deserialization |
 | `test_context_truncation.py` | Unit tests for TPM-based context truncation |
 | `test_fallback_truncation.py` | Unit tests for fallback provider truncation |
@@ -903,7 +890,7 @@ User
 delegate() (engine/runner.py)
    ├── Config loading (engine.json)
    ├── Provider initialization (providers dict → LLMProviders → primary+fallback ordering)
-   ├── Lane queue setup (MAIN:4, SUBAGENT:5)
+   ├── Lane queue setup (SUBAGENT only, owned by SpawnTool)
    ├── Tool discovery (custom tools auto-loaded)
    ├── is_tool_enabled filtering + SpawnTool injection
    ├── ToolPack construction → Agent creation & registration
@@ -953,7 +940,7 @@ delegate() (engine/runner.py)
 
 ## Key Design Patterns
 
-1. **Lane-based concurrency**: Separate concurrency pools for main agents (lane=MAIN) and sub-agents (lane=SUBAGENT), each with independent limits.
+1. **Lane-based concurrency**: Separate concurrency pool for sub-agents (lane=SUBAGENT) with an independent limit. The `LaneConcurrencyQueue` is owned by `SpawnTool`, not by the `Agent`.
 
 2. **Push-based notification**: When a child completes, `AgentTaskRegistry.complete()` fires a registered handler on the parent's `SubAgentManager`, which handles gate-checks and parent notification — no polling required.
 
