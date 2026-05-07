@@ -9,21 +9,11 @@ Directory layout:
 
 import json
 import shutil
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from engine.logging import get_logger
-
-
-@dataclass
-class ChildSessionInfo:
-    """Metadata about a child session file."""
-    task_id: str
-    file_path: str
-    message_count: int
-    file_size_bytes: int
 
 
 class SessionStore:
@@ -215,47 +205,6 @@ class SessionStore:
         Returns a Session object, or None if not found.
         """
         return self.read_session_file(task_id)
-
-    def list_children(self) -> List[ChildSessionInfo]:
-        """List all child session files with metadata.
-
-        Searches for both task_*.jsonl and task_*.json files.
-        Does NOT read full session content.
-        """
-        if not self._sessions_dir or not self._sessions_dir.exists():
-            return []
-
-        result = []
-        seen_stems = set()
-
-        # Prefer .jsonl files, then fall back to .json
-        for ext, is_jsonl in [(".jsonl", True), (".json", False)]:
-            for f in self._sessions_dir.glob("task_*{}".format(ext)):
-                stem = f.stem
-                if stem in seen_stems:
-                    continue
-                seen_stems.add(stem)
-
-                message_count = -1
-                try:
-                    raw = f.read_text(encoding="utf-8")
-                    if is_jsonl:
-                        line_count = len([line for line in raw.splitlines() if line.strip()])
-                        message_count = max(0, line_count - 1)  # First line is header
-                    else:
-                        data = json.loads(raw)
-                        message_count = len(data.get("messages", []))
-                except (json.JSONDecodeError, OSError):
-                    pass  # Keep -1 as corrupted file marker
-
-                result.append(ChildSessionInfo(
-                    task_id=stem,
-                    file_path=str(f),
-                    message_count=message_count,
-                    file_size_bytes=f.stat().st_size,
-                ))
-
-        return result
 
     # ------------------------------------------------------------------
     # App-facing API (replaces app/session_store.py)
