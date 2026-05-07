@@ -139,12 +139,12 @@ class TestScopeLastN:
 
 
 class TestThinkingFiltered:
-    def test_reasoning_role_shown_with_tags(self):
-        messages = _make_messages(
-            ("user", "Hello"),
-            ("reasoning", "Let me think..."),
-            ("assistant", "Answer"),
-        )
+    def test_thinking_from_metadata_shown_with_tags(self):
+        messages = [
+            Message(role="user", content="Hello"),
+            Message(role="reasoning", content="Let me think..."),
+            Message(role="assistant", content="Answer", metadata={"thinking": "Let me think..."}),
+        ]
         agent = _mock_agent_with_live_session(messages, "child_004")
         ctx = _make_context(agent=agent)
 
@@ -152,16 +152,16 @@ class TestThinkingFiltered:
             {"task_id": "child_004", "scope": "full"}, ctx
         ))
 
-        assert "[thinking] Let me think... [/thinking]" in result
+        assert "[think]Let me think...[/think]" in result
         assert "[user] Hello" in result
-        assert "[assistant] Answer" in result
+        assert "[assistant] [think]Let me think...[/think] Answer" in result
 
-    def test_assistant_think_tag_shown_with_tags(self):
-        messages = _make_messages(
-            ("user", "Hello"),
-            ("assistant", "<think\ninternal reasoning\n</think\nActually..."),
-            ("assistant", "Clean answer"),
-        )
+    def test_assistant_thinking_from_metadata(self):
+        messages = [
+            Message(role="user", content="Hello"),
+            Message(role="assistant", content="Actually...", metadata={"thinking": "internal reasoning"}),
+            Message(role="assistant", content="Clean answer"),
+        ]
         agent = _mock_agent_with_live_session(messages, "child_005")
         ctx = _make_context(agent=agent)
 
@@ -169,7 +169,7 @@ class TestThinkingFiltered:
             {"task_id": "child_005", "scope": "full"}, ctx
         ))
 
-        assert "[thinking] <think\ninternal reasoning\n</think\nActually... [/thinking]" in result
+        assert "[assistant] [think]internal reasoning[/think] Actually..." in result
         assert "[assistant] Clean answer" in result
 
 

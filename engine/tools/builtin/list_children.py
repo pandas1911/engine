@@ -54,14 +54,13 @@ class ListChildrenTool(Tool):
                 if child_task is None:
                     continue
 
-                label = self._resolve_label(child_task, child_id)
                 status = self._classify_status(child_task)
                 msg_count = self._count_messages(child_task, agent)
                 desc = self._truncate_description(child_task.task_description)
 
                 lines.append(
-                    "[{}] task_id={} | status={} | messages={} | task: {}".format(
-                        label, child_id, status, msg_count, desc
+                    "[{}] status={} | messages={} | task: {}".format(
+                        child_id, status, msg_count, desc
                     )
                 )
 
@@ -78,8 +77,8 @@ class ListChildrenTool(Tool):
                     for child in children:
                         status = "completed" if child.message_count >= 0 else "unknown"
                         lines.append(
-                            "[{}] task_id={} | status={} | messages={} | task: {}".format(
-                                child.task_id, child.task_id, status,
+                            "[{}] status={} | messages={} | task: {}".format(
+                                child.task_id, status,
                                 child.message_count, "(on disk)"
                             )
                         )

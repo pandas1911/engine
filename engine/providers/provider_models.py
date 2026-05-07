@@ -21,6 +21,7 @@ class LLMResponse:
     """Response from an LLM provider."""
 
     content: Optional[str] = None
+    thinking: Optional[str] = None
     tool_calls: List[ToolCall] = field(default_factory=list)
 
     def has_tool_calls(self) -> bool:

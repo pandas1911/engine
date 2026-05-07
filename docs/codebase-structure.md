@@ -432,7 +432,8 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
 - **Emergency summary**: When iteration limit is reached without a text response, makes one final LLM call WITHOUT tools to force a summary
 - **Summary warning**: Injects a warning message N iterations before the limit
 - **Timestamp injection**: All user messages get timezone-aware timestamps
-- **Streaming via handler**: Agent delegates all streaming event emission to an optional `BaseStreamingHandler` (received as `streaming_handler: Optional[BaseStreamingHandler]` in constructor, imported from `engine.streaming_handler`). When a handler is present, `_get_llm_response()` uses `handler.reset()` → `handler.on_chunk(chunk)` loop → `handler.get_content()/get_tool_calls()`. When no handler is present (sub-agents), the non-streaming `llm.chat()` path is used. The handler owns all part lifecycle state, content accumulation, and tool call buffering.
+- **Streaming via handler**: Agent delegates all streaming event emission to an optional `BaseStreamingHandler` (received as `streaming_handler: Optional[BaseStreamingHandler]` in constructor, imported from `engine.streaming_handler`). When a handler is present, `_get_llm_response()` uses `handler.reset()` → `handler.on_chunk(chunk)` loop → `handler.get_content()/get_thinking()/get_tool_calls()`. When no handler is present (sub-agents), the non-streaming `llm.chat()` path is used. The handler owns all part lifecycle state, content accumulation, and tool call buffering.
+- **Thinking persistence**: All assistant messages store thinking content in metadata (via `session.add_message("assistant", content, thinking=...)`). Tool messages store `tool_name` and `tool_arguments` in metadata. These fields are NOT included in `to_dict()` output, preventing thinking leakage into LLM context.
 
 #### `agent_models.py` — Data Models
 
@@ -484,6 +485,7 @@ Defines `BaseStreamingHandler` and two concrete implementations for handling str
 | `emit(event_name, data)` | Abstract — subclasses define event dispatch strategy |
 | `on_chunk(chunk)` | Process a StreamChunk: manages part events + accumulates content/tool_calls |
 | `get_content()` | Return accumulated text content |
+| `get_thinking()` | Return accumulated thinking/reasoning text from LLM responses |
 | `get_tool_calls()` | Return parsed ToolCall objects (after finish_reason) |
 | `on_tool_start(tool_name, arguments, call_id)` | Emit tool_start, return part_id |
 | `on_tool_end(tool_name, result, call_id, part_id)` | Emit tool_end |
@@ -525,13 +527,14 @@ Defines `BaseStreamingHandler` and two concrete implementations for handling str
 - Rate limit header extraction (`x-ratelimit-*`)
 - Token usage tracking (prompt_tokens, completion_tokens)
 - `model_params` merged into every `chat()` call (reserved keys `model`, `messages`, `tools` are forbidden)
+- `chat()` extracts thinking content via regex (`<think/>` tags) BEFORE stripping tags, so `LLMResponse.thinking` preserves the reasoning text even when `strip_thinking=True`. For streaming, thinking extraction is handled by provider-specific strategies in `thinking_strategy.py`.
 
 #### `provider_models.py`
 
 | Model | Description |
 |---|---|
 | `ToolCall` | LLM tool call: name, arguments, call_id |
-| `LLMResponse` | LLM response: content + optional tool_calls |
+| `LLMResponse` | LLM response: content + optional thinking + optional tool_calls. The `thinking` field contains extracted thinking/reasoning content from LLM responses (DeepSeek `<think/>` tags, MiniMax `reasoning_details`, Qwen `reasoning_content`). |
 | `PaceLevel` | Enum: `HEALTHY`, `PRESSING`, `CRITICAL` |
 | `Lane` | Enum: `MAIN`, `SUBAGENT` |
 | `ErrorClass` | Enum: `RETRYABLE`, `NON_RETRYABLE`, `RATE_LIMITED` |
@@ -755,8 +758,8 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 
 | Class | Name | Description |
 |---|---|---|
-| `ListChildrenTool` | `list_children` | Lists all child agents spawned by the current agent with status, message count, and task description. No parameters. Root-only tool. |
-| `ReadSessionTool` | `read_session` | Reads a child agent's session content. Parameters: `task_id` (required), `scope` (`full`/`summary`/`last_n`), `count` (for `last_n`). Data source priority: live session (in-memory) > persisted file (SessionStore). Root-only tool. |
+| `ListChildrenTool` | `list_children` | Lists all child agents spawned by the current agent with status, message count, and task description. Output format: `[task_id] status=... \| messages=... \| task: ...`. No parameters. Root-only tool. |
+| `ReadSessionTool` | `read_session` | Reads a child agent's session content with per-message truncation from newest to oldest. Formats output as `[role] content` with thinking shown as `[think]...[/think]` inside `[assistant]` blocks and tool calls as `[tool] name(args)\nresult`. Blank lines separate messages. Backward compatible with old session data. Parameters: `task_id` (required), `scope` (`full`/`summary`/`last_n`), `count` (for `last_n`). Data source priority: live session (in-memory) > persisted file (SessionStore). Root-only tool. |
 | `SpawnTool` | `spawn` | Creates child agents via `SubAgentManager`. Lazy-creates manager per agent on first `execute()` call using `asyncio.Lock`. Parameters: `task` (required), `label` (optional). |
 
 **Root-only tools:** `list_children` and `read_session` are root-only (not useful for sub-agents in depth=1 architecture). `SpawnTool` is filtered out for sub-agents by `ToolPack.get_schemas()` based on session depth.

@@ -4,6 +4,7 @@ This module provides abstract and concrete LLM provider implementations.
 """
 
 import asyncio
+import re
 import time
 from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Dict, List, Optional
@@ -179,6 +180,13 @@ class LLMProvider(BaseLLMProvider):
                         )
 
                 content = message.content or ""
+
+                # Extract thinking BEFORE stripping (for persistence)
+                thinking_match = re.search(
+                    r"<think[^>]*>(.*?)</think\s*>", content, re.DOTALL | re.IGNORECASE
+                )
+                thinking_text = thinking_match.group(1).strip() if thinking_match else None
+
                 content = self._strip_thinking(content)
 
                 if tool_calls:
@@ -203,7 +211,7 @@ class LLMProvider(BaseLLMProvider):
                               "content": content}
                     )
 
-                return LLMResponse(content=content, tool_calls=tool_calls)
+                return LLMResponse(content=content, tool_calls=tool_calls, thinking=thinking_text)
 
             except Exception as e:
                 last_error = e

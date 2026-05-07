@@ -172,36 +172,18 @@ class ReadSessionTool(Tool):
             return None
 
     # ------------------------------------------------------------------
-    # Thinking / noise filter
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _filter_thinking(messages: List[Message]) -> List[Message]:
-        """Remove thinking, reasoning, and system messages.
-
-        Filters out:
-          - role == 'reasoning'
-          - role == 'system'
-          - assistant messages whose content starts with '<think'
-        """
-        result: List[Message] = []
-        for msg in messages:
-            if msg.role in ("reasoning", "system"):
-                continue
-            if msg.role == "assistant" and msg.content.startswith("<think"):
-                continue
-            result.append(msg)
-        return result
-
-    # ------------------------------------------------------------------
     # Formatting
     # ------------------------------------------------------------------
 
     def _format_summary(self, messages: List[Message]) -> str:
-        """Return the last non-thinking assistant message with generous limit."""
+        """Return the last assistant message (content or thinking) with generous limit."""
         for msg in reversed(messages):
             if msg.role == "assistant":
-                return ResultTruncator.truncate(msg.content, self._SUMMARY_MAX_CHARS)
+                content = msg.content.strip()
+                thinking = msg.metadata.get("thinking", "")
+                text = content or thinking
+                if text:
+                    return ResultTruncator.truncate(text, self._SUMMARY_MAX_CHARS)
         # No assistant message found — fall back to last message
         last = messages[-1]
         return ResultTruncator.truncate(
@@ -209,8 +191,18 @@ class ReadSessionTool(Tool):
         )
 
     def _format_messages(self, messages: List[Message]) -> str:
-        """Format messages with tool enrichment and thinking tags."""
-        # Build tool_call lookup from assistant messages
+        """Format messages with tool enrichment and thinking tags.
+
+        Format rules:
+          - system / reasoning → skip
+          - assistant → [think]...[/think] + content; skip if both empty
+          - tool → [tool] name(args)\\nresult; falls back to tool_call_lookup
+          - other → [role] content if non-empty
+
+        Per-message truncation drops oldest messages when the total exceeds
+        ``self._FULL_MAX_CHARS``.
+        """
+        # Build tool_call lookup from assistant messages (backward compat)
         tool_call_lookup: Dict[str, tuple] = {}
         for msg in messages:
             if msg.role == "assistant" and "tool_calls" in msg.metadata:
@@ -223,23 +215,67 @@ class ReadSessionTool(Tool):
                             func.get("arguments", {}),
                         )
 
-        lines: List[str] = []
+        # Format each message into a single block
+        formatted: List[str] = []
         for msg in messages:
-            if msg.role == "system":
+            if msg.role in ("system", "reasoning"):
                 continue
 
-            if msg.role == "reasoning" or (
-                msg.role == "assistant" and msg.content.startswith("<think")
-            ):
-                lines.append("[thinking] {} [/thinking]".format(msg.content))
-            elif msg.role == "tool":
-                tc_id = msg.metadata.get("tool_call_id", "")
-                tool_name, tool_args = tool_call_lookup.get(tc_id, ("tool", {}))
-                args_str = json.dumps(tool_args, ensure_ascii=False) if tool_args else ""
-                header = "{}({})".format(tool_name, args_str) if args_str else tool_name
-                lines.append("[tool] {}\n{}".format(header, msg.content))
-            else:
-                lines.append("[{}] {}".format(msg.role, msg.content))
+            if msg.role == "assistant":
+                thinking = msg.metadata.get("thinking", "")
+                content = msg.content.strip()
+                if not thinking and not content:
+                    continue  # skip empty assistant messages
+                parts: List[str] = []
+                if thinking:
+                    parts.append("[think]{}[/think]".format(thinking))
+                if content:
+                    parts.append(content)
+                formatted.append("[assistant] {}".format(" ".join(parts)))
 
-        text = "\n".join(lines)
-        return ResultTruncator.truncate(text, self._FULL_MAX_CHARS)
+            elif msg.role == "tool":
+                # Prefer metadata fields; fall back to tool_call_lookup
+                tool_name = msg.metadata.get("tool_name", "")
+                tool_args = msg.metadata.get("tool_arguments", "")
+                if not tool_name:
+                    tc_id = msg.metadata.get("tool_call_id", "")
+                    lookup_name, lookup_args = tool_call_lookup.get(
+                        tc_id, ("tool", {})
+                    )
+                    tool_name = lookup_name
+                    tool_args = lookup_args
+                if tool_args:
+                    args_str = (
+                        json.dumps(tool_args, ensure_ascii=False)
+                        if isinstance(tool_args, dict)
+                        else str(tool_args)
+                    )
+                    header = "{}({})".format(tool_name, args_str)
+                else:
+                    header = tool_name
+                formatted.append("[tool] {}\n{}".format(header, msg.content))
+
+            else:
+                content = msg.content.strip()
+                if content:
+                    formatted.append("[{}] {}".format(msg.role, content))
+
+        if not formatted:
+            return ""
+
+        # Per-message truncation: keep newest messages, drop oldest
+        total = 0
+        kept: List[str] = []
+        truncated = False
+        for block in reversed(formatted):
+            block_len = len(block) + 2  # +2 for separator \n\n
+            if total + block_len > self._FULL_MAX_CHARS and kept:
+                truncated = True
+                break
+            kept.append(block)
+            total += block_len
+
+        kept.reverse()
+        if truncated:
+            kept.insert(0, "[... earlier messages truncated ...]")
+        return "\n\n".join(kept)

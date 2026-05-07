@@ -30,6 +30,7 @@ class BaseStreamingHandler:
         self._part_counter: int = 0
         self._active_reasoning_part_id: Optional[int] = None
         self._active_text_part_id: Optional[int] = None
+        self._collected_thinking: str = ""
         self._collected_content: str = ""
         self._tool_call_buffers: dict[int, dict] = {}
         self._collected_tool_calls: List[ToolCall] = []
@@ -96,6 +97,10 @@ class BaseStreamingHandler:
                 })
                 self._active_text_part_id = None
 
+        # Accumulate thinking
+        if chunk.thinking_text:
+            self._collected_thinking += chunk.thinking_text
+
         # Accumulate content
         self._collected_content += chunk.delta_text or ""
 
@@ -130,6 +135,9 @@ class BaseStreamingHandler:
                     call_id=buf["call_id"],
                 ))
 
+    def get_thinking(self) -> str:
+        return self._collected_thinking
+
     def get_content(self) -> str:
         return self._collected_content
 
@@ -157,6 +165,7 @@ class BaseStreamingHandler:
     def reset(self) -> None:
         self._active_reasoning_part_id = None
         self._active_text_part_id = None
+        self._collected_thinking = ""
         self._collected_content = ""
         self._tool_call_buffers = {}
         self._collected_tool_calls = []

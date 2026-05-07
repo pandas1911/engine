@@ -296,7 +296,7 @@ class TestReadSessionScopes:
             Message(role="system", content="system prompt"),
             Message(role="user", content="Hello"),
             Message(role="reasoning", content="Let me think..."),
-            Message(role="assistant", content="<think\nreasoning\n</think"),
+            Message(role="assistant", content="Partial answer", metadata={"thinking": "reasoning"}),
             Message(role="assistant", content="Final answer"),
         ]
         await _register_child(
@@ -318,8 +318,8 @@ class TestReadSessionScopes:
         assert "[user] Hello" in output
         assert "[assistant] Final answer" in output
         assert "system prompt" not in output
-        assert "[thinking] Let me think... [/thinking]" in output
-        assert "[thinking] <think\nreasoning\n</think [/thinking]" in output
+        assert "[think]reasoning[/think]" in output
+        assert "[assistant] [think]reasoning[/think] Partial answer" in output
 
     @pytest.mark.asyncio
     async def test_scope_summary_returns_last_assistant(self, registry, config):

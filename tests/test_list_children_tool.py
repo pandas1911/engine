@@ -181,7 +181,7 @@ class TestLabelResolution:
         tool = ListChildrenTool()
 
         result = _run(tool, _make_context(agent))
-        assert "[Sub-1]" in result
+        assert "[child_5]" in result
 
     def test_falls_back_to_task_id(self):
         child_task = FakeTask(
@@ -332,7 +332,7 @@ class TestMultipleChildren:
         assert "Child agents (2 total):" in result
         assert "child_a" in result
         assert "child_b" in result
-        assert "[Sub-B]" in result
+        assert "[child_b]" in result
 
 
 class TestToolMetadata:
