@@ -11,7 +11,6 @@ class AgentTask:
     task_id: str
     session_id: str
     task_description: str
-    parent_agent: Any  # Forward reference to Agent
     parent_task_id: Optional[str] = None
     result: Optional[str] = None
     depth: int = 0
@@ -37,8 +36,6 @@ class ChildCompletionNotification:
             "- Status: {status}\n"
             "- Task: {task}\n"
             "- Summary: {summary}\n"
-            "\n"
-            "Use `read_session` with task_id=\"{task_id}\" to inspect the full session."
         ).format(
             label=self.label,
             task_id=self.task_id,

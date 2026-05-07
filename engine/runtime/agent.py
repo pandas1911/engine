@@ -19,7 +19,6 @@ from engine.tools.pack import ToolPack
 from engine.providers.llm_provider import LLMProviderError
 from engine.streaming_handler import BaseStreamingHandler
 from engine.logging import get_logger
-from engine.safety import LaneConcurrencyQueue
 from engine.prompts import get_summary_warning, get_emergency_summary_prompt
 
 if TYPE_CHECKING:
@@ -44,7 +43,6 @@ class Agent:
         task_id: Optional[str] = None,
         parent_task_id: Optional[str] = None,
         label: Optional[str] = None,
-        lane_queue: Optional[LaneConcurrencyQueue] = None,
         streaming_handler: Optional[BaseStreamingHandler] = None,
     ):
         self.session = session
@@ -61,7 +59,6 @@ class Agent:
         self._completion_event = asyncio.Event()
         self._error_info: Optional[AgentError] = None
         self.display_id = f"[{self.label}|{self.task_id}]"
-        self._lane_queue = lane_queue
         self._time_provider = TimeProvider(timezone_override=config.user_timezone)
         self._event_queue: List[
             AgentEvent
@@ -110,11 +107,6 @@ class Agent:
     def event_queue(self) -> List[AgentEvent]:
         """Read-only access to event queue."""
         return self._event_queue
-
-    @property
-    def lane_queue(self) -> Optional[LaneConcurrencyQueue]:
-        """Read-only access to lane queue."""
-        return self._lane_queue
 
     @property
     def tool_pack(self) -> Optional[ToolPack]:

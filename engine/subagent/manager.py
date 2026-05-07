@@ -15,6 +15,7 @@ from engine.config import Config, get_config
 from engine.logging import get_logger
 from engine.providers.provider_models import Lane
 from engine.safety import LaneConcurrencyQueue
+from engine.safety.token_estimator import ResultTruncator
 from .events import AgentEvent, ChildCompletionEvent
 from engine.prompts import (
     get_subagent_system_prompt,
@@ -27,6 +28,8 @@ from engine.time import TimeProvider
 if TYPE_CHECKING:
     from .protocol import Drainable
     from .subagent_models import ChildCompletionNotification
+
+_SUMMARY_MAX_LENGTH = 6000
 
 
 class SubAgentManager:
@@ -212,7 +215,6 @@ class SubAgentManager:
             task_id=task_id,
             session_id=child_session.id,
             description=task_desc,
-            parent_agent=None,
             parent_task_id=self._agent_task_id,
             depth=child_session.depth,
         )
@@ -246,7 +248,6 @@ class SubAgentManager:
             task_id=task_id,
             parent_task_id=self._agent_task_id,
             label=display_name,
-            lane_queue=self._lane_queue,
             streaming_handler=child_streaming_handler,
         )
 
@@ -257,23 +258,6 @@ class SubAgentManager:
         )
 
         return get_spawn_confirmation(task_id=task_id, label=label)
-
-    # ------------------------------------------------------------------
-    # _build_path_index() — generates dotted path index for child labels
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _build_path_index(parent_label: str, child_index: int) -> str:
-        """Build a simple index string for child labels.
-
-        Args:
-            parent_label: Parent agent's display label (unused in depth-1 model).
-            child_index: This child's sequential index within the parent.
-
-        Returns:
-            Simple string representation of child_index.
-        """
-        return str(child_index)
 
     # ------------------------------------------------------------------
     # _run_child() — migrated from SpawnTool._run_child_agent() (spawn.py lines 154-244)
@@ -501,6 +485,8 @@ class SubAgentManager:
                 summary = getattr(child_task.agent, "_final_result", None) or "Unknown error"
             elif child_task.result:
                 summary = child_task.result
+
+        summary = ResultTruncator.truncate(summary, _SUMMARY_MAX_LENGTH)
 
         session_file = "{}.jsonl".format(task_id)
 
