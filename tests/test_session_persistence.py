@@ -1,4 +1,4 @@
-"""Tests for SessionStore file persistence layer."""
+"""Tests for SessionStore JSONL file persistence layer."""
 
 import json
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from engine.runtime.agent_models import Session, Message
-from engine.subagent.session_store import SessionStore, ChildSessionInfo
+from engine.session_store import SessionStore, ChildSessionInfo
 
 
 @pytest.fixture
@@ -38,6 +38,13 @@ def _init_store(store, root_session_id="root_001"):
     return store.create_root(root_session_id)
 
 
+def _write_child(store, task_id, session):
+    """Helper: create a child JSONL file from a session."""
+    store.create_file(task_id, session)
+    for msg in session.messages:
+        store.append_line(task_id, msg)
+
+
 class TestCreateRoot:
     def test_creates_directory(self, store, tmp_path):
         result = _init_store(store)
@@ -53,32 +60,86 @@ class TestCreateRoot:
         assert path1.is_dir()
 
 
-class TestSaveChildSession:
-    def test_creates_task_json(self, store, child_session):
+class TestCreateFile:
+    def test_creates_task_jsonl(self, store, child_session):
         _init_store(store)
-        store.save_child_session("task_abc123", child_session)
+        store.create_file("task_abc123", child_session)
 
-        file_path = store.sessions_dir / "task_abc123.json"
+        file_path = store.sessions_dir / "task_abc123.jsonl"
         assert file_path.exists()
 
-    def test_file_contains_full_session(self, store, child_session):
+    def test_header_contains_session_metadata(self, store, child_session):
         _init_store(store)
-        store.save_child_session("task_abc123", child_session)
+        store.create_file("task_abc123", child_session)
 
-        data = json.loads((store.sessions_dir / "task_abc123.json").read_text())
+        raw = (store.sessions_dir / "task_abc123.jsonl").read_text(encoding="utf-8")
+        lines = raw.strip().splitlines()
+        header = json.loads(lines[0])
 
-        assert data["id"] == "child_001"
-        assert data["depth"] == 1
-        assert data["parent_id"] == "root_001"
-        assert len(data["messages"]) == 2
-        assert data["messages"][0]["role"] == "user"
-        assert data["messages"][0]["content"] == "Do the thing"
+        assert header["id"] == "child_001"
+        assert header["depth"] == 1
+        assert header["parent_id"] == "root_001"
+
+    def test_header_only_no_messages(self, store, child_session):
+        _init_store(store)
+        store.create_file("task_abc123", child_session)
+
+        raw = (store.sessions_dir / "task_abc123.jsonl").read_text(encoding="utf-8")
+        lines = [l for l in raw.splitlines() if l.strip()]
+        assert len(lines) == 1  # header only
+
+
+class TestAppendLine:
+    def test_appends_message_as_json_line(self, store):
+        _init_store(store)
+        session = Session(id="append_001", depth=1, parent_id="root_001")
+        store.create_file("task_append", session)
+
+        msg = Message(role="user", content="First msg")
+        store.append_line("task_append", msg)
+
+        raw = (store.sessions_dir / "task_append.jsonl").read_text(encoding="utf-8")
+        lines = [l for l in raw.splitlines() if l.strip()]
+        assert len(lines) == 2  # header + 1 message
+
+        msg_data = json.loads(lines[1])
+        assert msg_data["role"] == "user"
+        assert msg_data["content"] == "First msg"
+
+    def test_multiple_appends(self, store):
+        _init_store(store)
+        session = Session(id="multi_001", depth=1, parent_id="root_001")
+        store.create_file("task_multi", session)
+
+        store.append_line("task_multi", Message(role="user", content="Q1"))
+        store.append_line("task_multi", Message(role="assistant", content="A1"))
+        store.append_line("task_multi", Message(role="user", content="Q2"))
+
+        raw = (store.sessions_dir / "task_multi.jsonl").read_text(encoding="utf-8")
+        lines = [l for l in raw.splitlines() if l.strip()]
+        assert len(lines) == 4  # header + 3 messages
+
+
+class TestRewriteFile:
+    def test_full_rewrite_preserves_all_data(self, store, child_session):
+        _init_store(store)
+        _write_child(store, "task_rewrite", child_session)
+
+        # Add extra messages in memory
+        child_session.add_message("user", "Extra question")
+        child_session.add_message("assistant", "Extra answer")
+
+        store.rewrite_file("task_rewrite", child_session)
+
+        restored = store.read_child_session("task_rewrite")
+        assert restored is not None
+        assert len(restored.messages) == 4  # original 2 + 2 new
 
 
 class TestRoundTrip:
     def test_serialize_deserialize_roundtrip(self, store, child_session):
         _init_store(store)
-        store.save_child_session("task_xyz", child_session)
+        _write_child(store, "task_xyz", child_session)
 
         restored = store.read_child_session("task_xyz")
 
@@ -101,8 +162,8 @@ class TestRoundTrip:
 class TestListChildren:
     def test_returns_child_info(self, store, child_session):
         _init_store(store)
-        store.save_child_session("task_alpha", child_session)
-        store.save_child_session("task_beta", child_session)
+        _write_child(store, "task_alpha", child_session)
+        _write_child(store, "task_beta", child_session)
 
         children = store.list_children()
 
@@ -112,7 +173,7 @@ class TestListChildren:
 
     def test_child_info_metadata(self, store, child_session):
         _init_store(store)
-        store.save_child_session("task_abc", child_session)
+        _write_child(store, "task_abc", child_session)
 
         info = store.list_children()[0]
 
@@ -120,104 +181,120 @@ class TestListChildren:
         assert info.task_id == "task_abc"
         assert info.message_count == 2
         assert info.file_size_bytes > 0
-        assert "task_abc.json" in info.file_path
+        assert "task_abc.jsonl" in info.file_path
 
     def test_empty_directory(self, store):
         _init_store(store)
 
         assert store.list_children() == []
 
-    def test_skips_main_json(self, store, root_session, child_session):
+    def test_prefers_jsonl_over_json(self, store, child_session):
         _init_store(store)
-        store.save_main_session(root_session)
-        store.save_child_session("task_child1", child_session)
+        _write_child(store, "task_both", child_session)
+        # Also create a legacy .json file
+        json_path = store.sessions_dir / "task_both.json"
+        json_path.write_text('{"id":"old","depth":0,"messages":[]}', encoding="utf-8")
 
         children = store.list_children()
-
         assert len(children) == 1
-        assert children[0].task_id == "task_child1"
+        assert children[0].message_count == 2  # from .jsonl, not .json
 
 
 class TestPartialSession:
-    def test_partial_session_valid_json(self, store, child_session):
-        """Crash scenario: a partial session file with valid JSON is readable."""
+    def test_partial_session_valid_jsonl(self, store, child_session):
         _init_store(store)
-
         child_session.add_message("user", "Partial work")
-        store.save_child_session("task_partial", child_session)
+        _write_child(store, "task_partial", child_session)
 
         restored = store.read_child_session("task_partial")
 
         assert restored is not None
         assert len(restored.messages) == 3
 
-    def test_corrupted_file_returns_none(self, store):
-        """A file with invalid JSON returns None gracefully."""
+    def test_malformed_line_skipped(self, store):
         _init_store(store)
-        bad_file = store.sessions_dir / "task_corrupt.json"
-        bad_file.write_text("{invalid json content", encoding="utf-8")
+        # Write header + valid message + malformed line
+        lines = [
+            json.dumps({"id": "sess_mal", "depth": 1, "parent_id": "root_001"}),
+            json.dumps({"role": "user", "content": "valid", "metadata": {}}),
+            "not valid json{{{{",
+        ]
+        bad_file = store.sessions_dir / "task_malformed.jsonl"
+        bad_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-        assert store.read_child_session("task_corrupt") is None
+        restored = store.read_child_session("task_malformed")
+        assert restored is not None
+        assert len(restored.messages) == 1  # only the valid message
+
+    def test_corrupted_header_returns_none(self, store):
+        _init_store(store)
+        bad_file = store.sessions_dir / "task_bad_header.jsonl"
+        bad_file.write_text("not json at all\n", encoding="utf-8")
+
+        assert store.read_child_session("task_bad_header") is None
 
     def test_corrupted_file_list_children(self, store):
-        """Corrupted files get message_count=-1 in list_children."""
         _init_store(store)
-        bad_file = store.sessions_dir / "task_bad.json"
+        bad_file = store.sessions_dir / "task_bad.jsonl"
         bad_file.write_text("not json at all", encoding="utf-8")
 
         children = store.list_children()
-
         assert len(children) == 1
-        assert children[0].message_count == -1
+        # JSONL list_children counts non-empty lines minus header (1 line)
+        # A single corrupted line yields max(0, 1-1) = 0
+        assert children[0].message_count == 0
 
 
-class TestAppendMessage:
-    def test_persists_and_updates_in_memory(self, store):
+class TestLegacyJsonCompat:
+    def test_reads_old_json_format(self, store):
         _init_store(store)
-        session = Session(id="append_001", depth=1, parent_id="root_001")
+        legacy_data = {
+            "id": "sess_legacy",
+            "depth": 1,
+            "parent_id": "root_001",
+            "messages": [
+                {"role": "user", "content": "Legacy msg", "metadata": {}},
+                {"role": "assistant", "content": "Legacy reply", "metadata": {}},
+            ],
+        }
+        json_path = store.sessions_dir / "task_legacy.json"
+        json_path.write_text(json.dumps(legacy_data), encoding="utf-8")
 
-        store.append_message("task_append", session, "user", "First msg")
-        store.append_message("task_append", session, "assistant", "Reply")
-
-        assert len(session.messages) == 2
-
-        restored = store.read_child_session("task_append")
+        restored = store.read_child_session("task_legacy")
         assert restored is not None
+        assert restored.id == "sess_legacy"
         assert len(restored.messages) == 2
-        assert restored.messages[0].content == "First msg"
-        assert restored.messages[1].content == "Reply"
-
-    def test_append_with_metadata(self, store):
-        _init_store(store)
-        session = Session(id="meta_001", depth=1, parent_id="root_001")
-
-        store.append_message(
-            "task_meta", session, "tool", "result data", tool_call_id="call_123"
-        )
-
-        restored = store.read_child_session("task_meta")
-        assert restored is not None
-        assert restored.messages[0].metadata["tool_call_id"] == "call_123"
+        assert restored.messages[0].content == "Legacy msg"
 
 
-class TestGetChildFilePath:
-    def test_returns_absolute_path(self, store, tmp_path):
-        _init_store(store)
+class TestAppFacingApi:
+    def test_save_creates_main_jsonl(self, store, root_session):
+        path = store.save(root_session)
 
-        path = store.get_child_file_path("task_abc")
+        assert path.exists()
+        assert path.name == "main.jsonl"
 
-        assert path == str((tmp_path / "root_001" / "task_abc.json").resolve())
+    def test_load_roundtrip(self, store, root_session):
+        store.save(root_session)
+        loaded = store.load(root_session.id)
 
+        assert loaded is not None
+        assert loaded.id == root_session.id
+        assert len(loaded.messages) == 2
 
-class TestSaveMainSession:
-    def test_creates_main_json(self, store, root_session):
-        _init_store(store)
-        store.save_main_session(root_session)
+    def test_delete_removes_directory(self, store, root_session):
+        store.save(root_session)
+        assert store.delete(root_session.id) is True
+        assert store.load(root_session.id) is None
 
-        file_path = store.sessions_dir / "main.json"
-        assert file_path.exists()
+    def test_list_sessions(self, store, root_session):
+        store.save(root_session)
+        sessions = store.list_sessions()
 
-        data = json.loads(file_path.read_text())
-        assert data["id"] == "root_001"
-        assert data["depth"] == 0
-        assert len(data["messages"]) == 2
+        assert root_session.id in sessions
+
+    def test_load_nonexistent_returns_none(self, store):
+        assert store.load("nonexistent") is None
+
+    def test_delete_nonexistent_returns_false(self, store):
+        assert store.delete("nonexistent") is False

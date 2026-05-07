@@ -139,7 +139,7 @@ class TestScopeLastN:
 
 
 class TestThinkingFiltered:
-    def test_reasoning_role_excluded(self):
+    def test_reasoning_role_shown_with_tags(self):
         messages = _make_messages(
             ("user", "Hello"),
             ("reasoning", "Let me think..."),
@@ -152,12 +152,11 @@ class TestThinkingFiltered:
             {"task_id": "child_004", "scope": "full"}, ctx
         ))
 
-        assert "Let me think" not in result
-        assert "[reasoning]" not in result
+        assert "[thinking] Let me think... [/thinking]" in result
         assert "[user] Hello" in result
         assert "[assistant] Answer" in result
 
-    def test_assistant_think_tag_excluded(self):
+    def test_assistant_think_tag_shown_with_tags(self):
         messages = _make_messages(
             ("user", "Hello"),
             ("assistant", "<think\ninternal reasoning\n</think\nActually..."),
@@ -170,7 +169,7 @@ class TestThinkingFiltered:
             {"task_id": "child_005", "scope": "full"}, ctx
         ))
 
-        assert "<think" not in result
+        assert "[thinking] <think\ninternal reasoning\n</think\nActually... [/thinking]" in result
         assert "[assistant] Clean answer" in result
 
 
@@ -234,6 +233,7 @@ class TestNonExistentTaskId:
 
         agent = MagicMock()
         agent.task_registry = task_registry
+        agent.session_store = None
 
         ctx = _make_context(agent=agent)
 

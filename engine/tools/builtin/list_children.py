@@ -45,28 +45,50 @@ class ListChildrenTool(Tool):
             return "No child agents found."
 
         child_ids = current_task.child_task_ids
-        if not child_ids:
-            return "No child agents have been spawned yet."
 
-        lines: list[str] = []
-        for child_id in child_ids:
-            child_task = task_registry.get_task(child_id)
-            if child_task is None:
-                continue
+        # Path 1: Registry-based (in-memory child_task_ids still available)
+        if child_ids:
+            lines: list[str] = []
+            for child_id in child_ids:
+                child_task = task_registry.get_task(child_id)
+                if child_task is None:
+                    continue
 
-            label = self._resolve_label(child_task, child_id)
-            status = self._classify_status(child_task)
-            msg_count = self._count_messages(child_task)
-            desc = self._truncate_description(child_task.task_description)
+                label = self._resolve_label(child_task, child_id)
+                status = self._classify_status(child_task)
+                msg_count = self._count_messages(child_task, agent)
+                desc = self._truncate_description(child_task.task_description)
 
-            lines.append(
-                "[{}] task_id={} | status={} | messages={} | task: {}".format(
-                    label, child_id, status, msg_count, desc
+                lines.append(
+                    "[{}] task_id={} | status={} | messages={} | task: {}".format(
+                        label, child_id, status, msg_count, desc
+                    )
                 )
-            )
 
-        header = "Child agents ({} total):".format(len(lines))
-        return header + "\n" + "\n".join(lines)
+            header = "Child agents ({} total):".format(len(lines))
+            return header + "\n" + "\n".join(lines)
+
+        # Path 2: Disk-based fallback (multi-turn: registry lost but files exist)
+        session_store = getattr(agent, "session_store", None)
+        if session_store is not None:
+            try:
+                children = session_store.list_children()
+                if children:
+                    lines = []
+                    for child in children:
+                        status = "completed" if child.message_count >= 0 else "unknown"
+                        lines.append(
+                            "[{}] task_id={} | status={} | messages={} | task: {}".format(
+                                child.task_id, child.task_id, status,
+                                child.message_count, "(on disk)"
+                            )
+                        )
+                    header = "Child agents ({} total, from disk):".format(len(lines))
+                    return header + "\n" + "\n".join(lines)
+            except Exception:
+                pass
+
+        return "No child agents have been spawned yet."
 
     @staticmethod
     def _classify_status(child_task: Any) -> str:
@@ -100,26 +122,30 @@ class ListChildrenTool(Tool):
         return fallback_id
 
     @staticmethod
-    def _count_messages(child_task: Any) -> int:
+    def _count_messages(child_task: Any, parent_agent: Any = None) -> int:
         agent = child_task.agent
-        if agent is None:
-            return 0
+        if agent is not None:
+            session = getattr(agent, "session", None)
+            if session is not None:
+                messages = getattr(session, "messages", None)
+                if messages is not None:
+                    return len(messages)
 
-        session = getattr(agent, "session", None)
-        if session is not None:
-            messages = getattr(session, "messages", None)
-            if messages is not None:
-                return len(messages)
-
-        # session_store may not be wired yet (Task 11 integration)
-        session_store = getattr(agent, "session_store", None)
+        # Disk fallback: try read_child_session via available session_store
+        session_store = getattr(agent, "session_store", None) or getattr(
+            parent_agent, "session_store", None
+        )
         if session_store is not None:
             try:
-                stored = session_store.get_session(child_task.session_id)
-                if stored is not None:
-                    messages = getattr(stored, "messages", None)
-                    if messages is not None:
-                        return len(messages)
+                task_id = getattr(child_task, "task_id", None) or getattr(
+                    child_task, "id", None
+                )
+                if task_id:
+                    stored = session_store.read_child_session(task_id)
+                    if stored is not None:
+                        messages = getattr(stored, "messages", None)
+                        if messages is not None:
+                            return len(messages)
             except Exception:
                 pass
 

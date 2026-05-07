@@ -2,7 +2,7 @@
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from app.session_store import SessionStore
+from engine.session_store import SessionStore
 
 router = APIRouter()
 session_store = SessionStore()
@@ -13,7 +13,12 @@ async def get_session(session_id: str):
     session = session_store.load(session_id)
     if session is None:
         return JSONResponse(status_code=404, content={"error": "Session not found"})
-    data = SessionStore._serialize_session(session)
+    data = {
+        "id": session.id,
+        "depth": session.depth,
+        "parent_id": session.parent_id,
+        "messages": session.get_messages(),
+    }
     return data
 
 

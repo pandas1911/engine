@@ -215,7 +215,7 @@ async def delegate(
         streaming_handler = SSEStreamingHandler(event_callback) if event_callback else None
 
         # --- Create SessionStore for this root conversation ---
-        from engine.subagent.session_store import SessionStore
+        from engine.session_store import SessionStore
         session_store = SessionStore(root_dir="sessions")
         session_store.create_root(session.id)
 
@@ -231,6 +231,10 @@ async def delegate(
 
         # Attach SessionStore so builtin tools can pass it to SubAgentManager
         agent.session_store = session_store
+
+        # Wire real-time persistence: write header, then append each message
+        session_store.create_file("main", session)
+        session._on_message_added = lambda msg: session_store.append_line("main", msg)
 
         await task_registry.register(
             task_id=agent.task_id,

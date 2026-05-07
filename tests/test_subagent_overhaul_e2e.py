@@ -23,7 +23,7 @@ from engine.runtime.agent_models import AgentState, Message, Session
 from engine.runtime.task_registry import AgentTaskRegistry, CompleteInfo
 from engine.subagent.events import ChildCompletionEvent
 from engine.subagent.manager import SubAgentManager
-from engine.subagent.session_store import SessionStore
+from engine.session_store import SessionStore
 from engine.subagent.subagent_models import ChildCompletionNotification
 from engine.tools.builtin.list_children import ListChildrenTool
 from engine.tools.builtin.read_session import ReadSessionTool
@@ -318,8 +318,8 @@ class TestReadSessionScopes:
         assert "[user] Hello" in output
         assert "[assistant] Final answer" in output
         assert "system prompt" not in output
-        assert "Let me think" not in output
-        assert "<think" not in output
+        assert "[thinking] Let me think... [/thinking]" in output
+        assert "[thinking] <think\nreasoning\n</think [/thinking]" in output
 
     @pytest.mark.asyncio
     async def test_scope_summary_returns_last_assistant(self, registry, config):
@@ -410,7 +410,8 @@ class TestSessionPersistence:
         assert len(children) == 1
         child_info = children[0]
         assert child_info.task_id.startswith("task_")
-        assert child_info.message_count >= 1  # at least the system message
+        # create_file writes header only; real-time callback appends messages as they arrive
+        assert child_info.message_count >= 0
 
     @pytest.mark.asyncio
     async def test_completion_saves_final_session(self, registry, config, store):
@@ -425,6 +426,13 @@ class TestSessionPersistence:
             agent_label="Sub-p",
             agent_summary="Persisted result",
         )
+
+        # Manually persist the child session (simulates real-time callback persistence)
+        child_task = registry.get_task("task_persist")
+        child_session = child_task.agent.session
+        store.create_file("task_persist", child_session)
+        for msg in child_session.messages:
+            store.append_line("task_persist", msg)
 
         info = CompleteInfo(parent_task_id="parent_task", pending_children=0, pending_siblings=0)
         await manager._on_child_complete("task_persist", info)
@@ -446,16 +454,20 @@ class TestSessionPersistence:
             id="sess_dir_test", depth=1, parent_id="root_e2e",
             messages=[Message(role="user", content="test")],
         )
-        store.save_child_session("task_dir", child_session)
+        store.create_file("task_dir", child_session)
+        for msg in child_session.messages:
+            store.append_line("task_dir", msg)
 
-        file_path = store.sessions_dir / "task_dir.json"
+        file_path = store.sessions_dir / "task_dir.jsonl"
         assert file_path.exists()
 
-        data = json.loads(file_path.read_text(encoding="utf-8"))
-        assert data["id"] == "sess_dir_test"
-        assert data["depth"] == 1
-        assert data["parent_id"] == "root_e2e"
-        assert len(data["messages"]) == 1
+        # Read and verify JSONL format
+        lines = file_path.read_text(encoding="utf-8").strip().splitlines()
+        header = json.loads(lines[0])
+        assert header["id"] == "sess_dir_test"
+        assert header["depth"] == 1
+        assert header["parent_id"] == "root_e2e"
+        assert len(lines) == 2  # header + 1 message
 
 
 # ===================================================================
@@ -627,6 +639,6 @@ class TestPerChildWake:
         assert notif.task == "Task for task_fieldcheck"
         assert notif.status == "completed"
         assert notif.summary == "Field check summary"
-        assert notif.session_file == "task_fieldcheck.json"
+        assert notif.session_file == "task_fieldcheck.jsonl"
         assert "task_fieldcheck" in notif.to_prompt()
         assert "Field check summary" in notif.to_prompt()

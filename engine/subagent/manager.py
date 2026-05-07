@@ -205,7 +205,8 @@ class SubAgentManager:
         child_session.add_message("system", system_prompt)
 
         if self._session_store is not None:
-            self._session_store.save_child_session(task_id, child_session)
+            self._session_store.create_file(task_id, child_session)
+            child_session._on_message_added = lambda msg, tid=task_id: self._session_store.append_line(tid, msg)
 
         await self._task_registry.register(
             task_id=task_id,
@@ -501,13 +502,10 @@ class SubAgentManager:
             elif child_task.result:
                 summary = child_task.result
 
-        session_file = "{}.json".format(task_id)
+        session_file = "{}.jsonl".format(task_id)
 
-        if self._session_store is not None and child_task.agent is not None:
-            try:
-                self._session_store.save_child_session(task_id, child_task.agent.session)
-            except Exception:
-                pass
+        # Release agent reference — callback already persists all messages in real-time
+        child_task.agent = None
 
         return ChildCompletionNotification(
             task_id=task_id,

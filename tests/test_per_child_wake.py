@@ -254,7 +254,7 @@ async def test_notification_contains_correct_fields(registry, config):
     assert notif.task == "Task for task_abc123"
     assert notif.status == "completed"
     assert notif.summary == "Here is my answer"
-    assert notif.session_file == "task_abc123.json"
+    assert notif.session_file == "task_abc123.jsonl"
 
 
 @pytest.mark.asyncio

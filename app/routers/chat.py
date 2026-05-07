@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from app.session_store import SessionStore
+from engine.session_store import SessionStore
 from app._state import is_streaming, set_streaming
 from engine.runtime.agent_models import Session
 

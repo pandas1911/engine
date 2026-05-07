@@ -66,10 +66,17 @@ class Session:
     depth: int = 0
     parent_id: Optional[str] = None
     messages: List[Message] = field(default_factory=list)
+    _on_message_added: Any = field(default=None, repr=False)
 
     def add_message(self, role: str, content: str, **metadata):
         """Add a message to the session."""
-        self.messages.append(Message(role, content, metadata))
+        msg = Message(role, content, metadata)
+        self.messages.append(msg)
+        if self._on_message_added is not None:
+            try:
+                self._on_message_added(msg)
+            except Exception:
+                pass
 
     def get_messages(self) -> List[Dict]:
         """Get all messages as dictionaries."""

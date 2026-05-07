@@ -187,8 +187,8 @@ async def test_completed_child_all_six_fields(registry, config):
     assert notif.status == "completed"
     # summary is last non-thinking assistant message
     assert notif.summary == "I did it perfectly"
-    # session_file is "{task_id}.json"
-    assert notif.session_file == "task_xyz789.json"
+    # session_file is "{task_id}.jsonl"
+    assert notif.session_file == "task_xyz789.jsonl"
 
 
 # ===========================================================================
@@ -226,7 +226,7 @@ async def test_error_child_status_and_summary(registry, config):
     assert notif.summary == "Something went terribly wrong"
     assert notif.label == "Sub-err"
     assert notif.task == "Failing task"
-    assert notif.session_file == "child_err.json"
+    assert notif.session_file == "child_err.jsonl"
 
 
 # ===========================================================================
@@ -337,7 +337,7 @@ async def test_no_agent_session_falls_back_gracefully(registry, config):
     # summary falls back to child_task.result
     assert notif.summary == "Some fallback result"
     assert notif.task == "Task with no agent"
-    assert notif.session_file == "child_no_agent.json"
+    assert notif.session_file == "child_no_agent.jsonl"
 
 
 @pytest.mark.asyncio
@@ -543,7 +543,7 @@ async def test_branch_b_child_completion_event_with_notification(registry, confi
     assert notif.task == "Branch B task"
     assert notif.status == "completed"
     assert notif.summary == "Branch B summary"
-    assert notif.session_file == "child_b.json"
+    assert notif.session_file == "child_b.jsonl"
 
 
 # ===========================================================================
@@ -707,7 +707,7 @@ async def test_notification_directly_on_child_completion_branch_b(registry, conf
     assert notif.task == "End-to-end test task"
     assert notif.status == "completed"
     assert notif.summary == "Here is my final answer: 42"
-    assert notif.session_file == "child_e2e.json"
+    assert notif.session_file == "child_e2e.jsonl"
 
     # Verify to_prompt() works on the notification that flowed through
     prompt = notif.to_prompt()

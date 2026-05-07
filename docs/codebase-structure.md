@@ -13,6 +13,7 @@ engine/
 │   ├── runner.py              # delegate(), DEFAULT_SYSTEM_PROMPT, ToolPack construction, is_tool_enabled filtering
 │   ├── config.py              # Configuration loading (engine.json)
 │   ├── prompts.py             # Centralized prompt definitions (pure leaf module, zero engine.* imports)
+│   ├── session_store.py       # Unified SessionStore — JSONL append persistence for root & child sessions
 │   ├── time.py                # Timezone-aware time utilities
 │   ├── safety/                # Rate limiting, concurrency, retry, pacing
 │   │   ├── __init__.py        # Re-export layer for all safety classes
@@ -40,8 +41,6 @@ engine/
 │   ├── subagent/              # Sub-agent spawning and lifecycle
 │   │   ├── __init__.py
 │   │   ├── manager.py         # SubAgentManager — spawn, per-child wake, notify; accepts root_streaming_handler for sub-agent streaming
-│   │   ├── spawn.py           # Backward compat shim — re-exports SpawnTool from engine.tools.builtin.spawn
-│   │   ├── session_store.py   # SessionStore — JSON file persistence layer for sub-agent sessions
 │   │   ├── protocol.py        # Drainable protocol definition
 │   │   ├── events.py          # Event types (ChildCompletionEvent)
 │   │   └── subagent_models.py # AgentTask, ChildCompletionNotification
@@ -76,7 +75,6 @@ engine/
 ├── app/                       # FastAPI web application
 │   ├── main.py                # FastAPI app factory, static file mount
 │   ├── _state.py              # Global streaming lock (single-request enforcement)
-│   ├── session_store.py       # In-memory session persistence (save/load Session objects)
 │   ├── models/
 │   │   ├── __init__.py
 │   │   └── sse_events.py      # Part-based SSE event dataclasses (StreamEvent + 8 root + 8 sub-agent event types)
@@ -157,8 +155,9 @@ The main entry point containing `delegate()` and all startup orchestration logic
 11. Merge built-in tools (`BUILTIN_TOOLS` from `engine/tools/builtin/`) with custom tools
 12. Filter tools by `config.is_tool_enabled()` — unlisted tools default to enabled
 13. Build `ToolPack` from enabled tools
-12. Create root `Agent` with `ToolPack`, register in `AgentTaskRegistry`
-13. Run the agent, return `AgentResult`
+14. Create root `Agent` with `ToolPack`, register in `AgentTaskRegistry`
+15. Create `SessionStore`, call `create_root(session.id)`, create `main.jsonl` via `create_file()`, wire `session._on_message_added` callback for real-time persistence
+16. Run the agent, return `AgentResult`
 
 ---
 
@@ -238,7 +237,56 @@ A pure leaf module (zero `engine.*` imports) serving as the single source of tru
 
 ---
 
-### 5. `engine/safety/` — Rate Limiting & Safety Guards
+### 5. `engine/session_store.py` — Unified Session Persistence
+
+A unified session persistence layer using JSONL append format. Replaces both the legacy `engine/subagent/session_store.py` (deprecated) and the deleted `app/session_store.py`. Supports both JSONL (new) and JSON (legacy) file formats for backward compatibility.
+
+**Directory layout:**
+
+```
+sessions/{root_session_id}/
+    main.jsonl           <- root agent session
+    task_abc123.jsonl     <- child session (named by task_id)
+```
+
+**Classes:**
+
+| Class | Description |
+|---|---|
+| `SessionStore` | Manages session persistence as JSONL files on disk. Constructor takes `root_dir` (default `"./sessions"`). JSONL format: line 1 = session header (`id`, `depth`, `parent_id`), lines 2+ = messages. Designed for single-process asyncio (no file locking). |
+| `ChildSessionInfo` | Metadata dataclass: `task_id`, `file_path`, `message_count`, `file_size_bytes` |
+
+**Engine-facing API (requires `create_root()` first):**
+
+| Method | Description |
+|---|---|
+| `create_root(root_session_id)` | Create the session directory for a root conversation. Returns `Path`. |
+| `create_file(name, session)` | Create a JSONL file with header line. Atomic write (tmp + rename). Called once per session before `append_line()`. |
+| `append_line(name, message)` | Append a single message as one JSON line. Called by `Session._on_message_added` callback for real-time persistence. |
+| `rewrite_file(name, session)` | Full rewrite: header + all messages. Atomic write via tmp + rename. Used for final checkpoint/compaction. |
+| `read_session_file(name)` | Read session from `.jsonl` or legacy `.json`. Returns `Session` object or `None`. |
+| `read_child_session(task_id)` | Convenience wrapper: reads a child session by task_id. |
+| `list_children()` | List all child session files (`task_*.jsonl` and `task_*.json`) with metadata. Does NOT read full session content. |
+
+**App-facing API (manages its own paths):**
+
+| Method | Description |
+|---|---|
+| `save(session)` | Save session to `sessions/{id}/main.jsonl` (full rewrite). Ensures directory exists. |
+| `load(session_id)` | Load from `sessions/{id}/main.jsonl` or `main.json`. Returns `Session` or `None`. |
+| `delete(session_id)` | Delete session directory. Returns `True` if deleted, `False` if not found. |
+| `list_sessions()` | List all session IDs (directories with `main.jsonl` or `main.json`). |
+
+**Real-time persistence via callback:**
+
+The `Session` dataclass has an `_on_message_added: Any = field(default=None, repr=False)` field. When set to a callable, `Session.add_message()` invokes it after appending each message. The `SessionStore.append_line()` method is wired as this callback, enabling real-time per-message persistence without explicit save calls.
+
+- **Root agent** (`engine/runner.py`): `session._on_message_added = lambda msg: session_store.append_line("main", msg)`
+- **Child agents** (`engine/subagent/manager.py`): `child_session._on_message_added = lambda msg, tid=task_id: session_store.append_line(tid, msg)`
+
+---
+
+### 6. `engine/safety/` — Rate Limiting & Safety Guards
 
 A package providing resource protection mechanisms for the agent system. Split into focused sub-modules, with `__init__.py` re-exporting all public classes for backward compatibility.
 
@@ -332,7 +380,7 @@ Adaptive pacing logic has been merged into `SlidingWindowRateLimiter` (see `rate
 
 ---
 
-### 6. `engine/time.py` — Time Utilities
+### 7. `engine/time.py` — Time Utilities
 
 Timezone-aware time formatting for the agent framework.
 
@@ -351,7 +399,7 @@ Timezone-aware time formatting for the agent framework.
 
 ---
 
-### 7. `engine/runtime/` — Agent Execution Core
+### 8. `engine/runtime/` — Agent Execution Core
 
 #### `agent.py` — Agent Class
 
@@ -394,7 +442,7 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
 | `ErrorCategory` | Enum: `LLM_ERROR`, `INTERNAL_ERROR` |
 | `AgentError` | Structured error with category, message, and exception type |
 | `Message` | Chat message with role, content, metadata, timestamp. Converts to dict for LLM API |
-| `Session` | Conversation container with `add_message()` and `get_messages()` |
+| `Session` | Conversation container with `add_message()` and `get_messages()`. Has `_on_message_added: Any = field(default=None, repr=False)` callback field — when set, `add_message()` invokes it after appending each message (used for real-time JSONL persistence). |
 | `QueueEvent` | Internal event with trigger_task_id, child_results, error flag |
 | `AgentResult` | Final output: content, session, success, optional error |
 
@@ -419,7 +467,7 @@ CRUD for `AgentTask` entries with handler-based notification.
 
 ---
 
-### 8. `engine/streaming_handler.py` — Streaming Response Handler
+### 9. `engine/streaming_handler.py` — Streaming Response Handler
 
 Defines `BaseStreamingHandler` and two concrete implementations for handling streaming LLM output. Extracted from the Agent class to encapsulate all streaming-specific concerns.
 
@@ -450,7 +498,7 @@ Defines `BaseStreamingHandler` and two concrete implementations for handling str
 
 ---
 
-### 9. `engine/providers/` — LLM Provider Layer
+### 10. `engine/providers/` — LLM Provider Layer
 
 #### `llm_provider.py`
 
@@ -592,7 +640,7 @@ Defines the unified chunk type yielded by `stream_chat()`.
 
 ---
 
-### 10. `engine/subagent/` — Sub-Agent System
+### 11. `engine/subagent/` — Sub-Agent System
 
 #### `manager.py` — SubAgentManager
 
@@ -611,11 +659,11 @@ Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per a
 
 | Method | Description |
 |---|---|
-| `spawn()` | Create child session, register task, build system prompt, emit `subagent_start` event (if streaming), create `SubAgentStreamingWrapper` for depth-0 children, persist session to `SessionStore`, launch `asyncio.create_task` |
+| `spawn()` | Create child session, register task, build system prompt, emit `subagent_start` event (if streaming), create `SubAgentStreamingWrapper` for depth-0 children, wire `child_session._on_message_added` callback to `session_store.append_line(task_id, msg)` for real-time persistence, persist session to `SessionStore`, launch `asyncio.create_task` |
 | `_run_child()` | Background execution with lane slot management |
 | `_execute_child()` | Wraps `_run_child()`: emits `subagent_done`/`subagent_error` lifecycle events after child completes |
 | `_on_child_complete()` | Per-child immediate wake handler: build `ChildCompletionNotification`, resume or enqueue parent |
-| `_build_child_notification()` | Extract label, status, summary from child task; persist session; return `ChildCompletionNotification` |
+| `_build_child_notification()` | Extract label, status, summary from child task; set `child_task.agent = None` for memory cleanup; persist session via `rewrite_file()`; return `ChildCompletionNotification` |
 
 **Sub-agent streaming logic:**
 
@@ -635,20 +683,13 @@ Each child independently triggers notification to the parent. No sibling gates, 
    - **Branch B**: Parent in `RUNNING` → enqueue `ChildCompletionEvent` for self-drain in `_execute_cycle()`
    - Parent in `COMPLETED`/`ERROR`/`IDLE` → skip (no Branch C re-awaken)
 
-#### `spawn.py` — Backward Compatibility Shim
+#### ~~`spawn.py`~~ — [DELETED]
 
-Single-line re-export: `from engine.tools.builtin.spawn import SpawnTool`. The actual `SpawnTool` implementation now lives in `engine/tools/builtin/spawn.py` (Section 11).
+> **Deleted.** The backward-compatibility shim that re-exported `SpawnTool` from `engine/tools/builtin/spawn.py` has been removed. Use `from engine.tools.builtin.spawn import SpawnTool` directly.
 
-#### `session_store.py` — Session File Persistence
+#### ~~`session_store.py`~~ — [DELETED]
 
-Manages session persistence as JSON files on disk. Directory layout: `sessions/{root_session_id}/main.json` (root) and `sessions/{root_session_id}/{task_id}.json` (children).
-
-| Class | Description |
-|---|---|
-| `SessionStore` | File-based session persistence with atomic writes (tmp + rename). Methods: `create_root()`, `save_main_session()`, `save_child_session()`, `append_message()`, `read_child_session()`, `list_children()` |
-| `ChildSessionInfo` | Metadata dataclass: `task_id`, `file_path`, `message_count`, `file_size_bytes` |
-
-**Key design:** Designed for single-process asyncio (no file locking). `read_child_session()` returns `None` for missing or corrupted files. `list_children()` scans `task_*.json` files without reading full session content.
+> **Deleted.** The legacy JSON-based session persistence module has been removed. All session persistence is now handled by `engine/session_store.py` (Section 5), which provides a unified JSONL-based persistence layer for both root and child sessions with real-time callback-driven writes.
 
 #### `protocol.py` — Drainable Protocol
 
@@ -670,7 +711,7 @@ Manages session persistence as JSON files on disk. Directory layout: `sessions/{
 
 ---
 
-### 11. `engine/tools/` — Tool System
+### 12. `engine/tools/` — Tool System
 
 #### `base.py`
 
@@ -722,7 +763,7 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 
 ---
 
-### 12. `engine/logging/` — Logging
+### 13. `engine/logging/` — Logging
 
 #### `sink.py`
 
@@ -745,7 +786,7 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 
 ---
 
-### 13. `tests/` — Test Suite
+### 14. `tests/` — Test Suite
 
 | File | Description |
 |---|---|
@@ -772,7 +813,7 @@ All tests use `pytest-asyncio` and are pure unit tests (mocked, no live LLM call
 
 ---
 
-### 14. `app/` — FastAPI Web Application
+### 15. `app/` — FastAPI Web Application
 
 A FastAPI application providing a chat UI and SSE-based streaming API. Static files are served from the `web/` directory.
 
@@ -784,9 +825,9 @@ Creates the FastAPI app, mounts static files from `web/`, and includes routers f
 
 Enforces single-request-at-a-time processing via a boolean flag (`set_streaming` / `is_streaming`). Returns HTTP 429 if a request arrives while another is streaming.
 
-#### `session_store.py` — Session Persistence
+#### `session_store.py` — ~~Session Persistence~~ [DELETED]
 
-In-memory store for `Session` objects. Provides `save(session)` and `load(session_id)` methods. Used by the chat endpoint to persist conversations across requests.
+> **Deleted.** This module has been removed. Session persistence is now handled by `engine/session_store.py` (Section 5), imported directly in `app/routers/chat.py` as `from engine.session_store import SessionStore`. The unified `SessionStore` provides both engine-facing (JSONL append) and app-facing (save/load/delete/list) APIs.
 
 #### `models/sse_events.py` — Part-based SSE Event Dataclasses
 
@@ -846,7 +887,7 @@ Additionally, `agent_start` is emitted immediately when the SSE connection opens
 
 - `ChatRequest` accepts optional `session_id` for conversation continuity
 - `_truncate_session()` removes oldest complete turns when non-system messages exceed `MAX_MESSAGES` (20)
-- Sessions are saved to `SessionStore` after streaming completes
+- Sessions are saved to `SessionStore` (imported from `engine.session_store`) after streaming completes
 
 ---
 
@@ -857,14 +898,16 @@ User
   │
   ▼
 delegate() (engine/runner.py)
-  ├── Config loading (engine.json)
-  ├── Provider initialization (providers dict → LLMProviders → primary+fallback ordering)
-  ├── Lane queue setup (MAIN:4, SUBAGENT:5)
-  ├── Tool discovery (custom tools auto-loaded)
-  ├── is_tool_enabled filtering + SpawnTool injection
-  └── ToolPack construction → Agent creation & registration
-        │
-        ▼
+   ├── Config loading (engine.json)
+   ├── Provider initialization (providers dict → LLMProviders → primary+fallback ordering)
+   ├── Lane queue setup (MAIN:4, SUBAGENT:5)
+   ├── Tool discovery (custom tools auto-loaded)
+   ├── is_tool_enabled filtering + SpawnTool injection
+   ├── ToolPack construction → Agent creation & registration
+   ├── SessionStore.create_root(session.id) → create main.jsonl
+   └── Wire session._on_message_added → session_store.append_line("main", msg)
+         │                                    (real-time JSONL persistence)
+         ▼
   Agent.run()
     ├── State: IDLE → RUNNING
     ├── _execute_cycle()
@@ -888,6 +931,7 @@ delegate() (engine/runner.py)
     │     │                       ├── SubAgentManager.spawn()
     │     │                       │     ├── LaneConcurrencyQueue.acquire()
     │     │                       │     ├── Create child session + system prompt
+    │     │                       │     ├── Wire child_session._on_message_added → session_store.append_line(task_id, msg)
     │     │                       │     ├── Build child Agent with shared llm_provider + tool_pack
     │     │                       │     │     └── if depth==0: create SubAgentStreamingWrapper(parent=root_handler)
     │     │                       │     │         └── child Agent(streaming_handler=SubAgentStreamingWrapper)
@@ -916,7 +960,11 @@ delegate() (engine/runner.py)
 
 5. **Per-child wake**: Each completing child independently notifies its parent via `_on_child_complete()`. No sibling gates or batch collection. The parent is woken immediately for every completing child, either via direct resume (Branch A: parent in `WAITING_FOR_CHILDREN`) or event queue enqueue (Branch B: parent still `RUNNING`).
 
-6. **Tool auto-discovery**: Custom tools in `engine/tools/custom/` are automatically discovered and registered by `engine/runner.py`.
+6. **Real-time persistence via callback**: `Session._on_message_added` callback is wired to `SessionStore.append_line()` at agent creation time (root in `runner.py`, children in `manager.py`). Every message is persisted to JSONL immediately as it's added — no explicit save calls needed during execution. Final compaction via `rewrite_file()` happens on completion.
+
+7. **Agent memory cleanup**: After a child agent completes, `child_task.agent = None` is set in `_build_child_notification()` to release the agent object (including its session and tool references) for garbage collection.
+
+8. **Tool auto-discovery**: Custom tools in `engine/tools/custom/` are automatically discovered and registered by `engine/runner.py`.
 
 ---
 
@@ -1009,4 +1057,4 @@ Depth=1 is enforced at architecture level. Sub-agents (depth ≥ 1) are leaf wor
 
 ### SessionStore is single-process
 
-`SessionStore` is designed for single-process asyncio with no file locking. Concurrent writes from multiple processes could cause data loss.
+`SessionStore` (in `engine/session_store.py`) is designed for single-process asyncio with no file locking. The JSONL append format is safe for concurrent async writes within a single process, but concurrent writes from multiple processes could cause data loss.
