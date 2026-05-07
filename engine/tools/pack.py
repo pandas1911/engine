@@ -4,7 +4,7 @@ from engine.tools.base import Tool, ToolRegistry, ToolRegistrationError
 
 
 # Tools that only the root agent (depth=0) should have access to.
-_ROOT_ONLY_TOOLS = {"spawn", "list_children", "read_session"}
+_ROOT_ONLY_TOOLS = {"spawn"}
 
 
 class ToolPack:
@@ -28,7 +28,7 @@ class ToolPack:
     def get_schemas(self, session=None) -> List[Dict[str, Any]]:
         """Get OpenAI function calling schemas, filtered by session depth.
 
-        Root-only tools (spawn, list_children, read_session) are hidden from
+        Root-only tools (spawn) are hidden from
         sub-agents (depth >= 1) since depth=1 is enforced at architecture level.
         """
         all_schemas = self._registry.get_schemas()
