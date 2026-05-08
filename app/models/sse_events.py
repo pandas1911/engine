@@ -107,3 +107,8 @@ class SubAgentErrorEvent(StreamEvent):
     """Error occurred during sub-agent execution."""
     type: str = "subagent_error"
     data: Dict[str, Any] = field(default_factory=lambda: {"task_id": "", "message": ""})
+
+@dataclass
+class WaitingForChildrenEvent(StreamEvent):
+    type: str = "waiting_for_children"
+    data: Dict[str, Any] = field(default_factory=lambda: {"session_id": ""})

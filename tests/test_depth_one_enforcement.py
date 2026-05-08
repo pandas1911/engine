@@ -65,7 +65,7 @@ class TestNoReawakenTransition:
             assert not sm.can_trigger("reawaken"), f"reawaken should be invalid from {state.value}"
 
     def test_transition_count(self):
-        assert len(AgentStateMachine.TRANSITIONS) == 6
+        assert len(AgentStateMachine.TRANSITIONS) == 7
 
 
 class TestBranchAStillWorks:

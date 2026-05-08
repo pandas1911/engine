@@ -25,6 +25,12 @@ if TYPE_CHECKING:
     from engine.providers.llm_provider import LLMProvider
 
 
+class MessageEvent:
+    """User-role message event for _event_queue. Treated identically to ChildCompletionEvent."""
+    def __init__(self, content: str):
+        self.content = content
+
+
 class Agent:
     """Core Agent class with single-level sub-agent support.
 
@@ -44,6 +50,7 @@ class Agent:
         parent_task_id: Optional[str] = None,
         label: Optional[str] = None,
         streaming_handler: Optional[BaseStreamingHandler] = None,
+        event_queue: Optional[List[AgentEvent]] = None,
     ):
         self.session = session
         self.config = config
@@ -60,9 +67,7 @@ class Agent:
         self._error_info: Optional[AgentError] = None
         self.display_id = f"[{self.label}|{self.task_id}]"
         self._time_provider = TimeProvider(timezone_override=config.user_timezone)
-        self._event_queue: List[
-            AgentEvent
-        ] = []  # Deferred event queue (native list, Swift Array equivalent)
+        self._event_queue: List[AgentEvent] = event_queue if event_queue is not None else []
         self._tool_pack = tool_pack or ToolPack([])
         self.streaming_handler = streaming_handler
 
@@ -145,6 +150,20 @@ class Agent:
                     ),
                     task_id=self.task_id, state=self.state.value, depth=self.session.depth,
                     event_type="agent_resume",
+                    data={
+                        "message_length": len(message) if message else 0,
+                        "session_msg_count": len(self.session.messages),
+                    },
+                )
+            elif trigger == "user_message":
+                get_logger().info(
+                    self.label,
+                    "Agent resuming from user message | incoming_message_length={}, session_message_count={}".format(
+                        len(message) if message else 0,
+                        len(self.session.messages),
+                    ),
+                    task_id=self.task_id, state=self.state.value, depth=self.session.depth,
+                    event_type="agent_user_resume",
                     data={
                         "message_length": len(message) if message else 0,
                         "session_msg_count": len(self.session.messages),
@@ -503,6 +522,10 @@ class Agent:
                 self.session.add_message("user", formatted)
                 await self._process_tool_calls()
                 # Loop continues — processes any events queued during _process_tool_calls
+            elif isinstance(event, MessageEvent):
+                formatted = self._time_provider.inject_timestamp(event.content)
+                self.session.add_message("user", formatted)
+                await self._process_tool_calls()
 
         # All events drained — decide next state using registry as single source of truth
         if self._has_pending_children():
@@ -721,4 +744,5 @@ class Agent:
 
 __all__ = [
     "Agent",
+    "MessageEvent",
 ]

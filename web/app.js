@@ -1,4 +1,4 @@
-        let streaming = false;
+        let agentState = 'idle'; // 'idle' | 'agent_running' | 'waiting_for_children'
         let parts = [];
         let subagents = {};
         let autoScrollEnabled = true;
@@ -17,20 +17,20 @@
         inputEl.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                if (!streaming && inputEl.value.trim()) {
+                if ((agentState === 'idle' || agentState === 'waiting_for_children') && inputEl.value.trim()) {
                     sendMessage();
                 }
             }
         });
 
         sendBtn.addEventListener('click', () => {
-            if (!streaming && inputEl.value.trim()) {
+            if ((agentState === 'idle' || agentState === 'waiting_for_children') && inputEl.value.trim()) {
                 sendMessage();
             }
         });
 
         newChatBtn.addEventListener('click', () => {
-            if (streaming) return;
+            if (agentState !== 'idle') return;
             localStorage.removeItem(SESSION_KEY);
             messagesEl.innerHTML = '<div class="empty-state">Send a message to start</div>';
         });
@@ -93,6 +93,38 @@
             return { wrapper, contentStream };
         }
 
+        function updateInputState() {
+            inputEl.classList.remove('waiting-for-children');
+            if (agentState === 'idle') {
+                inputEl.disabled = false;
+                sendBtn.disabled = false;
+            } else if (agentState === 'agent_running') {
+                inputEl.disabled = true;
+                sendBtn.disabled = true;
+            } else if (agentState === 'waiting_for_children') {
+                inputEl.disabled = false;
+                sendBtn.disabled = false;
+                inputEl.classList.add('waiting-for-children');
+            }
+        }
+
+        async function sendMidExecutionMessage(message) {
+            try {
+                const response = await fetch('/api/chat/message', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message }),
+                });
+                if (response.ok) {
+                    return await response.json();
+                }
+                return null;
+            } catch (e) {
+                console.error('Failed to send mid-execution message:', e);
+                return null;
+            }
+        }
+
         function handleSSEEvent(eventType, data, contentStream) {
             switch (eventType) {
                 case 'agent_start': {
@@ -100,6 +132,10 @@
                     break;
                 }
                 case 'part_new': {
+                    if (agentState === 'waiting_for_children') {
+                        agentState = 'agent_running';
+                        updateInputState();
+                    }
                     const part = {
                         id: data.part_id,
                         type: data.part_type,
@@ -138,6 +174,10 @@
                     break;
                 }
                 case 'tool_call_start': {
+                    if (agentState === 'waiting_for_children') {
+                        agentState = 'agent_running';
+                        updateInputState();
+                    }
                     const part = {
                         id: data.part_id,
                         type: 'tool',
@@ -164,6 +204,8 @@
                     break;
                 }
                 case 'done': {
+                    agentState = 'idle';
+                    updateInputState();
                     if (data.session_id) setSessionId(data.session_id);
                     for (const part of parts) {
                         if (part.state === 'open') {
@@ -176,6 +218,8 @@
                     break;
                 }
                 case 'error': {
+                    agentState = 'idle';
+                    updateInputState();
                     for (const part of parts) {
                         if (part.state === 'open') {
                             part.state = 'closed';
@@ -186,6 +230,11 @@
                     errorEl.textContent = 'Error: ' + (data.message || 'Unknown error');
                     contentStream.appendChild(errorEl);
                     autoScroll();
+                    break;
+                }
+                case 'waiting_for_children': {
+                    agentState = 'waiting_for_children';
+                    updateInputState();
                     break;
                 }
                 case 'subagent_start': {
@@ -292,10 +341,21 @@
 
         async function sendMessage() {
             const message = inputEl.value.trim();
-            if (!message || streaming) return;
+            if (!message) return;
 
-            streaming = true;
-            sendBtn.disabled = true;
+            if (agentState === 'waiting_for_children') {
+                inputEl.value = '';
+                inputEl.style.height = 'auto';
+                appendUserMessage(message);
+                sendMidExecutionMessage(message);
+                inputEl.focus();
+                return;
+            }
+
+            if (agentState !== 'idle') return;
+
+            agentState = 'agent_running';
+            updateInputState();
             inputEl.value = '';
             inputEl.style.height = 'auto';
 
@@ -363,7 +423,6 @@
                                 const data = JSON.parse(line.slice(6));
                                 handleSSEEvent(eventType, data, contentStream);
                             } catch (e) {
-                                // skip
                             }
                         }
                     }
@@ -375,8 +434,10 @@
                 errorEl.textContent = 'Error: ' + err.message;
                 contentStream.appendChild(errorEl);
             } finally {
-                streaming = false;
-                sendBtn.disabled = false;
+                if (agentState === 'agent_running') {
+                    agentState = 'idle';
+                    updateInputState();
+                }
                 inputEl.focus();
             }
         }

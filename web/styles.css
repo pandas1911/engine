@@ -471,6 +471,16 @@
             border-color: var(--text-weaker);
         }
 
+        #chat-input.waiting-for-children {
+            border-color: #f59e0b;
+            animation: pulse-border 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse-border {
+            0%, 100% { border-color: #f59e0b; }
+            50% { border-color: #fbbf24; }
+        }
+
         #send-btn {
             background: var(--text-strong);
             color: var(--bg-base);
