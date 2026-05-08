@@ -2,6 +2,7 @@
         let parts = [];
         let subagents = {};
         let autoScrollEnabled = true;
+        let activeContentStream = null; // Current assistant message content container
         const SESSION_KEY = 'engine_session_id';
 
         const messagesEl = document.getElementById('messages');
@@ -120,7 +121,7 @@
             }
         }
 
-        function handleSSEEvent(eventType, data, contentStream) {
+        function handleSSEEvent(eventType, data) {
             switch (eventType) {
                 case 'agent_start': {
                     if (data.session_id) setSessionId(data.session_id);
@@ -145,7 +146,7 @@
                     }
                     parts.push(part);
                     if (part.element) {
-                        contentStream.appendChild(part.element);
+                        activeContentStream.appendChild(part.element);
                     }
                     autoScroll();
                     break;
@@ -186,7 +187,7 @@
                     part.element = row;
                     part.detail = detail;
                     parts.push(part);
-                    contentStream.appendChild(row);
+                    activeContentStream.appendChild(row);
                     autoScroll();
                     break;
                 }
@@ -223,8 +224,17 @@
                     const errorEl = document.createElement('div');
                     errorEl.className = 'error-message';
                     errorEl.textContent = 'Error: ' + (data.message || 'Unknown error');
-                    contentStream.appendChild(errorEl);
+                    activeContentStream.appendChild(errorEl);
                     autoScroll();
+                    break;
+                }
+                case 'turn_start': {
+                    const { contentStream } = createAssistantMessage();
+                    activeContentStream = contentStream;
+                    if (agentState === 'waiting_for_children') {
+                        agentState = 'agent_running';
+                        updateInputState();
+                    }
                     break;
                 }
                 case 'waiting_for_children': {
@@ -241,7 +251,7 @@
                         parts: [],
                         state: 'running',
                     };
-                    contentStream.appendChild(panel);
+                    activeContentStream.appendChild(panel);
                     autoScroll();
                     break;
                 }
@@ -357,6 +367,7 @@
             appendUserMessage(message);
 
             const { contentStream } = createAssistantMessage();
+            activeContentStream = contentStream;
 
             try {
                 const body = { message };
@@ -397,7 +408,7 @@
                         } else if (line.startsWith('data: ')) {
                             try {
                                 const data = JSON.parse(line.slice(6));
-                                handleSSEEvent(eventType, data, contentStream);
+                                handleSSEEvent(eventType, data);
                             } catch (e) {
                                 console.warn('Failed to parse SSE data:', line, e);
                             }
@@ -416,7 +427,7 @@
                         } else if (line.startsWith('data: ')) {
                             try {
                                 const data = JSON.parse(line.slice(6));
-                                handleSSEEvent(eventType, data, contentStream);
+                                handleSSEEvent(eventType, data);
                             } catch (e) {
                             }
                         }
@@ -427,7 +438,7 @@
                 const errorEl = document.createElement('div');
                 errorEl.className = 'error-message';
                 errorEl.textContent = 'Error: ' + err.message;
-                contentStream.appendChild(errorEl);
+                activeContentStream.appendChild(errorEl);
             } finally {
                 if (agentState === 'agent_running') {
                     agentState = 'idle';

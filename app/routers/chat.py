@@ -140,6 +140,11 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
                 "event": "waiting_for_children",
                 "data": json.dumps({"session_id": data.get("session_id", "")}),
             })
+        elif event_name == "turn_start":
+            event_queue.put_nowait({
+                "event": "turn_start",
+                "data": json.dumps({"trigger": data.get("trigger", "user_message")}),
+            })
         elif event_name == "subagent_start":
             event_queue.put_nowait({
                 "event": "subagent_start",

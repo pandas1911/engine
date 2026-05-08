@@ -172,6 +172,8 @@ class Agent:
             get_logger().state_change(
                 self.label, prev_state.value, self.state.value, trigger,
                 task_id=self.task_id, state=self.state.value, depth=self.session.depth)
+            if trigger == "user_message":
+                self._emit("turn_start", {"trigger": "user_message"})
 
         try:
             return await self._execute_cycle()
@@ -523,6 +525,7 @@ class Agent:
                 await self._process_tool_calls()
                 # Loop continues — processes any events queued during _process_tool_calls
             elif isinstance(event, MessageEvent):
+                self._emit("turn_start", {"trigger": "user_message"})
                 formatted = self._time_provider.inject_timestamp(event.content)
                 self.session.add_message("user", formatted)
                 await self._process_tool_calls()
