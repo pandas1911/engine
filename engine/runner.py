@@ -273,12 +273,6 @@ class SessionManager:
 
         await self.agent.run(message)
 
-        if self.agent.state == AgentState.WAITING_FOR_CHILDREN:
-            if self.event_callback:
-                self.event_callback(
-                    "waiting_for_children", {"session_id": self.session.id}
-                )
-
         if not self.agent._completion_event.is_set():
             await self.agent._completion_event.wait()
 

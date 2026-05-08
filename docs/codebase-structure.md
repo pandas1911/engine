@@ -82,7 +82,7 @@ engine/
 ├── web/                       # Frontend static files
 │   ├── index.html             # Minimal HTML shell
 │   ├── styles.css             # CSS styles (extracted from monolithic index.html, includes sub-agent panel styles)
-│   ├── app.js                 # Main JS: SSE handling, Part data model, UI logic (root + sub-agent event handling)
+│   ├── app.js                 # Main JS: SSE handling, Part data model, UI logic (root + sub-agent event handling); chat input always enabled, agent_running messages routed via interject
 │   ├── parts.js               # Part rendering: create/update/close DOM elements (root + sub-agent parts)
 │   └── tests/
 │       └── subagent-streaming.test.js  # Frontend tests for sub-agent SSE event handling and rendering
@@ -414,7 +414,7 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
 
 1. Process tool calls iteratively (max 15 iterations)
 2. Drain queued `ChildCompletionEvent`s one at a time — for each, inject the child's `ChildCompletionNotification.to_prompt()` as a user message and re-enter tool call processing
-3. If pending children remain → transition to `WAITING_FOR_CHILDREN`
+3. If pending children remain → transition to `WAITING_FOR_CHILDREN`, emit `waiting_for_children` SSE event via `_emit()` with `{"session_id": self.session.id}`
 4. If no pending children → finalize and notify parent
 
 **Key features:**
@@ -843,7 +843,7 @@ Defines the wire-format SSE event types as dataclasses inheriting from `StreamEv
 | `SubAgentDoneEvent` | `subagent_done` | `task_id`, `success` |
 | `SubAgentErrorEvent` | `subagent_error` | `task_id`, `message` |
 
-17 dataclasses total (1 base `StreamEvent` + 8 root event types + 8 sub-agent event types). The `DoneEvent` does not include a `content` field — text content is delivered incrementally via Part events. Sub-agent events carry an additional `task_id` field to identify which sub-agent they belong to.
+17 dataclasses total (1 base `StreamEvent` + 8 root event types + 8 sub-agent event types). Additionally, the `waiting_for_children` event is emitted as a raw SSE event (not a dataclass) by `_execute_cycle()` when the agent enters the `WAITING_FOR_CHILDREN` state. The `DoneEvent` does not include a `content` field — text content is delivered incrementally via Part events. Sub-agent events carry an additional `task_id` field to identify which sub-agent they belong to.
 
 #### `routers/chat.py` — Chat SSE Endpoint
 
@@ -862,6 +862,7 @@ The `on_engine_event()` callback maps internal engine events to SSE wire format:
 | `tool_end` | `tool_call_result` | Renamed for clarity on wire |
 | `agent_done` | `done` | Adds `session_id` |
 | `error` | `error` | Adds `session_id` |
+| `waiting_for_children` | `waiting_for_children` | Emitted when agent enters `WAITING_FOR_CHILDREN` state; passes through `session_id` |
 | `subagent_start` | `subagent_start` | Sub-agent lifecycle start |
 | `subagent_part_new` | `subagent_part_new` | Sub-agent text/reasoning part |
 | `subagent_part_delta` | `subagent_part_delta` | Sub-agent content delta |
@@ -930,7 +931,7 @@ delegate() (engine/runner.py)
     │     │                       │     └── asyncio.create_task(_run_child)
     │     │
     │     ├── Drain ChildCompletionEvents (per-child notifications, one at a time)
-    │     └── State decision: WAITING_FOR_CHILDREN or COMPLETED
+    │     └── State decision: WAITING_FOR_CHILDREN (emit waiting_for_children SSE) or COMPLETED
     │
     ├── _finish_and_notify() → ToolPack.release_spawn() + AgentTaskRegistry.complete()
     └── Return AgentResult
@@ -986,6 +987,7 @@ The frontend communicates with the backend via Server-Sent Events (SSE) using a 
 | `tool_call_result` | Server → Client | `{part_id: int, tool_name: str, result: str, call_id: str}` |
 | `done` | Server → Client | `{success: bool, session_id: str}` |
 | `error` | Server → Client | `{message: str, session_id: str}` |
+| `waiting_for_children` | Server → Client | `{session_id: str}` |
 | `subagent_start` | Server → Client | `{part_id: int, task_id: str, label: str, description: str, parent_task_id: str}` |
 | `subagent_part_new` | Server → Client | `{part_id: int, task_id: str, part_type: str, text: str}` |
 | `subagent_part_delta` | Server → Client | `{part_id: int, task_id: str, text: str}` |

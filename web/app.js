@@ -17,14 +17,14 @@
         inputEl.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                if ((agentState === 'idle' || agentState === 'waiting_for_children') && inputEl.value.trim()) {
+                if (inputEl.value.trim()) {
                     sendMessage();
                 }
             }
         });
 
         sendBtn.addEventListener('click', () => {
-            if ((agentState === 'idle' || agentState === 'waiting_for_children') && inputEl.value.trim()) {
+            if (inputEl.value.trim()) {
                 sendMessage();
             }
         });
@@ -95,15 +95,10 @@
 
         function updateInputState() {
             inputEl.classList.remove('waiting-for-children');
-            if (agentState === 'idle') {
-                inputEl.disabled = false;
-                sendBtn.disabled = false;
-            } else if (agentState === 'agent_running') {
-                inputEl.disabled = true;
-                sendBtn.disabled = true;
-            } else if (agentState === 'waiting_for_children') {
-                inputEl.disabled = false;
-                sendBtn.disabled = false;
+            // Input always enabled — backend interject() supports message injection at any time
+            inputEl.disabled = false;
+            sendBtn.disabled = false;
+            if (agentState === 'waiting_for_children') {
                 inputEl.classList.add('waiting-for-children');
             }
         }
@@ -343,7 +338,7 @@
             const message = inputEl.value.trim();
             if (!message) return;
 
-            if (agentState === 'waiting_for_children') {
+            if (agentState === 'waiting_for_children' || agentState === 'agent_running') {
                 inputEl.value = '';
                 inputEl.style.height = 'auto';
                 appendUserMessage(message);

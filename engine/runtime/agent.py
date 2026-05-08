@@ -537,6 +537,7 @@ class Agent:
             )
             prev_state = self.state
             self.state_machine.trigger("spawn_children")
+            self._emit("waiting_for_children", {"session_id": self.session.id})
             get_logger().state_change(
                 self.label, prev_state.value, self.state.value, "spawn_children",
                 task_id=self.task_id, state=self.state.value, depth=self.session.depth)
