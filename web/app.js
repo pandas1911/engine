@@ -466,7 +466,16 @@
             const message = inputEl.value.trim();
             if (!message) return;
 
-            if (agentState === 'waiting_for_children' || agentState === 'agent_running') {
+            if (agentState === 'waiting_for_children') {
+                inputEl.value = '';
+                inputEl.style.height = 'auto';
+                appendUserMessage(message);
+                sendMidExecutionMessage(message, null);
+                inputEl.focus();
+                return;
+            }
+
+            if (agentState === 'agent_running') {
                 inputEl.value = '';
                 inputEl.style.height = 'auto';
                 const entry = createQueueCard(message);
