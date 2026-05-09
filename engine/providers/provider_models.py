@@ -94,7 +94,6 @@ class ProviderHealth:
     consecutive_errors: int = 0
     last_error_time: Optional[float] = None
     cooldown_until: Optional[float] = None
-    pace_level: PaceLevel = field(default=PaceLevel.HEALTHY)
 
 
 __all__ = [

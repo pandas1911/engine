@@ -67,6 +67,7 @@ engine/
 │   ├── test_session_persistence.py  # SessionStore file persistence tests
 │   ├── test_context_truncation.py  # TPM-based context truncation tests
 │   ├── test_fallback_truncation.py  # Fallback provider truncation tests
+│   ├── test_key_pool_sorting.py  # Key pool sorting priority tests
 │   └── test_rate_limiter.py  # Rate limiter unit tests
 ├── app/                       # FastAPI web application
 │   ├── main.py                # FastAPI app factory, static file mount
@@ -343,13 +344,13 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 
 | Class | Description |
 |---|---|
-| `APIKeyPool` | Multi-key management with staircase cooldown (30s → 60s → 300s). Accepts `names: List[str]` (composite keys like `"provider/model"`). Selection prefers keys with lowest `consecutive_errors` among those not in cooldown. |
+| `APIKeyPool` | Multi-key management with staircase cooldown (30s → 60s → 300s). Accepts `names: List[str]` (composite keys like `"provider/model"`). Selection returns first available key in insertion order (primary first). `consecutive_errors` only affects cooldown duration. |
 
 **Key methods:**
 
 | Method | Description |
 |---|---|
-| `acquire_key()` | Returns best available key name (fewest errors, respects insertion order) |
+| `acquire_key()` | Returns first available key in insertion order (primary first); `consecutive_errors` only affects cooldown duration |
 | `report_rate_limited(name)` | Increments errors, applies staircase cooldown |
 | `report_success(name)` | Resets error count and cooldown |
 | `is_all_in_cooldown()` | Checks if all keys are in cooldown |
@@ -532,7 +533,7 @@ Defines `BaseStreamingHandler` and two concrete implementations for handling str
 | `ProviderConfig` | Provider entry: name, api_key, base_url, rpm_limit (default 100), tpm_limit (default 100000), models dict (model_name → model_params dict) |
 | `ProviderParams` | Resolved call params: api_key, base_url, model |
 | `resolve_model_ref()` | Splits `"provider/model"` string on first `/` into `(provider, model)` tuple |
-| `ProviderHealth` | Per-key health: consecutive errors, cooldown, pace level |
+| `ProviderHealth` | Per-key health: consecutive errors, cooldown |
 
 #### `fallback_provider.py`
 
@@ -791,6 +792,7 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 | `test_session_persistence.py` | Unit tests for `SessionStore` file persistence and deserialization |
 | `test_context_truncation.py` | Unit tests for TPM-based context truncation |
 | `test_fallback_truncation.py` | Unit tests for fallback provider truncation |
+| `test_key_pool_sorting.py` | Unit tests for key pool sorting priority (insertion order vs errors) |
 | `test_rate_limiter.py` | Unit tests for `SlidingWindowRateLimiter` |
 
 All tests use `pytest-asyncio` and are pure unit tests (mocked, no live LLM calls).
