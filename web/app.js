@@ -4,8 +4,13 @@
         let autoScrollEnabled = true;
         let activeContentStream = null; // Current assistant message content container
         const SESSION_KEY = 'engine_session_id';
+        let messageQueue = [];
+        let queueIdCounter = 0;
+        const MAX_VISIBLE_CARDS = 4;
+        const MESSAGE_TRUNCATE_LEN = 60;
 
         const messagesEl = document.getElementById('messages');
+        const queueContainerEl = document.getElementById('message-queue');
         const inputEl = document.getElementById('chat-input');
         const sendBtn = document.getElementById('send-btn');
         const newChatBtn = document.getElementById('new-chat-btn');
@@ -34,6 +39,7 @@
             if (agentState !== 'idle') return;
             localStorage.removeItem(SESSION_KEY);
             messagesEl.innerHTML = '<div class="empty-state">Send a message to start</div>';
+            clearMessageQueue();
         });
 
         messagesEl.addEventListener('scroll', () => {
@@ -75,6 +81,108 @@
             autoScroll();
         }
 
+        function createQueueCard(text) {
+            const id = ++queueIdCounter;
+            const card = document.createElement('div');
+            card.className = 'queue-card queue-card--waiting';
+            card.dataset.queueId = id;
+
+            const tag = document.createElement('span');
+            tag.className = 'queue-tag';
+            tag.textContent = 'queueing';
+
+            const content = document.createElement('span');
+            content.className = 'queue-text';
+            content.textContent = text.length > MESSAGE_TRUNCATE_LEN
+                ? text.substring(0, MESSAGE_TRUNCATE_LEN) + '...'
+                : text;
+
+            card.appendChild(tag);
+            card.appendChild(content);
+            queueContainerEl.appendChild(card);
+
+            const entry = { id, text, element: card };
+            messageQueue.push(entry);
+            updateQueueOverflow();
+            return entry;
+        }
+
+        function consumeFirstQueueCard() {
+            if (messageQueue.length === 0) return null;
+            const entry = messageQueue.shift();
+            entry.element.classList.remove('queue-card--waiting');
+            entry.element.classList.add('queue-card--slide-out');
+            entry.element.addEventListener('animationend', () => {
+                entry.element.remove();
+                updateQueueOverflow();
+            }, { once: true });
+            return entry;
+        }
+
+        function rejectQueueCard(entry) {
+            entry.element.classList.remove('queue-card--waiting');
+            entry.element.classList.add('queue-card--rejected');
+            const tag = entry.element.querySelector('.queue-tag');
+            if (tag) tag.textContent = 'failed';
+            setTimeout(() => {
+                entry.element.classList.add('queue-card--slide-out');
+                entry.element.addEventListener('animationend', () => {
+                    entry.element.remove();
+                    updateQueueOverflow();
+                }, { once: true });
+            }, 600);
+        }
+
+        function errorQueueCard(entry) {
+            entry.element.classList.remove('queue-card--waiting');
+            entry.element.classList.add('queue-card--error');
+            entry.element.querySelector('.queue-tag').textContent = 'error';
+            entry.element.querySelector('.queue-text').textContent = 'Failed to send';
+            setTimeout(() => {
+                entry.element.classList.add('queue-card--slide-out');
+                entry.element.addEventListener('animationend', () => {
+                    entry.element.remove();
+                    updateQueueOverflow();
+                }, { once: true });
+            }, 3000);
+        }
+
+        function updateQueueOverflow() {
+            const existing = queueContainerEl.querySelector('.queue-overflow');
+            if (existing) existing.remove();
+
+            const cards = queueContainerEl.querySelectorAll('.queue-card');
+            cards.forEach((card, i) => {
+                const hiddenCount = cards.length - MAX_VISIBLE_CARDS;
+                if (hiddenCount > 0 && i < hiddenCount) {
+                    card.style.display = 'none';
+                } else {
+                    card.style.display = '';
+                }
+            });
+
+            const hiddenCount = messageQueue.length - MAX_VISIBLE_CARDS;
+            if (hiddenCount > 0) {
+                const overflow = document.createElement('div');
+                overflow.className = 'queue-overflow';
+                overflow.textContent = `+${hiddenCount} more message${hiddenCount > 1 ? 's' : ''} in queue`;
+                const firstVisible = queueContainerEl.querySelector('.queue-card:not([style*="display: none"])');
+                if (firstVisible) {
+                    queueContainerEl.insertBefore(overflow, firstVisible);
+                } else {
+                    queueContainerEl.appendChild(overflow);
+                }
+            }
+        }
+
+        function clearMessageQueue() {
+            for (const entry of messageQueue) {
+                entry.element.remove();
+            }
+            messageQueue = [];
+            updateQueueOverflow();
+        }
+
         function truncateArgs(args) {
             if (!args) return '';
             const str = typeof args === 'string' ? args : JSON.stringify(args);
@@ -104,7 +212,7 @@
             }
         }
 
-        async function sendMidExecutionMessage(message) {
+        async function sendMidExecutionMessage(message, queueEntry) {
             try {
                 const response = await fetch('/api/chat/message', {
                     method: 'POST',
@@ -114,9 +222,11 @@
                 if (response.ok) {
                     return await response.json();
                 }
+                if (queueEntry) rejectQueueCard(queueEntry);
                 return null;
             } catch (e) {
                 console.error('Failed to send mid-execution message:', e);
+                if (queueEntry) errorQueueCard(queueEntry);
                 return null;
             }
         }
@@ -211,6 +321,7 @@
                             }
                         }
                     }
+                    clearMessageQueue();
                     break;
                 }
                 case 'error': {
@@ -226,9 +337,16 @@
                     errorEl.textContent = 'Error: ' + (data.message || 'Unknown error');
                     activeContentStream.appendChild(errorEl);
                     autoScroll();
+                    clearMessageQueue();
                     break;
                 }
                 case 'turn_start': {
+                    if (data.trigger === 'user_message') {
+                        const consumed = consumeFirstQueueCard();
+                        if (consumed) {
+                            appendUserMessage(consumed.text);
+                        }
+                    }
                     const { contentStream } = createAssistantMessage();
                     activeContentStream = contentStream;
                     if (agentState === 'waiting_for_children') {
@@ -351,8 +469,8 @@
             if (agentState === 'waiting_for_children' || agentState === 'agent_running') {
                 inputEl.value = '';
                 inputEl.style.height = 'auto';
-                appendUserMessage(message);
-                sendMidExecutionMessage(message);
+                const entry = createQueueCard(message);
+                sendMidExecutionMessage(message, entry);
                 inputEl.focus();
                 return;
             }
