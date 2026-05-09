@@ -82,6 +82,7 @@ class APIKeyPool:
         cooldown_ms = max(steps[idx], retry_after_ms or 0.0)
         health.cooldown_until = time.monotonic() + cooldown_ms / 1000.0
 
+        # [==================== LOG: control ====================]
         get_logger().warning(
             "RateControl",
             "Key cooldown | profile={} consecutive_errors={} cooldown_ms={}".format(
@@ -94,14 +95,17 @@ class APIKeyPool:
                 "cooldown_ms": cooldown_ms,
             },
         )
+        # [==================== END LOG ============================]
 
         if self.is_all_in_cooldown():
+            # [==================== LOG: control ====================]
             get_logger().error(
                 "RateControl",
                 "Key pool exhausted | all_profiles_in_cooldown",
                 event_type="key_pool_exhausted",
                 data={"pool_size": len(self._names)},
             )
+            # [==================== END LOG ============================]
 
     def report_success(self, profile_name: str) -> None:
         """Report a successful request for the given profile.
@@ -116,12 +120,14 @@ class APIKeyPool:
         health.cooldown_until = None
 
         if was_in_error:
+            # [==================== LOG: control ====================]
             get_logger().info(
                 "RateControl",
                 "Key recovered | profile={}".format(profile_name),
                 event_type="key_recovered",
                 data={"profile": profile_name},
             )
+            # [==================== END LOG ============================]
 
     def is_all_in_cooldown(self) -> bool:
         """Return True if all profiles are currently in cooldown."""

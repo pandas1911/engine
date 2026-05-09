@@ -143,6 +143,7 @@ class SlidingWindowRateLimiter:
             self._waiters.append((fut, estimated_tokens))
             self._ensure_scheduler_locked()
 
+            # [==================== LOG: control ====================]
             get_logger().warning(
                 "RateControl",
                 "Rate limit blocked | profile={}, rpm={}/{}, tpm={}/{}, waiters={}".format(
@@ -163,6 +164,7 @@ class SlidingWindowRateLimiter:
                     "waiters": len(self._waiters),
                 },
             )
+            # [==================== END LOG ============================]
 
         # Wait OUTSIDE the lock -- other acquire() calls can proceed
         timeout_seconds = self._window_seconds * 2  # 2 full window rotations
@@ -184,6 +186,7 @@ class SlidingWindowRateLimiter:
                 except ValueError:
                     pass
             if isinstance(sys.exc_info()[1], asyncio.TimeoutError):
+                # [==================== LOG: error ======================]
                 get_logger().error(
                     "RateControl",
                     "Rate limiter acquire timed out | profile={}, timeout={}s".format(
@@ -192,7 +195,33 @@ class SlidingWindowRateLimiter:
                     event_type="rate_limit_acquire_timeout",
                     data={"profile": self._profile_name, "timeout_seconds": timeout_seconds},
                 )
+                # [==================== END LOG ============================]
             raise
+
+    def _log_usage_recorded(self, tokens: int, reservation_id: Optional[int] = None, replaced: bool = False) -> None:
+        if replaced and reservation_id is not None:
+            message = "Rate limit usage recorded (replaced reservation) | profile={}, tokens={}, reservation_id={}, tpm={}/{}".format(
+                self._profile_name, tokens, reservation_id, self._current_tpm(), self._tpm_limit,
+            )
+            data = {
+                "profile": self._profile_name,
+                "tokens": tokens,
+                "reservation_id": reservation_id,
+                "tpm": self._current_tpm(),
+                "tpm_limit": self._tpm_limit,
+            }
+        else:
+            message = "Rate limit usage recorded | profile={}, tokens={}, tpm={}/{}".format(
+                self._profile_name, tokens, self._current_tpm(), self._tpm_limit,
+            )
+            data = {
+                "profile": self._profile_name,
+                "tokens": tokens,
+                "tpm": self._current_tpm(),
+                "tpm_limit": self._tpm_limit,
+            }
+
+        get_logger().info("RateControl", message, event_type="rate_limit_usage", data=data)
 
     async def record_usage(self, tokens: int, reservation_id: Optional[int] = None) -> None:
         """Record actual token usage after a request completes.
@@ -206,61 +235,20 @@ class SlidingWindowRateLimiter:
                     entry = self._tpm_entries[i]
                     if entry[2] == reservation_id:
                         self._tpm_entries[i] = (entry[0], tokens, None)
-                        get_logger().info(
-                            "RateControl",
-                            "Rate limit usage recorded (replaced reservation) | profile={}, tokens={}, reservation_id={}, tpm={}/{}".format(
-                                self._profile_name,
-                                tokens,
-                                reservation_id,
-                                self._current_tpm(),
-                                self._tpm_limit,
-                            ),
-                            event_type="rate_limit_usage",
-                            data={
-                                "profile": self._profile_name,
-                                "tokens": tokens,
-                                "reservation_id": reservation_id,
-                                "tpm": self._current_tpm(),
-                                "tpm_limit": self._tpm_limit,
-                            },
-                        )
+                        # [==================== LOG: control ====================]
+                        self._log_usage_recorded(tokens, reservation_id, replaced=True)
+                        # [==================== END LOG ============================]
                         break
                 else:
                     self._tpm_entries.append((time.monotonic(), tokens, None))
-                    get_logger().info(
-                        "RateControl",
-                        "Rate limit usage recorded | profile={}, tokens={}, tpm={}/{}".format(
-                            self._profile_name,
-                            tokens,
-                            self._current_tpm(),
-                            self._tpm_limit,
-                        ),
-                        event_type="rate_limit_usage",
-                        data={
-                            "profile": self._profile_name,
-                            "tokens": tokens,
-                            "tpm": self._current_tpm(),
-                            "tpm_limit": self._tpm_limit,
-                        },
-                    )
+                    # [==================== LOG: control ====================]
+                    self._log_usage_recorded(tokens)
+                    # [==================== END LOG ============================]
             else:
                 self._tpm_entries.append((time.monotonic(), tokens, None))
-                get_logger().info(
-                    "RateControl",
-                    "Rate limit usage recorded | profile={}, tokens={}, tpm={}/{}".format(
-                        self._profile_name,
-                        tokens,
-                        self._current_tpm(),
-                        self._tpm_limit,
-                    ),
-                    event_type="rate_limit_usage",
-                    data={
-                        "profile": self._profile_name,
-                        "tokens": tokens,
-                        "tpm": self._current_tpm(),
-                        "tpm_limit": self._tpm_limit,
-                    },
-                )
+                # [==================== LOG: control ====================]
+                self._log_usage_recorded(tokens)
+                # [==================== END LOG ============================]
     async def release_reserved(self, reservation_id: int) -> None:
         """Release a tentative TPM reservation.
 
@@ -270,6 +258,7 @@ class SlidingWindowRateLimiter:
             return
         async with self._lock:
             if self._remove_tpm_entry_by_rid(reservation_id):
+                # [==================== LOG: control ====================]
                 get_logger().info(
                     "RateControl",
                     "Rate limit reservation released | profile={}, reservation_id={}".format(
@@ -282,6 +271,7 @@ class SlidingWindowRateLimiter:
                         "reservation_id": reservation_id,
                     },
                 )
+                # [==================== END LOG ============================]
                 return
 
     def _ensure_scheduler_locked(self) -> None:
@@ -310,6 +300,7 @@ class SlidingWindowRateLimiter:
                             self._next_reservation_id += 1
                             self._tpm_entries.append((time.monotonic(), estimated_tokens, rid))
                         fut.set_result(rid)
+                        # [==================== LOG: control ====================]
                         get_logger().info(
                             "RateControl",
                             "Rate limit unblocked | profile={}, waiters_remaining={}".format(
@@ -322,12 +313,14 @@ class SlidingWindowRateLimiter:
                                 "waiters_remaining": len(self._waiters),
                             },
                         )
+                        # [==================== END LOG ============================]
                     continue  # May be able to wake more waiters
 
                 # Deadlock detection: window is empty but waiter can't be released
                 # This means estimated_tokens > tpm_limit (after Layer 1 cap, should never happen)
                 # Force-release as safety net
                 if not self._rpm_entries and not self._tpm_entries:
+                    # [==================== LOG: error ======================]
                     get_logger().error(
                         "RateControl",
                         "Rate limiter deadlock detected | profile={}, estimated_tokens={}, tpm_limit={}, waiters={}".format(
@@ -341,6 +334,7 @@ class SlidingWindowRateLimiter:
                             "waiters": len(self._waiters),
                         },
                     )
+                    # [==================== END LOG ============================]
                     self._waiters.popleft()
                     self._rpm_entries.append((time.monotonic(), 0))
                     if not fut.done():
@@ -395,6 +389,7 @@ class SlidingWindowRateLimiter:
         else:
             self._pace_level = PaceLevel.CRITICAL
         if self._pace_level != old_level:
+            # [==================== LOG: control ====================]
             get_logger().info(
                 "RateControl",
                 "pace_change | old={} new={} fraction={:.2f}".format(
@@ -409,6 +404,7 @@ class SlidingWindowRateLimiter:
                     "fraction": fraction,
                 },
             )
+            # [==================== END LOG ============================]
 
     async def _wait_if_needed(self) -> None:
         actual_delay_ms = 0.0
@@ -422,12 +418,14 @@ class SlidingWindowRateLimiter:
             self._last_call_timestamp = now + actual_delay_ms / 1000.0
         if actual_delay_ms > 0:
             await asyncio.sleep(actual_delay_ms / 1000.0)
+            # [==================== LOG: control ====================]
             get_logger().info(
                 "RateControl",
                 "pace_wait | delay_ms={:.1f} level={}".format(actual_delay_ms, self._pace_level.value),
                 event_type="pace_wait",
                 data={"delay_ms": actual_delay_ms, "pace_level": self._pace_level.value},
             )
+            # [==================== END LOG ============================]
 
     @property
     def rpm_limit(self) -> float:

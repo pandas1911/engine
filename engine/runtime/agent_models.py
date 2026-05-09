@@ -75,8 +75,12 @@ class Session:
         if self._on_message_added is not None:
             try:
                 self._on_message_added(msg)
-            except Exception:
-                pass
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(
+                    "Session callback failed | session_id=%s, role=%s, error=%s: %s",
+                    self.id, role, type(e).__name__, e,
+                )
 
     def get_messages(self) -> List[Dict]:
         """Get all messages as dictionaries."""

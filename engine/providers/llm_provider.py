@@ -118,6 +118,7 @@ class LLMProvider(BaseLLMProvider):
 
         logger = get_logger()
         msg_roles = [m.get("role", "?") for m in messages]
+        # [==================== LOG: llm ====================]
         logger.info(
             agent_label,
             "Sending LLM API request | model={}, message_count={}, has_tools={}, tool_count={}".format(
@@ -129,6 +130,7 @@ class LLMProvider(BaseLLMProvider):
                   "message_roles": msg_roles, "has_tools": bool(tools),
                   "tool_count": len(tools) if tools else 0}
         )
+        # [==================== END LOG ============================]
 
         last_error: Optional[Exception] = None
         _CUMULATIVE_TIMEOUT = 300.0
@@ -137,6 +139,7 @@ class LLMProvider(BaseLLMProvider):
         for attempt in range(1, self._retry_engine.max_attempts + 1):
             # Cumulative timeout guard
             if time.monotonic() - _retry_start > _CUMULATIVE_TIMEOUT:
+                # [==================== LOG: error ====================]
                 logger.error(
                     agent_label,
                     "LLM retry abandoned (cumulative timeout) | elapsed={:.1f}s, limit={}s, attempts={}".format(
@@ -151,6 +154,7 @@ class LLMProvider(BaseLLMProvider):
                         "model": self.model,
                     },
                 )
+                # [==================== END LOG ============================]
                 raise LLMProviderError(
                     TimeoutError("Cumulative retry timeout ({:.1f}s) exceeded".format(_CUMULATIVE_TIMEOUT))
                 ) from last_error
@@ -191,6 +195,7 @@ class LLMProvider(BaseLLMProvider):
 
                 if tool_calls:
                     for tc in tool_calls:
+                        # [==================== LOG: llm ====================]
                         logger.tool(
                             agent_label,
                             "LLM returned tool call | tool=\"{}\", call_id={}".format(tc.name, tc.call_id),
@@ -198,7 +203,9 @@ class LLMProvider(BaseLLMProvider):
                             tool_name=tc.name,
                             data={"call_id": tc.call_id, "arguments": tc.arguments}
                         )
+                        # [==================== END LOG ============================]
                 elif content.strip():
+                    # [==================== LOG: llm ====================]
                     logger.info(
                         agent_label,
                         "LLM returned text response | content_length={}, thinking_stripped={}".format(
@@ -210,6 +217,7 @@ class LLMProvider(BaseLLMProvider):
                               "thinking_stripped": self.strip_thinking,
                               "content": content}
                     )
+                    # [==================== END LOG ============================]
 
                 return LLMResponse(content=content, tool_calls=tool_calls, thinking=thinking_text)
 
@@ -228,6 +236,7 @@ class LLMProvider(BaseLLMProvider):
                     retry_after = self._retry_engine.extract_retry_after(e)
                     delay = self._retry_engine.compute_delay(attempt, retry_after)
 
+                    # [==================== LOG: error ====================]
                     logger.warning(
                         agent_label,
                         "LLM API call failed, retrying | attempt={}/{}, wait={:.2f}s, error_type={}, error=\"{}\"".format(
@@ -244,11 +253,13 @@ class LLMProvider(BaseLLMProvider):
                             "error_message": str(e)[:500],
                         }
                     )
+                    # [==================== END LOG ============================]
 
                     await asyncio.sleep(delay)
                     continue
 
         # All retries exhausted
+        # [==================== LOG: error ====================]
         logger.error(
             agent_label,
             "LLM API call failed after {} attempts | error_type={}, error=\"{}\"".format(
@@ -263,6 +274,7 @@ class LLMProvider(BaseLLMProvider):
                 "attempts": self._retry_engine.max_attempts,
             }
         )
+        # [==================== END LOG ============================]
         raise LLMProviderError(last_error) from last_error
 
     def _extract_usage(self, response) -> None:
@@ -323,6 +335,7 @@ class LLMProvider(BaseLLMProvider):
         params.update(self._model_params)
 
         logger = get_logger()
+        # [==================== LOG: llm ====================]
         logger.info(
             agent_label,
             "Streaming LLM API request | model={}, message_count={}, has_tools={}".format(
@@ -333,6 +346,7 @@ class LLMProvider(BaseLLMProvider):
             data={"model": self.model, "message_count": len(messages),
                   "has_tools": bool(tools)},
         )
+        # [==================== END LOG ============================]
 
         # One extractor per stream — stateful, matched to provider
         extractor = get_thinking_extractor(str(self.client.base_url), self._model_params)
