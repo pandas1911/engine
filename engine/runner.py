@@ -1,4 +1,4 @@
-"""Runner module — Infrastructure, SessionManager, and delegate() entry point."""
+"""Runner module — Infrastructure, Engine, and SessionManager."""
 
 import asyncio
 import importlib
@@ -156,11 +156,20 @@ class Infrastructure:
         ]
         return ToolPack(enabled_tools)
 
-    # --- Singleton access ---
-    _instance: Optional["Infrastructure"] = None
+
+class Engine:
+    """Unified entry point for the agent system.
+    Owns Infrastructure, provides delegate() and create_session().
+    Singleton via Engine.get().
+    """
+
+    _instance: Optional["Engine"] = None
+
+    def __init__(self, config: Optional[Config] = None):
+        self._infra = Infrastructure(config)
 
     @classmethod
-    def get(cls, config: Optional[Config] = None) -> "Infrastructure":
+    def get(cls, config: Optional[Config] = None) -> "Engine":
         if cls._instance is None:
             cls._instance = cls(config)
         return cls._instance
@@ -169,6 +178,53 @@ class Infrastructure:
     def reset(cls) -> None:
         """For testing — clear the singleton."""
         cls._instance = None
+
+    async def delegate(
+        self,
+        task_description: str,
+        system_prompt: Optional[str] = None,
+        tools: Optional[List] = None,
+        config: Optional[Config] = None,
+        session: Optional[Session] = None,
+        event_callback: Optional[Callable[[str, Any], None]] = None,
+    ) -> AgentResult:
+        """Delegate a task to the agent system."""
+        mgr = None
+        try:
+            mgr = self.create_session(
+                session=session,
+                event_callback=event_callback,
+                system_prompt=system_prompt,
+            )
+            return await mgr.start(task_description)
+        except Exception as e:
+            return AgentResult(
+                content="",
+                session=session,
+                success=False,
+                error=AgentError(
+                    category=ErrorCategory.INTERNAL_ERROR,
+                    message=str(e),
+                    exception_type=type(e).__name__,
+                ),
+            )
+        finally:
+            if mgr:
+                mgr.unregister()
+
+    def create_session(
+        self,
+        session: Optional[Session] = None,
+        event_callback: Optional[Callable[[str, Any], None]] = None,
+        system_prompt: Optional[str] = None,
+    ) -> "SessionManager":
+        """Create a SessionManager for a conversation."""
+        return SessionManager(
+            infra=self._infra,
+            session=session,
+            event_callback=event_callback,
+            system_prompt=system_prompt,
+        )
 
 
 class SessionManager:
@@ -312,47 +368,3 @@ class SessionManager:
 
     def unregister(self) -> None:
         _active_sessions.pop(self.session.id, None)
-
-    @staticmethod
-    def get_active(session_id: str) -> Optional["SessionManager"]:
-        return _active_sessions.get(session_id)
-
-    @staticmethod
-    def get_any_active() -> Optional["SessionManager"]:
-        return next(iter(_active_sessions.values())) if _active_sessions else None
-
-
-async def delegate(
-    task_description: str,
-    system_prompt: Optional[str] = None,
-    tools: Optional[List] = None,
-    config: Optional[Config] = None,
-    session: Optional[Session] = None,
-    event_callback: Optional[Callable[[str, Any], None]] = None,
-) -> AgentResult:
-    """Delegate a task to the agent system. Backward-compatible entry point."""
-    mgr = None
-    try:
-        infra = Infrastructure.get(config)
-
-        mgr = SessionManager(
-            infra=infra,
-            session=session,
-            event_callback=event_callback,
-            system_prompt=system_prompt,
-        )
-        return await mgr.start(task_description)
-    except Exception as e:
-        return AgentResult(
-            content="",
-            session=session,
-            success=False,
-            error=AgentError(
-                category=ErrorCategory.INTERNAL_ERROR,
-                message=str(e),
-                exception_type=type(e).__name__,
-            ),
-        )
-    finally:
-        if mgr:
-            mgr.unregister()
