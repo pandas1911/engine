@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from engine.session_store import SessionStore
-from engine.runner import Infrastructure, SessionManager
+from engine.runner import Engine
 from app._state import is_streaming, set_active_session, get_active_session, clear_active_session
 from engine.runtime.agent_models import Session
 
@@ -222,9 +222,8 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
                 }),
             })
 
-    infra = Infrastructure.get()
-    mgr = SessionManager(
-        infra=infra,
+    engine = Engine.get()
+    mgr = engine.create_session(
         session=session,
         event_callback=on_engine_event,
     )
