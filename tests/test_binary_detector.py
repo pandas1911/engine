@@ -5,7 +5,7 @@ import tempfile
 
 import pytest
 
-from engine.tools.builtin.binary import BinaryDetector, BINARY_EXTENSIONS
+from engine.tools.builtin._utils.binary import BinaryDetector, BINARY_EXTENSIONS
 
 
 class TestBinaryExtensionDetection:

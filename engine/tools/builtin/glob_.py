@@ -3,9 +3,10 @@
 import os
 from typing import Any, Dict
 
+from engine.config import get_config
 from engine.tools.base import Tool
-from engine.tools.builtin.search import get_search_engine, MAX_RESULTS
-from engine.tools.builtin.security import PathGuard
+from engine.tools.builtin._utils.search import get_search_engine, MAX_RESULTS
+from engine.tools.builtin._utils.security import PathGuard
 
 
 class GlobTool(Tool):
@@ -15,8 +16,7 @@ class GlobTool(Tool):
         "Supports glob patterns like '**/*.py' or 'src/**/*.ts'.\n\n"
         "Usage notes:\n"
         "- Pattern uses standard glob syntax (** for recursive, * for wildcard).\n"
-        "- Search scope defaults to current directory; specify path to override.\n"
-        "- Results are capped at 100 files.\n"
+        "- Search scope defaults to workspace directory; specify path to override.\n"
         "- This tool is read-only and does not modify any files.\n"
     )
     parameters = {
@@ -28,7 +28,7 @@ class GlobTool(Tool):
             },
             "path": {
                 "type": "string",
-                "description": "Directory to search in. Defaults to current working directory.",
+                "description": "Directory to search in. Defaults to workspace directory (configurable in engine.json).",
             },
         },
         "required": ["pattern"],
@@ -42,7 +42,7 @@ class GlobTool(Tool):
         if not pattern:
             return "Error: pattern is required"
 
-        path = arguments.get("path") or os.getcwd()
+        path = arguments.get("path") or str(get_config().get_workspace_path())
         path = os.path.abspath(path)
 
         # Security check

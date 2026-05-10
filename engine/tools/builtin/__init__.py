@@ -3,7 +3,7 @@
 from engine.tools.builtin.spawn import SpawnTool
 from engine.tools.builtin.read import ReadTool
 from engine.tools.builtin.grep import GrepTool
-from engine.tools.builtin.glob_tool import GlobTool
+from engine.tools.builtin.glob_ import GlobTool
 
 BUILTIN_TOOLS = [SpawnTool, ReadTool, GrepTool, GlobTool]
 

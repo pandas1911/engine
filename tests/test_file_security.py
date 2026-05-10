@@ -1,7 +1,7 @@
 """Tests for PathGuard — deny-list file access control."""
 
 import pytest
-from engine.tools.builtin.security import PathGuard, DEFAULT_DENIED_PATTERNS
+from engine.tools.builtin._utils.security import PathGuard, DEFAULT_DENIED_PATTERNS
 
 
 class TestPathGuardDefaults:

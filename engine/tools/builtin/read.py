@@ -4,8 +4,8 @@ import os
 from typing import Any, Dict
 
 from engine.tools.base import Tool
-from engine.tools.builtin.binary import BinaryDetector
-from engine.tools.builtin.security import PathGuard
+from engine.tools.builtin._utils.binary import BinaryDetector
+from engine.tools.builtin._utils.security import PathGuard
 
 
 class ReadTool(Tool):
@@ -16,11 +16,9 @@ class ReadTool(Tool):
         "For directories: lists entries with / suffix for subdirectories. "
         "Usage notes:\n"
         "- The filePath parameter accepts an absolute path.\n"
-        "- Default limit is 2000 lines, max output ~50KB.\n"
         "- Each line is prefixed with its line number (1-indexed).\n"
         "- Use offset to skip to later portions of a large file.\n"
         "- If the file is too large, the output will be truncated with guidance.\n"
-        "- Binary files (images, executables, archives) cannot be read.\n"
         "- This tool is read-only and does not modify any files.\n"
     )
     parameters = {

@@ -7,7 +7,7 @@ import stat
 import pytest
 
 from engine.tools.builtin.read import ReadTool
-from engine.tools.builtin.security import PathGuard
+from engine.tools.builtin._utils.security import PathGuard
 
 
 def _run(tool, args, context=None):

@@ -3,9 +3,10 @@
 import os
 from typing import Any, Dict
 
+from engine.config import get_config
 from engine.tools.base import Tool
-from engine.tools.builtin.search import MAX_RESULTS, get_search_engine
-from engine.tools.builtin.security import PathGuard
+from engine.tools.builtin._utils.search import MAX_RESULTS, get_search_engine
+from engine.tools.builtin._utils.security import PathGuard
 
 
 class GrepTool(Tool):
@@ -16,9 +17,8 @@ class GrepTool(Tool):
         "Returns matches in file:line:content format, up to 100 results.\n\n"
         "Usage notes:\n"
         "- Pattern is a regular expression (Python re syntax).\n"
-        "- Search scope defaults to current directory; specify path to override.\n"
+        "- Search scope defaults to workspace directory; specify path to override.\n"
         "- Use include to filter file types (e.g. '*.py', '*.{ts,tsx}').\n"
-        "- Results are capped at 100 matches.\n"
         "- This tool is read-only and does not modify any files.\n"
     )
     parameters = {
@@ -30,7 +30,7 @@ class GrepTool(Tool):
             },
             "path": {
                 "type": "string",
-                "description": "Directory or file to search in. Defaults to current working directory.",
+                "description": "Directory or file to search in. Defaults to workspace directory (configurable in engine.json).",
             },
             "include": {
                 "type": "string",
@@ -48,7 +48,7 @@ class GrepTool(Tool):
         if not pattern:
             return "Error: pattern is required"
 
-        path = arguments.get("path") or os.getcwd()
+        path = arguments.get("path") or str(get_config().get_workspace_path())
         path = os.path.abspath(path)
         include = arguments.get("include")
 
