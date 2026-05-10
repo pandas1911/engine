@@ -53,10 +53,12 @@ engine/
 │   │   │   ├── spawn.py       # SpawnTool — lazy-caches SubAgentManager per agent, passes root_streaming_handler through
 │   │   │   ├── read.py        # ReadTool — file/directory reading with pagination and binary detection
 │   │   │   ├── grep.py        # GrepTool — regex content search with ripgrep/Python fallback
-│   │   │   ├── glob_tool.py   # GlobTool — file pattern matching with ripgrep/Python fallback
-│   │   │   ├── security.py    # PathGuard — deny-list based file path security guard
-│   │   │   ├── binary.py      # BinaryDetector — extension and content-based binary file detection
-│   │   │   └── search.py      # SearchEngine ABC + RipgrepEngine + PythonEngine + get_search_engine()
+│   │   │   ├── glob_.py       # GlobTool — file pattern matching with ripgrep/Python fallback
+│   │   │   └── _utils/        # Helper modules shared by builtin tools
+│   │   │       ├── __init__.py
+│   │   │       ├── security.py    # PathGuard — deny-list based file path security guard
+│   │   │       ├── binary.py      # BinaryDetector — extension and content-based binary file detection
+│   │   │       └── search.py      # SearchEngine ABC + RipgrepEngine + PythonEngine + get_search_engine()
 │   │   └── custom/            # Auto-discovered custom tools (web search, web fetch)
 │   │       ├── __init__.py
 │   │       └── web_fetch.py   # URL content fetching with HTML→Markdown/Text conversion
@@ -782,9 +784,9 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 
 **Root-only tools:** `spawn` is filtered out for sub-agents by `ToolPack.get_schemas()` based on session depth. The other tools (`read`, `grep`, `glob`) are available to all agents.
 
-#### Supporting modules
+#### Supporting modules (`_utils/`)
 
-##### `security.py` — PathGuard
+##### `_utils/security.py` — PathGuard
 
 Deny-list based file path security guard. Used by `ReadTool`, `GrepTool`, and `GlobTool` to prevent access to sensitive files.
 
@@ -793,7 +795,7 @@ Deny-list based file path security guard. Used by `ReadTool`, `GrepTool`, and `G
 | `PathGuard` | Takes a `denied_patterns` list of glob patterns. Provides `is_path_allowed(path)` (returns bool) and `check_path(path)` (raises `PermissionError` on denied paths). |
 | `DEFAULT_DENIED_PATTERNS` | Module-level list of default deny patterns (e.g. `.env`, `.git/`, `*.key`, `*.pem`). |
 
-##### `binary.py` — BinaryDetector
+##### `_utils/binary.py` — BinaryDetector
 
 Extension and content-based binary file detection. Used by `ReadTool` to reject binary files.
 
@@ -802,7 +804,7 @@ Extension and content-based binary file detection. Used by `ReadTool` to reject 
 | `BinaryDetector` | Static utility class with `is_binary(path)`, `is_binary_extension(path)`, and `is_binary_content(data)` methods. |
 | `BINARY_EXTENSIONS` | Module-level `frozenset` of file extensions considered binary (e.g. `.pyc`, `.so`, `.png`, `.zip`). |
 
-##### `search.py` — SearchEngine Abstraction
+##### `_utils/search.py` — SearchEngine Abstraction
 
 Abstract base class and concrete implementations for file search operations. Used by `GrepTool` and `GlobTool` with automatic ripgrep detection and fallback.
 
@@ -861,7 +863,7 @@ Abstract base class and concrete implementations for file search operations. Use
 | `test_search_engine.py` | Unit tests for SearchEngine abstraction layer (PythonEngine + RipgrepEngine) |
 | `test_read_tool.py` | Unit tests for ReadTool (file/directory reading, pagination, truncation, binary/security rejection) |
 | `test_grep_tool.py` | Unit tests for GrepTool (regex search, include filter, XML output) |
-| `test_glob_tool.py` | Unit tests for GlobTool (file pattern matching, XML output) |
+| `test_glob_tool.py` | Unit tests for GlobTool (file pattern matching, XML output; imports from `glob_` module) |
 
 All tests use `pytest-asyncio` and are pure unit tests (mocked, no live LLM calls).
 
