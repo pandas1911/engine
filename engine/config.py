@@ -247,6 +247,7 @@ class ConfigLoader:
                 base_url=prov_data["base_url"],
                 rpm_limit=float(prov_data.get("rpm_limit", 100)),
                 tpm_limit=float(prov_data.get("tpm_limit", 100000)),
+                max_concurrent_requests=int(prov_data.get("max_concurrent_requests", 0)),
                 models=models_raw,
             )
 

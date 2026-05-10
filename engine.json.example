@@ -5,6 +5,7 @@
       "base_url": "https://your-primary-base-url/v1",
       "rpm_limit": 300,
       "tpm_limit": 100000,
+      "max_concurrent_requests": 3,
       "models": {
         "your-primary-model": {}
       }

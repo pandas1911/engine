@@ -135,12 +135,21 @@ class Infrastructure:
             max_attempts=config.llm_retry_max_attempts,
             base_delay=config.llm_retry_base_delay,
         )
+        # Build concurrency guards per provider
+        concurrency_guards: Dict[str, asyncio.Semaphore] = {}
+        for prov_name, prov_config in config.providers.items():
+            if prov_config.max_concurrent_requests > 0:
+                concurrency_guards[prov_name] = asyncio.Semaphore(
+                    prov_config.max_concurrent_requests
+                )
+
         ordered_providers = {k: self.providers[k] for k in ordered_keys}
         self.llm_provider = FallbackLLMProvider(
             providers=ordered_providers,
             key_pool=self.key_pool,
             rate_limiters=self.rate_limiters,
             retry_engine=self.retry_engine,
+            concurrency_guards=concurrency_guards,
         )
 
         # --- Build tools ---

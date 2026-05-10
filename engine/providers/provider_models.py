@@ -60,6 +60,7 @@ class ProviderConfig:
     base_url: str
     rpm_limit: float = 100
     tpm_limit: float = 100000
+    max_concurrent_requests: int = 0
     models: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 

@@ -306,6 +306,8 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 | `LaneStatus` | Data class for lane status queries |
 | `_LaneState` | Internal state per lane |
 
+Per-provider concurrency limiting adds a second safety dimension: when `max_concurrent_requests > 0` in a provider's config, an `asyncio.Semaphore` caps simultaneous in-flight LLM requests to that provider. This complements the lane-based concurrency (which limits sub-agent parallelism) with provider-level throttling.
+
 #### `rate_limit.py` — Sliding Window Rate Limiter (with Adaptive Pacing)
 
 | Class | Description |
@@ -539,7 +541,7 @@ Defines `BaseStreamingHandler` and two concrete implementations for handling str
 | `PaceLevel` | Enum: `HEALTHY`, `PRESSING`, `CRITICAL` |
 | `Lane` | Enum: `SUBAGENT` |
 | `ErrorClass` | Enum: `RETRYABLE`, `NON_RETRYABLE`, `RATE_LIMITED` |
-| `ProviderConfig` | Provider entry: name, api_key, base_url, rpm_limit (default 100), tpm_limit (default 100000), models dict (model_name → model_params dict) |
+| `ProviderConfig` | Provider entry: name, api_key, base_url, rpm_limit (default 100), tpm_limit (default 100000), max_concurrent_requests (default 0, 0=no limit), models dict (model_name → model_params dict) |
 | `ProviderParams` | Resolved call params: api_key, base_url, model |
 | `resolve_model_ref()` | Splits `"provider/model"` string on first `/` into `(provider, model)` tuple |
 | `ProviderHealth` | Per-key health: consecutive errors, cooldown |
@@ -548,7 +550,7 @@ Defines `BaseStreamingHandler` and two concrete implementations for handling str
 
 `FallbackLLMProvider` wraps multiple `LLMProvider` instances with automatic key rotation and sequential provider fallback.
 
-**Constructor:** `FallbackLLMProvider(providers: Dict[str, LLMProvider], key_pool: APIKeyPool, rate_limiters: Dict[str, SlidingWindowRateLimiter], retry_engine: RetryEngine)`
+**Constructor:** `FallbackLLMProvider(providers: Dict[str, LLMProvider], key_pool: APIKeyPool, rate_limiters: Dict[str, SlidingWindowRateLimiter], retry_engine: RetryEngine, concurrency_guards: Optional[Dict[str, asyncio.Semaphore]] = None)`
 
 Providers are ordered by the insertion order of the `providers` dict (primary first, then fallbacks). No weight-based selection — ordering is deterministic from config.
 
@@ -558,6 +560,7 @@ Providers are ordered by the insertion order of the `providers` dict (primary fi
 
 1. Acquire key from `APIKeyPool`
 2. Apply rate limiting with adaptive pacing (sliding window) — estimated_tokens is capped to prevent deadlock
+2.5. Apply per-provider concurrency guard (if configured) — limits simultaneous in-flight requests per provider via `asyncio.Semaphore`
 3. Execute chat request
 4. On success → record usage, report success, feed actual tokens back to estimator
 5. On rate limit → report rate limited, rotate key, retry
@@ -804,6 +807,7 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 | `test_key_pool_sorting.py` | Unit tests for key pool sorting priority (insertion order vs errors) |
 | `test_rate_limiter.py` | Unit tests for `SlidingWindowRateLimiter` |
 | `test_runner_infrastructure.py` | Unit tests for `Engine` singleton, `SessionManager`, and `MessageEvent` |
+| `test_concurrency_guard.py` | Unit tests for per-provider concurrency guard |
 
 All tests use `pytest-asyncio` and are pure unit tests (mocked, no live LLM calls).
 
