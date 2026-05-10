@@ -108,10 +108,12 @@ class TestGrepToolMissingParameter:
 class TestGrepToolDefaultPath:
     """Test default path behavior."""
 
-    def test_default_path_is_cwd(self, tmp_path, monkeypatch):
-        # Create files in tmp_path and cwd to tmp_path
+    def test_default_path_is_workspace(self, tmp_path, monkeypatch):
+        # Create files in tmp_path and set workspace to tmp_path
         (tmp_path / "unique_test_file.py").write_text("findme_default_path\n")
-        monkeypatch.chdir(tmp_path)
+        from engine.config import Config
+        config = Config(workspace=str(tmp_path))
+        monkeypatch.setattr("engine.tools.builtin.grep.get_config", lambda: config)
         result = run(GrepTool(), {"pattern": "findme_default_path"})
         assert "unique_test_file.py" in result
         assert "<summary>" in result

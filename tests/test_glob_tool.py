@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from engine.tools.builtin.glob_tool import GlobTool
+from engine.tools.builtin.glob_ import GlobTool
 
 
 async def _execute(tool, args):
@@ -58,7 +58,9 @@ class TestGlobToolBasic:
         assert "<summary>" in result
 
     def test_glob_default_path(self, glob_dir, monkeypatch):
-        """Test that default path is cwd."""
-        monkeypatch.chdir(glob_dir)
+        """Test that default path uses workspace when no path given."""
+        from engine.config import Config
+        config = Config(workspace=str(glob_dir))
+        monkeypatch.setattr("engine.tools.builtin.glob_.get_config", lambda: config)
         result = asyncio.run(_execute(GlobTool(), {"pattern": "*.md"}))
         assert "readme.md" in result
