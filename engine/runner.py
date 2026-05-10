@@ -155,6 +155,11 @@ class Infrastructure:
         # --- Build tools ---
         self.tool_pack = self._build_tool_pack(config)
 
+        # --- Build session store (workspace-based) ---
+        from engine.session_store import SessionStore
+        session_root = str(config.get_workspace_path() / "sessions")
+        self.session_store = SessionStore(root_dir=session_root)
+
     def _build_tool_pack(self, config: Config) -> ToolPack:
         custom_tools = _discover_custom_tools()
         builtin_tool_instances = [cls() for cls in BUILTIN_TOOLS]
@@ -288,8 +293,7 @@ class SessionManager:
         )
 
         # --- Session persistence ---
-        from engine.session_store import SessionStore
-        self.session_store = SessionStore(root_dir="sessions")
+        self.session_store = infra.session_store
         self.session_store.create_root(self.session.id)
         self.agent.session_store = self.session_store
         self.session_store.create_file("main", self.session)

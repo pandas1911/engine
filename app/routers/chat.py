@@ -8,15 +8,18 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from engine.session_store import SessionStore
 from engine.runner import Engine
 from app._state import is_streaming, set_active_session, get_active_session, clear_active_session
 from engine.runtime.agent_models import Session
 
 router = APIRouter()
-session_store = SessionStore()
 
 MAX_MESSAGES = 50
+
+
+def _get_session_store():
+    """Get the shared SessionStore from Engine's Infrastructure."""
+    return Engine.get()._infra.session_store
 
 
 class ChatRequest(BaseModel):
@@ -62,7 +65,7 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
 
     session = None
     if chat_req.session_id:
-        session = session_store.load(chat_req.session_id)
+        session = _get_session_store().load(chat_req.session_id)
     if session:
         _truncate_session(session)
     else:
@@ -265,7 +268,7 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
                 if delegate_task.done() and event_queue.empty():
                     break
     finally:
-        session_store.save(session)
+        _get_session_store().save(session)
         clear_active_session()
         mgr.unregister()
         if not delegate_task.done():
