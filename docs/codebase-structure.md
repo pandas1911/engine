@@ -10,7 +10,7 @@
 engine/
 ├── engine/                    # Core package
 │   ├── __init__.py            # Thin re-export layer (re-exports from runner.py and submodules)
-│   ├── runner.py              # delegate(), DEFAULT_SYSTEM_PROMPT, ToolPack construction, is_tool_enabled filtering
+│   ├── runner.py              # Engine (singleton), Infrastructure, SessionManager — main entry point for the agent system
 │   ├── config.py              # Configuration loading (engine.json)
 │   ├── prompts.py             # Centralized prompt definitions (pure leaf module, zero engine.* imports)
 │   ├── session_store.py       # Unified SessionStore — JSONL append persistence for root & child sessions
@@ -103,13 +103,13 @@ engine/
 
 ### 1. `engine/__init__.py` — Thin Re-export Layer
 
-A minimal re-export module (12 lines) that re-exports the public API from `runner.py` and submodules. All implementation logic was extracted to `runner.py`.
+A minimal re-export module (13 lines) that re-exports the public API from `runner.py` and submodules. All implementation logic was extracted to `runner.py`.
 
 **Re-exports:**
 
 | Symbol | Source |
 |---|---|
-| `delegate` | `engine.runner` |
+| `Engine` | `engine.runner` |
 | `DEFAULT_SYSTEM_PROMPT` | `engine.prompts` |
 | `_discover_custom_tools` | `engine.runner` |
 | `_refresh_custom_tools` | `engine.runner` |
@@ -120,41 +120,50 @@ A minimal re-export module (12 lines) that re-exports the public API from `runne
 
 ---
 
-### 2. `engine/runner.py` — Delegation Runner
+### 2. `engine/runner.py` — Engine, Infrastructure & SessionManager
 
-The main entry point containing `delegate()` and all startup orchestration logic. Extracted from the original `engine/__init__.py`.
+The main entry point containing the `Engine` class (singleton), `Infrastructure` (one-time setup), and `SessionManager` (per-conversation). Extracted from the original `engine/__init__.py`.
 
-**Key functions:**
+**Engine class (singleton via `Engine.get()`):**
+
+| Method | Description |
+|---|---|
+| `Engine.get(config?)` | Singleton access. Returns existing Engine instance or creates one with the given config. |
+| `Engine.reset()` | Clear singleton instance (for testing). |
+| `Engine.delegate(task_description, ...)` | Main async entry point. Calls `create_session()` then `mgr.start()`. Returns `AgentResult`. On exception, returns `AgentResult(success=False)`. Finally unregisters the session manager. |
+| `Engine.create_session(session?, event_callback?, system_prompt?)` | Factory method. Creates and returns a `SessionManager` for a conversation. |
+
+**Infrastructure class (plain, owned by Engine):**
+
+A plain class (no singleton methods) that holds all shared infrastructure: providers, rate limiters, key pool, retry engine, and tool pack. Created once by `Engine.__init__()`. All `SessionManager` instances share the same `Infrastructure` via the Engine that created them.
+
+**Module-level helpers:**
 
 | Function | Description |
 |---|---|
-| `delegate(task_description, system_prompt?, tools?, config?, session?)` | Main entry point. Creates a root agent session (or reuses an existing one if `session` is provided), initializes all infrastructure, and runs the agent loop. When `session` is provided, only refreshes the env block (date/timezone) in the existing system message. Returns `AgentResult`. |
 | `_discover_custom_tools()` | Auto-discovers `Tool` subclasses from `engine/tools/custom/*.py` using `importlib` + `inspect`. Results are cached. |
 | `_refresh_custom_tools()` | Clears the custom tools cache. |
-| `_refresh_env_block(session, time_provider)` | Refreshes the date/timezone `<env>` block in the session's first system message. Replaces existing block or appends if absent. |
 
-**Key constants:**
+**Startup flow (`Engine.get()` → `Engine.delegate()`):**
 
-- Prompt definitions have been extracted to `engine/prompts.py` (see Section 4).
+1. `Engine.get(config)` creates singleton on first call. `Engine.__init__()` creates `Infrastructure(config)`
+2. `Infrastructure.__init__()` loads config, builds providers, rate limiters, key pool, fallback provider, and tool pack
+3. `Engine.delegate()` calls `create_session()` which creates a `SessionManager` with the shared `Infrastructure`
+4. `SessionManager.__init__()` sets up session, system prompt (with env block), event queue, streaming handler, task registry, root `Agent`, and `SessionStore`
+5. `mgr.start(task_description)` registers agent in `AgentTaskRegistry`, runs the agent, waits for completion, returns `AgentResult`
+6. Error handling: exception → `AgentResult(success=False)`, finally → `mgr.unregister()`
 
-**Startup flow (`delegate()`):**
+**SessionManager class:**
 
-1. Load config via `get_config()` (auto-discovers `engine.json`)
-2. Create `TimeProvider`, inject timezone info into system prompt (or refresh env block if session is provided)
-3. Initialize logger with configured log directory
-4. Iterate `config.providers` dict — for each provider, create `SlidingWindowRateLimiter` (with optional pacing params); for each model under that provider, create an `LLMProvider` keyed by `"provider/model"`
-5. Build ordered key list from `config.primary` + `config.fallback`
-6. Create shared: `APIKeyPool` (with ordered composite key names), `RetryEngine`, `FallbackLLMProvider`
-7. Create `LaneConcurrencyQueue` (SUBAGENT lane only; owned by `SpawnTool`)
-8. Discover and merge custom tools
-9. Filter tools by `config.is_tool_enabled()` — unlisted tools default to enabled
-10. Conditionally add `SpawnTool` (if `"spawn"` is enabled)
-11. Merge built-in tools (`BUILTIN_TOOLS` from `engine/tools/builtin/`) with custom tools
-12. Filter tools by `config.is_tool_enabled()` — unlisted tools default to enabled
-13. Build `ToolPack` from enabled tools
-14. Create root `Agent` with `ToolPack`, register in `AgentTaskRegistry`
-15. Create `SessionStore`, call `create_root(session.id)`, create `main.jsonl` via `create_file()`, wire `session._on_message_added` callback for real-time persistence
-16. Run the agent, return `AgentResult`
+Per-conversation manager that creates and owns the root Agent. `get_active()` and `get_any_active()` have been removed. The module-level `_active_sessions` dict remains but is only used internally by `_register()` and `unregister()`.
+
+**Key methods:**
+
+| Method | Description |
+|---|---|
+| `start(message)` | Register agent, run agent loop, wait for completion, return `AgentResult` |
+| `interject(message)` | Insert a user message. WAITING → direct run, RUNNING → enqueue, COMPLETED/ERROR → rejected |
+| `unregister()` | Remove session from the module-level `_active_sessions` dict |
 
 ---
 
@@ -783,7 +792,7 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 
 | File | Description |
 |---|---|
-| `test_easy_task.py` | Tests `delegate()` with a structured city-comparison research prompt |
+| `test_easy_task.py` | Tests `Engine.get().delegate()` with a structured research prompt |
 | `test_state_machine.py` | Unit tests for `AgentStateMachine` transitions and `InvalidTransitionError` |
 | `test_per_child_wake.py` | Unit tests for per-child wake gate-check logic (Branch A/B/skip) |
 | `test_child_notification.py` | Unit tests for child notification formatting and handler invocation |
@@ -794,6 +803,7 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 | `test_fallback_truncation.py` | Unit tests for fallback provider truncation |
 | `test_key_pool_sorting.py` | Unit tests for key pool sorting priority (insertion order vs errors) |
 | `test_rate_limiter.py` | Unit tests for `SlidingWindowRateLimiter` |
+| `test_runner_infrastructure.py` | Unit tests for `Engine` singleton, `SessionManager`, and `MessageEvent` |
 
 All tests use `pytest-asyncio` and are pure unit tests (mocked, no live LLM calls).
 
@@ -874,7 +884,7 @@ The `on_engine_event()` callback maps internal engine events to SSE wire format:
 | `subagent_done` | `subagent_done` | Sub-agent completion (does NOT set `done_event`) |
 | `subagent_error` | `subagent_error` | Sub-agent error (does NOT set `done_event`) |
 
-Additionally, `agent_start` is emitted immediately when the SSE connection opens, before `delegate()` begins execution.
+Additionally, `agent_start` is emitted immediately when the SSE connection opens, before `Engine.delegate()` begins execution.
 
 **Session management:**
 
@@ -890,8 +900,8 @@ Additionally, `agent_start` is emitted immediately when the SSE connection opens
 User
   │
   ▼
-delegate() (engine/runner.py)
-   ├── Config loading (engine.json)
+Engine.delegate() (engine/runner.py)
+    ├── Engine.get() → singleton (first call: Infrastructure.__init__)
    ├── Provider initialization (providers dict → LLMProviders → primary+fallback ordering)
    ├── Lane queue setup (SUBAGENT only, owned by SpawnTool)
    ├── Tool discovery (custom tools auto-loaded)
