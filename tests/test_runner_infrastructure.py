@@ -1,11 +1,11 @@
-"""Tests for Infrastructure, SessionManager, and MessageEvent."""
+"""Tests for Engine, SessionManager, and MessageEvent."""
 
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 
 from engine.runtime.agent import MessageEvent
 from engine.runtime.agent_models import AgentState
-from engine.runner import Infrastructure, SessionManager, _active_sessions
+from engine.runner import Engine, SessionManager
 
 
 class TestMessageEvent:
@@ -18,28 +18,27 @@ class TestMessageEvent:
         assert event.content == ""
 
 
-class TestInfrastructure:
+class TestEngine:
     def setup_method(self):
-        Infrastructure.reset()
+        Engine.reset()
 
-    def test_infrastructure_singleton(self):
-        with patch.object(Infrastructure, "__init__", lambda self, config=None: None):
-            i1 = Infrastructure.get()
-            i2 = Infrastructure.get()
-            assert i1 is i2
+    def test_engine_singleton(self):
+        with patch.object(Engine, "__init__", lambda self, config=None: None):
+            e1 = Engine.get()
+            e2 = Engine.get()
+            assert e1 is e2
 
-    def test_infrastructure_reset(self):
-        with patch.object(Infrastructure, "__init__", lambda self, config=None: None):
-            i1 = Infrastructure.get()
-            Infrastructure.reset()
-            i2 = Infrastructure.get()
-            assert i1 is not i2
+    def test_engine_reset(self):
+        with patch.object(Engine, "__init__", lambda self, config=None: None):
+            e1 = Engine.get()
+            Engine.reset()
+            e2 = Engine.get()
+            assert e1 is not e2
 
 
 class TestSessionManagerInterject:
     def _make_mgr(self, agent_state):
-        with patch("engine.runner.Infrastructure.get"), \
-             patch("engine.session_store.SessionStore"), \
+        with patch("engine.session_store.SessionStore"), \
              patch("engine.runner.Agent") as MockAgent:
             mock_agent = MagicMock()
             mock_agent.state = agent_state
