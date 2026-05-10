@@ -50,7 +50,13 @@ engine/
 │   │   ├── pack.py            # ToolPack — immutable view over ToolRegistry with depth-aware schema filtering
 │   │   ├── builtin/           # Built-in tools
 │   │   │   ├── __init__.py    # BUILTIN_TOOLS list, re-exports
-│   │   │   └── spawn.py       # SpawnTool — lazy-caches SubAgentManager per agent, passes root_streaming_handler through
+│   │   │   ├── spawn.py       # SpawnTool — lazy-caches SubAgentManager per agent, passes root_streaming_handler through
+│   │   │   ├── read.py        # ReadTool — file/directory reading with pagination and binary detection
+│   │   │   ├── grep.py        # GrepTool — regex content search with ripgrep/Python fallback
+│   │   │   ├── glob_tool.py   # GlobTool — file pattern matching with ripgrep/Python fallback
+│   │   │   ├── security.py    # PathGuard — deny-list based file path security guard
+│   │   │   ├── binary.py      # BinaryDetector — extension and content-based binary file detection
+│   │   │   └── search.py      # SearchEngine ABC + RipgrepEngine + PythonEngine + get_search_engine()
 │   │   └── custom/            # Auto-discovered custom tools (web search, web fetch)
 │   │       ├── __init__.py
 │   │       └── web_fetch.py   # URL content fetching with HTML→Markdown/Text conversion
@@ -68,7 +74,13 @@ engine/
 │   ├── test_context_truncation.py  # TPM-based context truncation tests
 │   ├── test_fallback_truncation.py  # Fallback provider truncation tests
 │   ├── test_key_pool_sorting.py  # Key pool sorting priority tests
-│   └── test_rate_limiter.py  # Rate limiter unit tests
+│   ├── test_rate_limiter.py  # Rate limiter unit tests
+│   ├── test_file_security.py      # PathGuard deny-list unit tests
+│   ├── test_binary_detector.py    # BinaryDetector extension/content detection tests
+│   ├── test_search_engine.py      # SearchEngine abstraction layer tests
+│   ├── test_read_tool.py          # ReadTool file/directory reading tests
+│   ├── test_grep_tool.py          # GrepTool content search tests
+│   ├── test_glob_tool.py          # GlobTool file pattern matching tests
 ├── app/                       # FastAPI web application
 │   ├── main.py                # FastAPI app factory, static file mount
 │   ├── _state.py              # Global streaming lock (single-request enforcement)
@@ -202,6 +214,7 @@ Loads runtime configuration from `engine.json`.
 | `cooldown_max_ms` | `300000.0` | Maximum key cooldown |
 | `user_timezone` | `None` | Timezone override (env var `USER_TIMEZONE` takes precedence) |
 | `tools` | `{}` | `Dict[str, bool]` — tool enable/disable mapping. Unlisted tools default to `True` (enabled). Use `config.is_tool_enabled(name)` to check. |
+| `file_permissions` | `{}` | `Dict[str, Any]` — file tool security configuration. Contains `denied_patterns` list for PathGuard. |
 
 **Note:** Sub-agent nesting depth is fixed at depth=1 (leaf workers only). Enforced at architecture level in `SpawnTool` and `SubAgentManager.spawn()`, not via config.
 
@@ -763,8 +776,43 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 | Class | Name | Description |
 |---|---|---|
 | `SpawnTool` | `spawn` | Creates child agents via `SubAgentManager`. Lazy-creates manager per agent on first `execute()` call using `asyncio.Lock`. Owns the `LaneConcurrencyQueue` for SUBAGENT concurrency. Parameters: `task` (required), `label` (optional). |
+| `ReadTool` | `read` | Reads file contents with line numbers and pagination, or lists directory entries. Uses `PathGuard` for security and `BinaryDetector` for binary rejection. Parameters: `path` (required), `offset`/`limit` (optional pagination). |
+| `GrepTool` | `grep` | Searches file contents for regex patterns. Uses `SearchEngine` with ripgrep auto-fallback. Supports include glob filtering. Parameters: `pattern` (required), `include` (optional glob), `output_mode` (optional). |
+| `GlobTool` | `glob` | Finds files matching glob patterns. Uses `SearchEngine` with ripgrep auto-fallback. Parameters: `pattern` (required). |
 
-**Root-only tools:** `spawn` is the only built-in tool. It is filtered out for sub-agents by `ToolPack.get_schemas()` based on session depth.
+**Root-only tools:** `spawn` is filtered out for sub-agents by `ToolPack.get_schemas()` based on session depth. The other tools (`read`, `grep`, `glob`) are available to all agents.
+
+#### Supporting modules
+
+##### `security.py` — PathGuard
+
+Deny-list based file path security guard. Used by `ReadTool`, `GrepTool`, and `GlobTool` to prevent access to sensitive files.
+
+| Component | Description |
+|---|---|
+| `PathGuard` | Takes a `denied_patterns` list of glob patterns. Provides `is_path_allowed(path)` (returns bool) and `check_path(path)` (raises `PermissionError` on denied paths). |
+| `DEFAULT_DENIED_PATTERNS` | Module-level list of default deny patterns (e.g. `.env`, `.git/`, `*.key`, `*.pem`). |
+
+##### `binary.py` — BinaryDetector
+
+Extension and content-based binary file detection. Used by `ReadTool` to reject binary files.
+
+| Component | Description |
+|---|---|
+| `BinaryDetector` | Static utility class with `is_binary(path)`, `is_binary_extension(path)`, and `is_binary_content(data)` methods. |
+| `BINARY_EXTENSIONS` | Module-level `frozenset` of file extensions considered binary (e.g. `.pyc`, `.so`, `.png`, `.zip`). |
+
+##### `search.py` — SearchEngine Abstraction
+
+Abstract base class and concrete implementations for file search operations. Used by `GrepTool` and `GlobTool` with automatic ripgrep detection and fallback.
+
+| Component | Description |
+|---|---|
+| `SearchEngine` | ABC with abstract `search()` method. Defines the interface for file search backends. |
+| `RipgrepEngine` | Concrete implementation using `ripgrep` (`rg`) subprocess. Requires `rg` on PATH. |
+| `PythonEngine` | Pure-Python fallback using `pathlib` + `re`. Used when ripgrep is not available. |
+| `SearchResult` | Dataclass for individual search results (file path, line number, matched text). |
+| `get_search_engine()` | Factory function that returns `RipgrepEngine` if `rg` is available, otherwise `PythonEngine`. |
 
 ---
 
@@ -808,6 +856,12 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 | `test_rate_limiter.py` | Unit tests for `SlidingWindowRateLimiter` |
 | `test_runner_infrastructure.py` | Unit tests for `Engine` singleton, `SessionManager`, and `MessageEvent` |
 | `test_concurrency_guard.py` | Unit tests for per-provider concurrency guard |
+| `test_file_security.py` | Unit tests for PathGuard deny-list access control |
+| `test_binary_detector.py` | Unit tests for BinaryDetector extension and content detection |
+| `test_search_engine.py` | Unit tests for SearchEngine abstraction layer (PythonEngine + RipgrepEngine) |
+| `test_read_tool.py` | Unit tests for ReadTool (file/directory reading, pagination, truncation, binary/security rejection) |
+| `test_grep_tool.py` | Unit tests for GrepTool (regex search, include filter, XML output) |
+| `test_glob_tool.py` | Unit tests for GlobTool (file pattern matching, XML output) |
 
 All tests use `pytest-asyncio` and are pure unit tests (mocked, no live LLM calls).
 

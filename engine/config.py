@@ -1,7 +1,7 @@
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from engine.providers.provider_models import ProviderConfig, resolve_model_ref
 
@@ -63,6 +63,9 @@ class Config:
 
     # Tool enable/disable configuration
     tools: Dict[str, bool] = field(default_factory=dict)
+
+    # File tool security configuration
+    file_permissions: Dict[str, Any] = field(default_factory=dict)
 
     def is_tool_enabled(self, tool_name: str) -> bool:
         """Check if a tool is enabled. Unlisted tools default to enabled."""
@@ -163,6 +166,7 @@ class ConfigLoader:
             "cooldown_max_ms",
             "user_timezone",
             "tools",
+            "file_permissions",
         }
 
         kwargs = {k: v for k, v in data.items() if k in known_fields}
