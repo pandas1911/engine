@@ -112,6 +112,7 @@ class SubAgentManager:
         """
         config = get_config()
         if parent_session.depth >= 1:
+            # [===================== LOG: error ======================]
             logger = get_logger()
             logger.error(
                 self._parent_label,
@@ -122,6 +123,7 @@ class SubAgentManager:
                 event_type="spawn_depth_limit",
                 data={"current_depth": parent_session.depth}
             )
+            # [====================== END LOG =======================]
             return "Sub-agents cannot spawn further children. Please complete your current task."
 
         # Global concurrency gate — acquire BEFORE register
@@ -136,6 +138,7 @@ class SubAgentManager:
                 status = self._lane_queue.get_status().get(Lane.SUBAGENT)
                 active = status.active if status else "?"
                 max_conc = status.max_concurrent if status else "?"
+                # [===================== LOG: error ======================]
                 logger = get_logger()
                 logger.error(
                     self._parent_label,
@@ -152,6 +155,7 @@ class SubAgentManager:
                         "label": label,
                     }
                 )
+                # [====================== END LOG =======================]
                 return get_concurrency_timeout_rejection(
                     task_desc=task_desc,
                     label=label,
@@ -177,6 +181,7 @@ class SubAgentManager:
         display_name = "Sub-{}".format(child_index)
         llm_label = label
 
+        # [=================== LOG: lifecycle ====================]
         logger = get_logger()
         logger.info(
             self._parent_label,
@@ -192,6 +197,7 @@ class SubAgentManager:
                 "task_description": task_desc, "llm_label": llm_label,
             }
         )
+        # [==================== END LOG ==========================]
 
         system_prompt = get_subagent_system_prompt(
             parent_label=parent_label,
@@ -228,6 +234,7 @@ class SubAgentManager:
                 task_id=task_id,
             )
             # Emit subagent_start event
+            # [=================== EMIT: subagent ====================]
             start_part_id = self._root_streaming_handler._next_part_id()
             self._root_streaming_handler.emit("subagent_start", {
                 "part_id": start_part_id,
@@ -236,6 +243,7 @@ class SubAgentManager:
                 "description": task_desc,
                 "parent_task_id": self._agent_task_id,
             })
+            # [====================== END EMIT =======================]
 
         from engine.runtime.agent import Agent
 
@@ -306,6 +314,7 @@ class SubAgentManager:
             display_name: Display name for the child agent.
         """
         try:
+            # [=================== LOG: lifecycle ====================]
             logger = get_logger()
             logger.info(
                 display_name or "Sub",
@@ -314,11 +323,13 @@ class SubAgentManager:
                 event_type="child_run_start",
                 data={"task_description": task_desc}
             )
+            # [==================== END LOG ==========================]
             await agent.run(task_desc)
         except Exception as e:
             # Safety net — agent.run() should catch all exceptions internally via _abort()
             # If we reach here, _abort() or run() has a bug
             await agent.abort(e)
+            # [===================== LOG: error ======================]
             logger = get_logger()
             logger.error(
                 display_name or "Sub",
@@ -328,16 +339,20 @@ class SubAgentManager:
                 event_type="child_run_unhandled",
                 data={"error_type": type(e).__name__, "error_message": str(e)},
             )
+            # [====================== END LOG =======================]
+            # [=================== EMIT: subagent ====================]
             if self._root_streaming_handler is not None:
                 self._root_streaming_handler.emit("subagent_error", {
                     "task_id": task_id,
                     "message": str(agent._final_result or "Unknown error"),
                 })
+            # [====================== END EMIT =======================]
             return
 
         # Log based on final state (registry.complete handled internally by agent)
         state = agent.state
         if state == AgentState.COMPLETED:
+            # [=================== LOG: lifecycle ====================]
             logger = get_logger()
             logger.info(
                 display_name or "Sub",
@@ -348,7 +363,9 @@ class SubAgentManager:
                 data={"result_length": len(agent.result) if agent.result else 0,
                       "result": agent.result or ""},
             )
+            # [==================== END LOG ==========================]
         elif state == AgentState.ERROR:
+            # [===================== LOG: error ======================]
             logger = get_logger()
             logger.error(
                 display_name or "Sub",
@@ -357,7 +374,9 @@ class SubAgentManager:
                 event_type="child_run_abort",
                 data={"error_result": agent._final_result},
             )
+            # [====================== END LOG =======================]
         elif state == AgentState.WAITING_FOR_CHILDREN:
+            # [=================== LOG: lifecycle ====================]
             logger = get_logger()
             logger.info(
                 display_name or "Sub",
@@ -365,7 +384,9 @@ class SubAgentManager:
                 task_id=task_id, state=state.value, depth=depth,
                 event_type="child_run_waiting",
             )
+            # [==================== END LOG ==========================]
         else:
+            # [=================== LOG: lifecycle ====================]
             logger = get_logger()
             logger.info(
                 display_name or "Sub",
@@ -374,7 +395,9 @@ class SubAgentManager:
                 event_type="child_run_unexpected_state",
                 data={"state": state.value},
             )
+            # [==================== END LOG ==========================]
 
+        # [=================== EMIT: subagent ====================]
         if self._root_streaming_handler is not None:
             if state == AgentState.COMPLETED:
                 self._root_streaming_handler.emit("subagent_done", {
@@ -385,6 +408,7 @@ class SubAgentManager:
                     "task_id": task_id,
                     "message": str(agent._final_result or "Unknown error"),
                 })
+        # [====================== END EMIT =======================]
 
     # ------------------------------------------------------------------
     # _on_child_complete() — migrated from Registry.complete() (registry.py lines 167-243)
@@ -412,6 +436,7 @@ class SubAgentManager:
 
         parent_state = self._drainable.state
 
+        # [=================== LOG: lifecycle ====================]
         get_logger().info(
             getattr(child_task.agent, "label", None) or "Child",
             "Child completed, notifying parent | task_id={}, parent_task_id={}, branch={}, parent_state={}".format(
@@ -427,6 +452,7 @@ class SubAgentManager:
                 "child_status": notification.status,
             },
         )
+        # [==================== END LOG ==========================]
 
         # [Branch A] Parent waiting for children → direct resume
         if parent_state == AgentState.WAITING_FOR_CHILDREN:

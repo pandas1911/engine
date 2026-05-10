@@ -1,17 +1,18 @@
-"""Runner module — extracted from engine/__init__.py. See engine/__init__.py for re-exports."""
+"""Runner module — Infrastructure, Engine, and SessionManager."""
 
+import asyncio
 import importlib
 import inspect
 import logging
 import re
 import uuid
 from pathlib import Path
-from typing import Any, AsyncGenerator, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from engine.runtime.agent import Agent
+from engine.runtime.agent import Agent, MessageEvent
 from engine.config import Config, get_config
 from engine.providers.llm_provider import LLMProvider
-from engine.logging import init_logger, stop_logger
+from engine.logging import init_logger
 from engine.runtime.agent_models import AgentError, AgentResult, AgentState, ErrorCategory, Session
 from engine.runtime.task_registry import AgentTaskRegistry
 from engine.tools.base import Tool
@@ -79,72 +80,26 @@ _ENV_BLOCK_PATTERN = re.compile(
     re.DOTALL,
 )
 
-
-def _refresh_env_block(session: Session, time_provider: TimeProvider) -> None:
-    system_msg = None
-    for m in session.messages:
-        if m.role == "system":
-            system_msg = m
-            break
-
-    if system_msg is None:
-        return
-
-    fresh_block = time_provider.format_system_env_block()
-    if _ENV_BLOCK_PATTERN.search(system_msg.content):
-        system_msg.content = _ENV_BLOCK_PATTERN.sub(fresh_block, system_msg.content)
-    else:
-        system_msg.content = f"{system_msg.content}\n\n{fresh_block}"
+_active_sessions: Dict[str, "SessionManager"] = {}
 
 
-async def delegate(
-    task_description: str,
-    system_prompt: Optional[str] = None,
-    tools: Optional[List] = None,
-    config: Optional[Config] = None,
-    session: Optional[Session] = None,
-    event_callback: Optional[Callable[[str, Any], None]] = None,
-) -> AgentResult:
-    """Delegate a task to the agent system."""
-    _provided_session = session is not None
-    if session is None:
-        session = Session(id=f"root_{uuid.uuid4().hex[:8]}", depth=0)
+class Infrastructure:
+    """One-time infrastructure. Holds providers, rate limiters, tools, etc.
+    Created once at server startup (or lazily on first delegate() call).
+    All SessionManagers share the same Infrastructure instance.
+    """
 
-    try:
+    def __init__(self, config: Optional[Config] = None):
         if config is None:
             config = get_config()
-
-        time_provider = TimeProvider(timezone_override=config.user_timezone)
-
-        if _provided_session:
-            if system_prompt is not None:
-                _logger.warning("Both 'session' and 'system_prompt' provided; 'system_prompt' is ignored when 'session' is provided.")
-            has_system = any(m.role == "system" for m in session.messages)
-            if has_system:
-                _refresh_env_block(session, time_provider)
-            else:
-                base_system_prompt = build_root_system_prompt(
-                    include_spawn=config.is_tool_enabled("spawn")
-                )
-                env_block = time_provider.format_system_env_block()
-                full_system_prompt = f"{base_system_prompt}\n\n{env_block}"
-                session.add_message("system", full_system_prompt)
-        else:
-            if system_prompt:
-                base_system_prompt = system_prompt
-            else:
-                base_system_prompt = build_root_system_prompt(
-                    include_spawn=config.is_tool_enabled("spawn")
-                )
-            env_block = time_provider.format_system_env_block()
-            full_system_prompt = f"{base_system_prompt}\n\n{env_block}"
-            session.add_message("system", full_system_prompt)
+        self.config = config
+        self.time_provider = TimeProvider(timezone_override=config.user_timezone)
 
         init_logger(log_dir=config.log_dir)
 
-        # Build LLMProvider instances — one per provider/model combination
-        providers = {}       # composite_key "provider/model" → LLMProvider
-        rate_limiters = {}   # provider_name → SlidingWindowRateLimiter
+        # --- Build providers ---
+        self.providers: Dict[str, LLMProvider] = {}
+        self.rate_limiters: Dict[str, SlidingWindowRateLimiter] = {}
 
         for prov_name, prov_config in config.providers.items():
             limiter = None
@@ -156,11 +111,11 @@ async def delegate(
                     pacing_enabled=config.pacing_enabled,
                     min_interval_ms=config.pacing_min_interval_ms,
                 )
-            rate_limiters[prov_name] = limiter
+            self.rate_limiters[prov_name] = limiter
 
             for model_name, model_params in prov_config.models.items():
                 composite_key = f"{prov_name}/{model_name}"
-                providers[composite_key] = LLMProvider(
+                self.providers[composite_key] = LLMProvider(
                     provider_params=ProviderParams(
                         api_key=prov_config.api_key,
                         base_url=prov_config.base_url,
@@ -170,96 +125,246 @@ async def delegate(
                     model_params=model_params if model_params else None,
                 )
 
-        # Build ordered provider list from primary + fallback
         ordered_keys = [config.primary] + config.fallback
-
-        key_pool = APIKeyPool(
+        self.key_pool = APIKeyPool(
             ordered_keys,
             cooldown_initial_ms=config.cooldown_initial_ms,
             cooldown_max_ms=config.cooldown_max_ms,
         )
-
-        shared_retry_engine = RetryEngine(
+        self.retry_engine = RetryEngine(
             max_attempts=config.llm_retry_max_attempts,
             base_delay=config.llm_retry_base_delay,
         )
-
-        ordered_providers = {k: providers[k] for k in ordered_keys}
-
-        llm_provider = FallbackLLMProvider(
+        ordered_providers = {k: self.providers[k] for k in ordered_keys}
+        self.llm_provider = FallbackLLMProvider(
             providers=ordered_providers,
-            key_pool=key_pool,
-            rate_limiters=rate_limiters,
-            retry_engine=shared_retry_engine,
+            key_pool=self.key_pool,
+            rate_limiters=self.rate_limiters,
+            retry_engine=self.retry_engine,
         )
 
-        task_registry = AgentTaskRegistry()
+        # --- Build tools ---
+        self.tool_pack = self._build_tool_pack(config)
 
+    def _build_tool_pack(self, config: Config) -> ToolPack:
         custom_tools = _discover_custom_tools()
         builtin_tool_instances = [cls() for cls in BUILTIN_TOOLS]
-
-        all_tool_instances = builtin_tool_instances + custom_tools + (tools or [])
-
+        all_tool_instances = builtin_tool_instances + custom_tools
         enabled_tools = [
             t for t in all_tool_instances
             if config.is_tool_enabled(t.name)
         ]
+        return ToolPack(enabled_tools)
 
-        tool_pack = ToolPack(enabled_tools)
 
-        streaming_handler = SSEStreamingHandler(event_callback) if event_callback else None
+class Engine:
+    """Unified entry point for the agent system.
+    Owns Infrastructure, provides delegate() and create_session().
+    Singleton via Engine.get().
+    """
 
-        # --- Create SessionStore for this root conversation ---
-        from engine.session_store import SessionStore
-        session_store = SessionStore(root_dir="sessions")
-        session_store.create_root(session.id)
+    _instance: Optional["Engine"] = None
 
-        agent = Agent(
+    def __init__(self, config: Optional[Config] = None):
+        self._infra = Infrastructure(config)
+
+    @classmethod
+    def get(cls, config: Optional[Config] = None) -> "Engine":
+        if cls._instance is None:
+            cls._instance = cls(config)
+        return cls._instance
+
+    @classmethod
+    def reset(cls) -> None:
+        """For testing — clear the singleton."""
+        cls._instance = None
+
+    async def delegate(
+        self,
+        task_description: str,
+        system_prompt: Optional[str] = None,
+        tools: Optional[List] = None,
+        config: Optional[Config] = None,
+        session: Optional[Session] = None,
+        event_callback: Optional[Callable[[str, Any], None]] = None,
+    ) -> AgentResult:
+        """Delegate a task to the agent system."""
+        mgr = None
+        try:
+            mgr = self.create_session(
+                session=session,
+                event_callback=event_callback,
+                system_prompt=system_prompt,
+            )
+            return await mgr.start(task_description)
+        except Exception as e:
+            return AgentResult(
+                content="",
+                session=session,
+                success=False,
+                error=AgentError(
+                    category=ErrorCategory.INTERNAL_ERROR,
+                    message=str(e),
+                    exception_type=type(e).__name__,
+                ),
+            )
+        finally:
+            if mgr:
+                mgr.unregister()
+
+    def create_session(
+        self,
+        session: Optional[Session] = None,
+        event_callback: Optional[Callable[[str, Any], None]] = None,
+        system_prompt: Optional[str] = None,
+    ) -> "SessionManager":
+        """Create a SessionManager for a conversation."""
+        return SessionManager(
+            infra=self._infra,
             session=session,
-            config=config,
-            llm_provider=llm_provider,
-            task_registry=task_registry,
-            tool_pack=tool_pack,
-            streaming_handler=streaming_handler,
+            event_callback=event_callback,
+            system_prompt=system_prompt,
         )
 
-        # Attach SessionStore so builtin tools can pass it to SubAgentManager
-        agent.session_store = session_store
 
-        # Wire real-time persistence: write header, then append each message
-        session_store.create_file("main", session)
-        session._on_message_added = lambda msg: session_store.append_line("main", msg)
+class SessionManager:
+    """Per-conversation manager. Creates and owns the root Agent.
+    Core logic is ~10 lines:
+    - start(): run initial message, wait for completion
+    - interject(): check state -> direct run (WAITING) or queue (RUNNING)
+    """
 
-        await task_registry.register(
-            task_id=agent.task_id,
-            session_id=session.id,
+    def __init__(
+        self,
+        infra: "Infrastructure",
+        session: Optional[Session] = None,
+        event_callback: Optional[Callable[[str, Any], None]] = None,
+        system_prompt: Optional[str] = None,
+    ):
+        self.infra = infra
+        self.event_callback = event_callback
+
+        # --- Session setup ---
+        self._provided_session = session is not None
+        if session is None:
+            session = Session(id=f"root_{uuid.uuid4().hex[:8]}", depth=0)
+        self.session = session
+
+        if self._provided_session and system_prompt is not None:
+            _logger.warning(
+                "Both 'session' and 'system_prompt' provided; "
+                "'system_prompt' is ignored when 'session' is provided."
+            )
+
+        self._system_prompt = system_prompt
+        self._ensure_system_prompt()
+
+        # --- Unified event queue (passed to Agent, shared with Branch B) ---
+        self._event_queue: list = []
+
+        # --- Agent creation ---
+        self.streaming_handler = (
+            SSEStreamingHandler(event_callback) if event_callback else None
+        )
+        self.task_registry = AgentTaskRegistry()
+
+        self.agent = Agent(
+            session=self.session,
+            config=infra.config,
+            llm_provider=infra.llm_provider,
+            task_registry=self.task_registry,
+            tool_pack=infra.tool_pack,
+            streaming_handler=self.streaming_handler,
+            event_queue=self._event_queue,
+        )
+
+        # --- Session persistence ---
+        from engine.session_store import SessionStore
+        self.session_store = SessionStore(root_dir="sessions")
+        self.session_store.create_root(self.session.id)
+        self.agent.session_store = self.session_store
+        self.session_store.create_file("main", self.session)
+        self.session._on_message_added = (
+            lambda msg: self.session_store.append_line("main", msg)
+        )
+
+    def _ensure_system_prompt(self) -> None:
+        has_system = any(m.role == "system" for m in self.session.messages)
+        if has_system:
+            self._refresh_env_block()
+        else:
+            if self._system_prompt:
+                base = self._system_prompt
+            else:
+                base = build_root_system_prompt(
+                    include_spawn=self.infra.config.is_tool_enabled("spawn")
+                )
+            env_block = self.infra.time_provider.format_system_env_block()
+            self.session.add_message("system", f"{base}\n\n{env_block}")
+
+    def _refresh_env_block(self) -> None:
+        system_msg = next(
+            (m for m in self.session.messages if m.role == "system"), None
+        )
+        if system_msg is None:
+            return
+        fresh_block = self.infra.time_provider.format_system_env_block()
+        if _ENV_BLOCK_PATTERN.search(system_msg.content):
+            system_msg.content = _ENV_BLOCK_PATTERN.sub(fresh_block, system_msg.content)
+        else:
+            system_msg.content = f"{system_msg.content}\n\n{fresh_block}"
+
+    # --- Core execution ---
+
+    async def start(self, message: str) -> AgentResult:
+        """First message: register agent, run, wait for completion."""
+        await self.task_registry.register(
+            task_id=self.agent.task_id,
+            session_id=self.session.id,
             description="root task",
-            agent=agent,
+            agent=self.agent,
             depth=0,
         )
+        self._register()
 
-        await agent.run(task_description)
+        await self.agent.run(message)
 
-        if agent.state not in (AgentState.COMPLETED, AgentState.ERROR):
-            await agent._completion_event.wait()
+        if not self.agent._completion_event.is_set():
+            await self.agent._completion_event.wait()
 
-        success = agent.state == AgentState.COMPLETED
+        return self._build_result()
+
+    def interject(self, message: str) -> str:
+        """Insert a user message. Treated identically to child completions.
+        WAITING_FOR_CHILDREN -> direct wakeup via agent.run() (like Branch A)
+        RUNNING              -> append to _event_queue (like Branch B)
+        COMPLETED/ERROR      -> rejected
+        """
+        state = self.agent.state
+        if state in (AgentState.COMPLETED, AgentState.ERROR):
+            return "rejected"
+        if state == AgentState.WAITING_FOR_CHILDREN:
+            asyncio.create_task(
+                self.agent.run(message, trigger="user_message")
+            )
+            return "accepted"
+        else:
+            self._event_queue.append(MessageEvent(content=message))
+            return "queued"
+
+    # --- Lifecycle ---
+
+    def _build_result(self) -> AgentResult:
+        success = self.agent.state == AgentState.COMPLETED
         return AgentResult(
-            content=agent._final_result or "",
-            session=session,
+            content=self.agent._final_result or "",
+            session=self.session,
             success=success,
-            error=None if success else agent._error_info,
+            error=None if success else self.agent._error_info,
         )
-    except Exception as e:
-        return AgentResult(
-            content="",
-            session=session,
-            success=False,
-            error=AgentError(
-                category=ErrorCategory.INTERNAL_ERROR,
-                message=str(e),
-                exception_type=type(e).__name__,
-            ),
-        )
-    finally:
-        await stop_logger()
+
+    def _register(self) -> None:
+        _active_sessions[self.session.id] = self
+
+    def unregister(self) -> None:
+        _active_sessions.pop(self.session.id, None)

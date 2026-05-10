@@ -9,7 +9,8 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from engine.session_store import SessionStore
-from app._state import is_streaming, set_streaming
+from engine.runner import Engine
+from app._state import is_streaming, set_active_session, get_active_session, clear_active_session
 from engine.runtime.agent_models import Session
 
 router = APIRouter()
@@ -21,6 +22,10 @@ MAX_MESSAGES = 50
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
+
+
+class MidExecutionMessageRequest(BaseModel):
+    message: str
 
 
 def _find_turn_boundaries(messages):
@@ -52,9 +57,8 @@ def _truncate_session(session):
 
 
 async def _event_generator(request: Request, chat_req: ChatRequest):
-    """Consume delegate() events via callback and yield SSE frames."""
+    """Consume SessionManager events via callback and yield SSE frames."""
     import asyncio
-    from engine.runner import delegate
 
     session = None
     if chat_req.session_id:
@@ -131,6 +135,16 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
                 }),
             })
             done_event.set()
+        elif event_name == "waiting_for_children":
+            event_queue.put_nowait({
+                "event": "waiting_for_children",
+                "data": json.dumps({"session_id": data.get("session_id", "")}),
+            })
+        elif event_name == "turn_start":
+            event_queue.put_nowait({
+                "event": "turn_start",
+                "data": json.dumps({"trigger": data.get("trigger", "user_message")}),
+            })
         elif event_name == "subagent_start":
             event_queue.put_nowait({
                 "event": "subagent_start",
@@ -208,13 +222,22 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
                 }),
             })
 
+    engine = Engine.get()
+    mgr = engine.create_session(
+        session=session,
+        event_callback=on_engine_event,
+    )
+
+    set_active_session(
+        session_id=mgr.session.id,
+        session_manager=mgr,
+        event_queue=mgr._event_queue,
+        done_event=done_event,
+    )
+
     async def run_delegate():
         try:
-            await delegate(
-                task_description=chat_req.message,
-                session=session,
-                event_callback=on_engine_event,
-            )
+            await mgr.start(chat_req.message)
         except Exception as e:
             event_queue.put_nowait({
                 "event": "error",
@@ -243,7 +266,8 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
                     break
     finally:
         session_store.save(session)
-        set_streaming(False)
+        clear_active_session()
+        mgr.unregister()
         if not delegate_task.done():
             delegate_task.cancel()
 
@@ -257,8 +281,23 @@ async def chat_endpoint(request: Request, chat_req: ChatRequest):
             content={"error": "A request is already being processed"},
         )
 
-    set_streaming(True)
     return EventSourceResponse(
         _event_generator(request, chat_req),
         media_type="text/event-stream",
     )
+
+
+@router.post("/chat/message")
+async def mid_execution_message(req: MidExecutionMessageRequest):
+    active = get_active_session()
+    if active is None:
+        return JSONResponse(status_code=404, content={"error": "No active session"})
+
+    mgr = active["session_manager"]
+    result = mgr.interject(req.message)
+
+    if result == "rejected":
+        return JSONResponse(status_code=409,
+            content={"error": "Agent is not accepting messages right now"})
+
+    return {"status": result}

@@ -10,7 +10,7 @@
 engine/
 ├── engine/                    # Core package
 │   ├── __init__.py            # Thin re-export layer (re-exports from runner.py and submodules)
-│   ├── runner.py              # delegate(), DEFAULT_SYSTEM_PROMPT, ToolPack construction, is_tool_enabled filtering
+│   ├── runner.py              # Engine (singleton), Infrastructure, SessionManager — main entry point for the agent system
 │   ├── config.py              # Configuration loading (engine.json)
 │   ├── prompts.py             # Centralized prompt definitions (pure leaf module, zero engine.* imports)
 │   ├── session_store.py       # Unified SessionStore — JSONL append persistence for root & child sessions
@@ -67,6 +67,7 @@ engine/
 │   ├── test_session_persistence.py  # SessionStore file persistence tests
 │   ├── test_context_truncation.py  # TPM-based context truncation tests
 │   ├── test_fallback_truncation.py  # Fallback provider truncation tests
+│   ├── test_key_pool_sorting.py  # Key pool sorting priority tests
 │   └── test_rate_limiter.py  # Rate limiter unit tests
 ├── app/                       # FastAPI web application
 │   ├── main.py                # FastAPI app factory, static file mount
@@ -82,7 +83,7 @@ engine/
 ├── web/                       # Frontend static files
 │   ├── index.html             # Minimal HTML shell
 │   ├── styles.css             # CSS styles (extracted from monolithic index.html, includes sub-agent panel styles)
-│   ├── app.js                 # Main JS: SSE handling, Part data model, UI logic (root + sub-agent event handling)
+│   ├── app.js                 # Main JS: SSE handling, Part data model, UI logic (root + sub-agent event handling); chat input always enabled, agent_running messages routed via interject
 │   ├── parts.js               # Part rendering: create/update/close DOM elements (root + sub-agent parts)
 │   └── tests/
 │       └── subagent-streaming.test.js  # Frontend tests for sub-agent SSE event handling and rendering
@@ -102,13 +103,13 @@ engine/
 
 ### 1. `engine/__init__.py` — Thin Re-export Layer
 
-A minimal re-export module (12 lines) that re-exports the public API from `runner.py` and submodules. All implementation logic was extracted to `runner.py`.
+A minimal re-export module (13 lines) that re-exports the public API from `runner.py` and submodules. All implementation logic was extracted to `runner.py`.
 
 **Re-exports:**
 
 | Symbol | Source |
 |---|---|
-| `delegate` | `engine.runner` |
+| `Engine` | `engine.runner` |
 | `DEFAULT_SYSTEM_PROMPT` | `engine.prompts` |
 | `_discover_custom_tools` | `engine.runner` |
 | `_refresh_custom_tools` | `engine.runner` |
@@ -119,41 +120,50 @@ A minimal re-export module (12 lines) that re-exports the public API from `runne
 
 ---
 
-### 2. `engine/runner.py` — Delegation Runner
+### 2. `engine/runner.py` — Engine, Infrastructure & SessionManager
 
-The main entry point containing `delegate()` and all startup orchestration logic. Extracted from the original `engine/__init__.py`.
+The main entry point containing the `Engine` class (singleton), `Infrastructure` (one-time setup), and `SessionManager` (per-conversation). Extracted from the original `engine/__init__.py`.
 
-**Key functions:**
+**Engine class (singleton via `Engine.get()`):**
+
+| Method | Description |
+|---|---|
+| `Engine.get(config?)` | Singleton access. Returns existing Engine instance or creates one with the given config. |
+| `Engine.reset()` | Clear singleton instance (for testing). |
+| `Engine.delegate(task_description, ...)` | Main async entry point. Calls `create_session()` then `mgr.start()`. Returns `AgentResult`. On exception, returns `AgentResult(success=False)`. Finally unregisters the session manager. |
+| `Engine.create_session(session?, event_callback?, system_prompt?)` | Factory method. Creates and returns a `SessionManager` for a conversation. |
+
+**Infrastructure class (plain, owned by Engine):**
+
+A plain class (no singleton methods) that holds all shared infrastructure: providers, rate limiters, key pool, retry engine, and tool pack. Created once by `Engine.__init__()`. All `SessionManager` instances share the same `Infrastructure` via the Engine that created them.
+
+**Module-level helpers:**
 
 | Function | Description |
 |---|---|
-| `delegate(task_description, system_prompt?, tools?, config?, session?)` | Main entry point. Creates a root agent session (or reuses an existing one if `session` is provided), initializes all infrastructure, and runs the agent loop. When `session` is provided, only refreshes the env block (date/timezone) in the existing system message. Returns `AgentResult`. |
 | `_discover_custom_tools()` | Auto-discovers `Tool` subclasses from `engine/tools/custom/*.py` using `importlib` + `inspect`. Results are cached. |
 | `_refresh_custom_tools()` | Clears the custom tools cache. |
-| `_refresh_env_block(session, time_provider)` | Refreshes the date/timezone `<env>` block in the session's first system message. Replaces existing block or appends if absent. |
 
-**Key constants:**
+**Startup flow (`Engine.get()` → `Engine.delegate()`):**
 
-- Prompt definitions have been extracted to `engine/prompts.py` (see Section 4).
+1. `Engine.get(config)` creates singleton on first call. `Engine.__init__()` creates `Infrastructure(config)`
+2. `Infrastructure.__init__()` loads config, builds providers, rate limiters, key pool, fallback provider, and tool pack
+3. `Engine.delegate()` calls `create_session()` which creates a `SessionManager` with the shared `Infrastructure`
+4. `SessionManager.__init__()` sets up session, system prompt (with env block), event queue, streaming handler, task registry, root `Agent`, and `SessionStore`
+5. `mgr.start(task_description)` registers agent in `AgentTaskRegistry`, runs the agent, waits for completion, returns `AgentResult`
+6. Error handling: exception → `AgentResult(success=False)`, finally → `mgr.unregister()`
 
-**Startup flow (`delegate()`):**
+**SessionManager class:**
 
-1. Load config via `get_config()` (auto-discovers `engine.json`)
-2. Create `TimeProvider`, inject timezone info into system prompt (or refresh env block if session is provided)
-3. Initialize logger with configured log directory
-4. Iterate `config.providers` dict — for each provider, create `SlidingWindowRateLimiter` (with optional pacing params); for each model under that provider, create an `LLMProvider` keyed by `"provider/model"`
-5. Build ordered key list from `config.primary` + `config.fallback`
-6. Create shared: `APIKeyPool` (with ordered composite key names), `RetryEngine`, `FallbackLLMProvider`
-7. Create `LaneConcurrencyQueue` (SUBAGENT lane only; owned by `SpawnTool`)
-8. Discover and merge custom tools
-9. Filter tools by `config.is_tool_enabled()` — unlisted tools default to enabled
-10. Conditionally add `SpawnTool` (if `"spawn"` is enabled)
-11. Merge built-in tools (`BUILTIN_TOOLS` from `engine/tools/builtin/`) with custom tools
-12. Filter tools by `config.is_tool_enabled()` — unlisted tools default to enabled
-13. Build `ToolPack` from enabled tools
-14. Create root `Agent` with `ToolPack`, register in `AgentTaskRegistry`
-15. Create `SessionStore`, call `create_root(session.id)`, create `main.jsonl` via `create_file()`, wire `session._on_message_added` callback for real-time persistence
-16. Run the agent, return `AgentResult`
+Per-conversation manager that creates and owns the root Agent. `get_active()` and `get_any_active()` have been removed. The module-level `_active_sessions` dict remains but is only used internally by `_register()` and `unregister()`.
+
+**Key methods:**
+
+| Method | Description |
+|---|---|
+| `start(message)` | Register agent, run agent loop, wait for completion, return `AgentResult` |
+| `interject(message)` | Insert a user message. WAITING → direct run, RUNNING → enqueue, COMPLETED/ERROR → rejected |
+| `unregister()` | Remove session from the module-level `_active_sessions` dict |
 
 ---
 
@@ -343,13 +353,13 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 
 | Class | Description |
 |---|---|
-| `APIKeyPool` | Multi-key management with staircase cooldown (30s → 60s → 300s). Accepts `names: List[str]` (composite keys like `"provider/model"`). Selection prefers keys with lowest `consecutive_errors` among those not in cooldown. |
+| `APIKeyPool` | Multi-key management with staircase cooldown (30s → 60s → 300s). Accepts `names: List[str]` (composite keys like `"provider/model"`). Selection returns first available key in insertion order (primary first). `consecutive_errors` only affects cooldown duration. |
 
 **Key methods:**
 
 | Method | Description |
 |---|---|
-| `acquire_key()` | Returns best available key name (fewest errors, respects insertion order) |
+| `acquire_key()` | Returns first available key in insertion order (primary first); `consecutive_errors` only affects cooldown duration |
 | `report_rate_limited(name)` | Increments errors, applies staircase cooldown |
 | `report_success(name)` | Resets error count and cooldown |
 | `is_all_in_cooldown()` | Checks if all keys are in cooldown |
@@ -414,7 +424,7 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
 
 1. Process tool calls iteratively (max 15 iterations)
 2. Drain queued `ChildCompletionEvent`s one at a time — for each, inject the child's `ChildCompletionNotification.to_prompt()` as a user message and re-enter tool call processing
-3. If pending children remain → transition to `WAITING_FOR_CHILDREN`
+3. If pending children remain → transition to `WAITING_FOR_CHILDREN`, emit `waiting_for_children` SSE event via `_emit()` with `{"session_id": self.session.id}`
 4. If no pending children → finalize and notify parent
 
 **Key features:**
@@ -532,7 +542,7 @@ Defines `BaseStreamingHandler` and two concrete implementations for handling str
 | `ProviderConfig` | Provider entry: name, api_key, base_url, rpm_limit (default 100), tpm_limit (default 100000), models dict (model_name → model_params dict) |
 | `ProviderParams` | Resolved call params: api_key, base_url, model |
 | `resolve_model_ref()` | Splits `"provider/model"` string on first `/` into `(provider, model)` tuple |
-| `ProviderHealth` | Per-key health: consecutive errors, cooldown, pace level |
+| `ProviderHealth` | Per-key health: consecutive errors, cooldown |
 
 #### `fallback_provider.py`
 
@@ -782,7 +792,7 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 
 | File | Description |
 |---|---|
-| `test_easy_task.py` | Tests `delegate()` with a structured city-comparison research prompt |
+| `test_easy_task.py` | Tests `Engine.get().delegate()` with a structured research prompt |
 | `test_state_machine.py` | Unit tests for `AgentStateMachine` transitions and `InvalidTransitionError` |
 | `test_per_child_wake.py` | Unit tests for per-child wake gate-check logic (Branch A/B/skip) |
 | `test_child_notification.py` | Unit tests for child notification formatting and handler invocation |
@@ -791,7 +801,9 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 | `test_session_persistence.py` | Unit tests for `SessionStore` file persistence and deserialization |
 | `test_context_truncation.py` | Unit tests for TPM-based context truncation |
 | `test_fallback_truncation.py` | Unit tests for fallback provider truncation |
+| `test_key_pool_sorting.py` | Unit tests for key pool sorting priority (insertion order vs errors) |
 | `test_rate_limiter.py` | Unit tests for `SlidingWindowRateLimiter` |
+| `test_runner_infrastructure.py` | Unit tests for `Engine` singleton, `SessionManager`, and `MessageEvent` |
 
 All tests use `pytest-asyncio` and are pure unit tests (mocked, no live LLM calls).
 
@@ -843,7 +855,7 @@ Defines the wire-format SSE event types as dataclasses inheriting from `StreamEv
 | `SubAgentDoneEvent` | `subagent_done` | `task_id`, `success` |
 | `SubAgentErrorEvent` | `subagent_error` | `task_id`, `message` |
 
-17 dataclasses total (1 base `StreamEvent` + 8 root event types + 8 sub-agent event types). The `DoneEvent` does not include a `content` field — text content is delivered incrementally via Part events. Sub-agent events carry an additional `task_id` field to identify which sub-agent they belong to.
+17 dataclasses total (1 base `StreamEvent` + 8 root event types + 8 sub-agent event types). Additionally, the `waiting_for_children` event is emitted as a raw SSE event (not a dataclass) by `_execute_cycle()` when the agent enters the `WAITING_FOR_CHILDREN` state. The `DoneEvent` does not include a `content` field — text content is delivered incrementally via Part events. Sub-agent events carry an additional `task_id` field to identify which sub-agent they belong to.
 
 #### `routers/chat.py` — Chat SSE Endpoint
 
@@ -862,6 +874,7 @@ The `on_engine_event()` callback maps internal engine events to SSE wire format:
 | `tool_end` | `tool_call_result` | Renamed for clarity on wire |
 | `agent_done` | `done` | Adds `session_id` |
 | `error` | `error` | Adds `session_id` |
+| `waiting_for_children` | `waiting_for_children` | Emitted when agent enters `WAITING_FOR_CHILDREN` state; passes through `session_id` |
 | `subagent_start` | `subagent_start` | Sub-agent lifecycle start |
 | `subagent_part_new` | `subagent_part_new` | Sub-agent text/reasoning part |
 | `subagent_part_delta` | `subagent_part_delta` | Sub-agent content delta |
@@ -871,7 +884,7 @@ The `on_engine_event()` callback maps internal engine events to SSE wire format:
 | `subagent_done` | `subagent_done` | Sub-agent completion (does NOT set `done_event`) |
 | `subagent_error` | `subagent_error` | Sub-agent error (does NOT set `done_event`) |
 
-Additionally, `agent_start` is emitted immediately when the SSE connection opens, before `delegate()` begins execution.
+Additionally, `agent_start` is emitted immediately when the SSE connection opens, before `Engine.delegate()` begins execution.
 
 **Session management:**
 
@@ -887,8 +900,8 @@ Additionally, `agent_start` is emitted immediately when the SSE connection opens
 User
   │
   ▼
-delegate() (engine/runner.py)
-   ├── Config loading (engine.json)
+Engine.delegate() (engine/runner.py)
+    ├── Engine.get() → singleton (first call: Infrastructure.__init__)
    ├── Provider initialization (providers dict → LLMProviders → primary+fallback ordering)
    ├── Lane queue setup (SUBAGENT only, owned by SpawnTool)
    ├── Tool discovery (custom tools auto-loaded)
@@ -930,7 +943,7 @@ delegate() (engine/runner.py)
     │     │                       │     └── asyncio.create_task(_run_child)
     │     │
     │     ├── Drain ChildCompletionEvents (per-child notifications, one at a time)
-    │     └── State decision: WAITING_FOR_CHILDREN or COMPLETED
+    │     └── State decision: WAITING_FOR_CHILDREN (emit waiting_for_children SSE) or COMPLETED
     │
     ├── _finish_and_notify() → ToolPack.release_spawn() + AgentTaskRegistry.complete()
     └── Return AgentResult
@@ -986,6 +999,7 @@ The frontend communicates with the backend via Server-Sent Events (SSE) using a 
 | `tool_call_result` | Server → Client | `{part_id: int, tool_name: str, result: str, call_id: str}` |
 | `done` | Server → Client | `{success: bool, session_id: str}` |
 | `error` | Server → Client | `{message: str, session_id: str}` |
+| `waiting_for_children` | Server → Client | `{session_id: str}` |
 | `subagent_start` | Server → Client | `{part_id: int, task_id: str, label: str, description: str, parent_task_id: str}` |
 | `subagent_part_new` | Server → Client | `{part_id: int, task_id: str, part_type: str, text: str}` |
 | `subagent_part_delta` | Server → Client | `{part_id: int, task_id: str, text: str}` |

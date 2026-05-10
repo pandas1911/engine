@@ -65,6 +65,7 @@ class AgentTaskRegistry:
         Raises:
             ValueError: If registering would create a cycle in the task hierarchy
         """
+        # [==================== LOG: registry ====================]
         logger = get_logger()
         logger.info(
             "Registry",
@@ -75,6 +76,7 @@ class AgentTaskRegistry:
             event_type="registry_register",
             data={"session_id": session_id, "parent_task_id": parent_task_id, "depth": depth, "description": description}
         )
+        # [======================= END LOG =======================]
 
         # Check for cycles before registering
         if parent_task_id and self._would_create_cycle(task_id, parent_task_id):

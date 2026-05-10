@@ -5,7 +5,7 @@ Verifies that engine.delegate() can handle a structured research task
 """
 
 import pytest
-from engine import delegate
+from engine import Engine
 
 TEST_PROMPT = """
     当前有哪些工具可用
@@ -14,6 +14,6 @@ TEST_PROMPT = """
 
 @pytest.mark.asyncio
 async def test_multilayer_subagent():
-    result = await delegate(TEST_PROMPT)
+    result = await Engine.get().delegate(TEST_PROMPT)
     assert result.success, f"delegate failed: {result.error}"
     assert result.content, "delegate returned empty content"

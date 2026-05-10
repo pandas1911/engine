@@ -18,8 +18,8 @@ class APIKeyPool:
     Successful requests reset cooldown and error counts.
 
     Keys are identified by composite strings (e.g., "aliyun/deepseek-v4-pro").
-    Selection prefers keys with the lowest consecutive_errors among those
-    not in cooldown, providing sequential primary -> fallback ordering.
+    Selection returns the first available key in insertion order (primary first).
+    consecutive_errors only affects cooldown duration, not selection priority.
     """
 
     def __init__(
@@ -41,9 +41,10 @@ class APIKeyPool:
         """Select the best available key.
 
         Filters out keys in cooldown. If none available, returns the
-        least-recently-cooled key (sorted by cooldown_until ascending).
-        Among available keys, prefers fewer consecutive_errors, preserving
-        the original insertion order (primary first, then fallbacks).
+        key with the soonest cooldown expiry.
+        Among available keys, returns the first in insertion order
+        (primary first, then fallbacks). consecutive_errors only
+        affects cooldown duration, not selection priority.
         """
         now = time.monotonic()
 
@@ -58,7 +59,6 @@ class APIKeyPool:
             all_entries.sort(key=lambda x: x[1].cooldown_until or 0.0)
             return all_entries[0][0]
 
-        candidates.sort(key=lambda x: x[1].consecutive_errors)
         return candidates[0][0]
 
     def report_rate_limited(
@@ -82,6 +82,7 @@ class APIKeyPool:
         cooldown_ms = max(steps[idx], retry_after_ms or 0.0)
         health.cooldown_until = time.monotonic() + cooldown_ms / 1000.0
 
+        # [==================== LOG: control ====================]
         get_logger().warning(
             "RateControl",
             "Key cooldown | profile={} consecutive_errors={} cooldown_ms={}".format(
@@ -94,14 +95,17 @@ class APIKeyPool:
                 "cooldown_ms": cooldown_ms,
             },
         )
+        # [==================== END LOG ============================]
 
         if self.is_all_in_cooldown():
+            # [==================== LOG: control ====================]
             get_logger().error(
                 "RateControl",
                 "Key pool exhausted | all_profiles_in_cooldown",
                 event_type="key_pool_exhausted",
                 data={"pool_size": len(self._names)},
             )
+            # [==================== END LOG ============================]
 
     def report_success(self, profile_name: str) -> None:
         """Report a successful request for the given profile.
@@ -116,12 +120,14 @@ class APIKeyPool:
         health.cooldown_until = None
 
         if was_in_error:
+            # [==================== LOG: control ====================]
             get_logger().info(
                 "RateControl",
                 "Key recovered | profile={}".format(profile_name),
                 event_type="key_recovered",
                 data={"profile": profile_name},
             )
+            # [==================== END LOG ============================]
 
     def is_all_in_cooldown(self) -> bool:
         """Return True if all profiles are currently in cooldown."""
@@ -139,7 +145,6 @@ class APIKeyPool:
                 consecutive_errors=h.consecutive_errors,
                 last_error_time=h.last_error_time,
                 cooldown_until=h.cooldown_until,
-                pace_level=h.pace_level,
             )
             for name, h in self._health.items()
         }

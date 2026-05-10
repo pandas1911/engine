@@ -33,9 +33,9 @@ pytest
 ## 快速开始
 
 ```python
-from engine import delegate
+from engine import Engine
 
-result = delegate("你的任务描述")
+result = await Engine.get().delegate("你的任务描述")
 print(result.content)
 ```
 
