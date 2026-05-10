@@ -58,5 +58,6 @@
       "**/shadow",
       "**/passwd"
     ]
-  }
+  },
+  "workspace": "~/Desktop/Friday"
 }

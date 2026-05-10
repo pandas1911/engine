@@ -1,6 +1,7 @@
 import json
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from engine.providers.provider_models import ProviderConfig, resolve_model_ref
@@ -66,6 +67,31 @@ class Config:
 
     # File tool security configuration
     file_permissions: Dict[str, Any] = field(default_factory=dict)
+
+    # Workspace directory for file operations
+    workspace: Optional[str] = None
+
+    def get_workspace_path(self) -> Path:
+        """Resolve the workspace path with ~ expansion and cross-platform default.
+
+        Returns:
+            Absolute Path to the workspace directory (auto-created).
+
+        Raises:
+            ValueError: If the resolved path is not absolute.
+        """
+        if self.workspace and self.workspace.strip():
+            resolved_path = Path(os.path.expanduser(self.workspace))
+        else:
+            resolved_path = Path.home() / "Desktop" / "Friday"
+
+        if not resolved_path.is_absolute():
+            raise ValueError(
+                f"Workspace path must be absolute, got: {resolved_path}"
+            )
+
+        os.makedirs(resolved_path, exist_ok=True)
+        return resolved_path
 
     def is_tool_enabled(self, tool_name: str) -> bool:
         """Check if a tool is enabled. Unlisted tools default to enabled."""
@@ -167,6 +193,7 @@ class ConfigLoader:
             "user_timezone",
             "tools",
             "file_permissions",
+            "workspace",
         }
 
         kwargs = {k: v for k, v in data.items() if k in known_fields}
