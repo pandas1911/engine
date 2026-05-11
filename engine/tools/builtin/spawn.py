@@ -6,7 +6,8 @@ from typing import Any, Dict, TYPE_CHECKING
 from engine.tools.base import Tool
 from engine.logging import get_logger
 from engine.config import get_config
-from engine.prompts import get_runtime_depth_rejection
+from engine.safety import LaneConcurrencyQueue
+from engine.providers.provider_models import Lane
 
 if TYPE_CHECKING:
     from engine.subagent.manager import SubAgentManager
@@ -16,10 +17,11 @@ class SpawnTool(Tool):
     """Spawn tool — creates child agents via SubAgentManager.
 
     SubAgentManager is lazily created per-agent on first execute() call,
-    with parameters extracted from the parent_agent in context.
+    with parameters extracted from the agent in context.
     """
 
     name = "spawn"
+    short_description = "Delegate subtasks to child agents for parallel execution"
     description = (
         "Spawn a child sub-agent to handle a specific task in parallel. "
         "The child agent runs asynchronously and results are automatically "
@@ -45,45 +47,53 @@ class SpawnTool(Tool):
     def __init__(self):
         self._managers: Dict[str, "SubAgentManager"] = {}
         self._lock = asyncio.Lock()
+        config = get_config()
+        self._lane_queue = LaneConcurrencyQueue()
+        self._lane_queue.configure_lane(Lane.SUBAGENT, max_concurrent=config.subagent_lane_concurrency)
 
     async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> str:
         session = context["session"]
-        parent_agent = context["parent_agent"]
+        agent = context["agent"]
         config = get_config()
-        task_id = parent_agent.task_id
+        task_id = agent.task_id
 
-        # Runtime depth safety net
-        if session.depth >= config.max_depth:
+        # Runtime depth safety net — depth=1 is the architectural limit
+        if session.depth >= 1:
             logger = get_logger()
             logger.error(
-                parent_agent.label,
-                "Spawn rejected: maximum nesting depth reached | "
-                "current_depth={}, max_depth={}".format(session.depth, config.max_depth),
+                agent.label,
+                "Spawn rejected: sub-agents cannot spawn further children | "
+                "current_depth={}".format(session.depth),
                 task_id=task_id, state="running", depth=session.depth,
                 event_type="spawn_depth_limit",
-                data={"current_depth": session.depth, "max_depth": config.max_depth},
+                data={"current_depth": session.depth},
             )
-            return get_runtime_depth_rejection(depth=session.depth, max_depth=config.max_depth)
+            return (
+                "[Spawn Failed] Sub-agents cannot spawn further children. "
+                "Please complete the task at the current level."
+            )
 
         # Lazy init SubAgentManager with lock for concurrency safety
         async with self._lock:
             if task_id not in self._managers:
                 from engine.subagent.manager import SubAgentManager
                 self._managers[task_id] = SubAgentManager(
-                    task_registry=parent_agent.task_registry,
-                    event_queue=parent_agent.event_queue,
-                    drainable=parent_agent,
+                    task_registry=agent.task_registry,
+                    event_queue=agent.event_queue,
+                    drainable=agent,
                     agent_task_id=task_id,
-                    parent_label=parent_agent.label,
+                    parent_label=agent.label,
                     config=config,
-                    lane_queue=parent_agent.lane_queue,
-                    llm_provider=parent_agent.llm,
-                    tool_pack=parent_agent.tool_pack,
+                    lane_queue=self._lane_queue,
+                    llm_provider=agent.llm,
+                    tool_pack=agent.tool_pack,
+                    root_streaming_handler=agent.streaming_handler,
+                    session_store=getattr(agent, "session_store", None),
                 )
 
         mgr = self._managers[task_id]
         task_desc = arguments.get("task", "")
-        label = arguments.get("label", "subagent")
+        label = arguments.get("label", "unknown")
         return await mgr.spawn(task_desc, label, session)
 
     def release(self, agent_task_id: str) -> None:

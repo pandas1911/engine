@@ -1,4 +1,4 @@
-"""EMA-based token estimator for dynamic chars-to-tokens ratio correction."""
+"""EMA-based token estimator and result truncation utilities."""
 
 from typing import Dict, List, Optional
 
@@ -51,3 +51,30 @@ class EmaTokenEstimator:
     def coefficient(self) -> float:
         """Current coefficient value (for testing/monitoring)."""
         return self._coefficient
+
+
+class ResultTruncator:
+    """Truncates results to prevent unbounded result sizes."""
+
+    @staticmethod
+    def truncate(result: str, max_length: int) -> str:
+        """Truncate a result string if it exceeds max_length.
+
+        Args:
+            result: The result string to truncate
+            max_length: Maximum allowed length
+
+        Returns:
+            The original string if within limits, or truncated string with suffix
+            that includes the original character count.
+        """
+        original_length = len(result)
+        if original_length <= max_length:
+            return result
+
+        suffix = "[truncated, original: {} chars]".format(original_length)
+        available_length = max_length - len(suffix)
+        if available_length <= 0:
+            return result[:max_length]
+
+        return result[:available_length] + suffix

@@ -51,7 +51,7 @@ class LaneConcurrencyQueue:
     """Per-lane concurrency queue with independent limits.
 
     Uses asyncio.Condition for per-lane FIFO queuing.
-    Each lane (MAIN, SUBAGENT) has its own max_concurrent limit.
+    Each lane (e.g. SUBAGENT) has its own max_concurrent limit.
     """
 
     def __init__(self):

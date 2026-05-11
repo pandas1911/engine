@@ -4,11 +4,11 @@ This module defines the event types used for child-agent lifecycle communication
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Dict, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .subagent_models import CollectedChildResult
+    from .subagent_models import ChildCompletionNotification
 
 
 @dataclass
@@ -19,11 +19,5 @@ class AgentEvent:
 
 @dataclass
 class ChildCompletionEvent(AgentEvent):
-    """Event emitted when all child agents have completed.
-
-    Attributes:
-        child_results: Mapping from child task ID to collected result.
-        formatted_prompt: The aggregated prompt built from child outputs.
-    """
-    child_results: Dict[str, CollectedChildResult] = field(default_factory=dict)
-    formatted_prompt: str = ""
+    """Event emitted when a single child agent completes."""
+    notification: "ChildCompletionNotification"

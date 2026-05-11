@@ -11,7 +11,6 @@ class AgentTask:
     task_id: str
     session_id: str
     task_description: str
-    parent_agent: Any  # Forward reference to Agent
     parent_task_id: Optional[str] = None
     result: Optional[str] = None
     depth: int = 0
@@ -21,8 +20,31 @@ class AgentTask:
 
 
 @dataclass
-class CollectedChildResult:
-    """Complete information collected from child agent results, replacing downstream dependency on _tasks."""
+class ChildCompletionNotification:
+    """Structured notification sent to parent when a single child completes."""
+    task_id: str
+    label: str                    # e.g. "Sub-1(d:1)"
+    task: str                     # Original task description
+    status: str                   # "completed" | "error"
+    summary: str                  # Free-form summary from child's last assistant message
+    session_file: str             # Relative filename: "{task_id}.json"
 
-    task_description: str
-    result: str
+    def to_prompt(self) -> str:
+        """Format this notification as a user message for the parent agent."""
+        lines = [
+            "[Child Agent Report] {label} ({task_id}) has completed:",
+            "- Status: {status}",
+            "- Task: {task}",
+            "- Summary: {summary}",
+        ]
+        text = "\n".join(lines).format(
+            label=self.label,
+            task_id=self.task_id,
+            status=self.status,
+            task=self.task,
+            summary=self.summary,
+        )
+        if self.session_file:
+            text += f"\n- Session File: {self.session_file}"
+            text += "\nTip: You can use the read tool to inspect the session file above for detailed execution logs of this child agent."
+        return text

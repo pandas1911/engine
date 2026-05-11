@@ -1,7 +1,8 @@
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from engine.providers.provider_models import ProviderConfig, resolve_model_ref
 
@@ -28,8 +29,7 @@ class Config:
     strip_thinking: bool = True
 
     # Agent hierarchy
-    max_depth: int = 3
-    spawn_timeout: float = 60.0
+    spawn_timeout: float = 30.0
     max_result_length: int = 3000
 
     # Iteration guard
@@ -45,10 +45,9 @@ class Config:
     llm_retry_base_delay: float = 1.0
 
     # Lane concurrency
-    main_lane_concurrency: int = 4
     subagent_lane_concurrency: int = 5
 
-    # Adaptive pacing
+    # Rate-limit pacing (consumed by SlidingWindowRateLimiter)
     pacing_enabled: bool = True
     pacing_min_interval_ms: float = 500.0
 
@@ -65,6 +64,31 @@ class Config:
 
     # Tool enable/disable configuration
     tools: Dict[str, bool] = field(default_factory=dict)
+
+    # Workspace directory for file operations
+    workspace: Optional[str] = None
+
+    def get_workspace_path(self) -> Path:
+        """Resolve the workspace path with ~ expansion and cross-platform default.
+
+        Returns:
+            Absolute Path to the workspace directory (auto-created).
+
+        Raises:
+            ValueError: If the resolved path is not absolute.
+        """
+        if self.workspace and self.workspace.strip():
+            resolved_path = Path(os.path.expanduser(self.workspace))
+        else:
+            resolved_path = Path.home() / "Desktop" / "Friday"
+
+        if not resolved_path.is_absolute():
+            raise ValueError(
+                f"Workspace path must be absolute, got: {resolved_path}"
+            )
+
+        os.makedirs(resolved_path, exist_ok=True)
+        return resolved_path
 
     def is_tool_enabled(self, tool_name: str) -> bool:
         """Check if a tool is enabled. Unlisted tools default to enabled."""
@@ -148,7 +172,6 @@ class ConfigLoader:
             "primary",
             "fallback",
             "strip_thinking",
-            "max_depth",
             "spawn_timeout",
             "max_result_length",
             "summary_warning_reserve",
@@ -157,7 +180,6 @@ class ConfigLoader:
             "log_dir",
             "llm_retry_max_attempts",
             "llm_retry_base_delay",
-            "main_lane_concurrency",
             "subagent_lane_concurrency",
             "pacing_enabled",
             "pacing_min_interval_ms",
@@ -167,6 +189,7 @@ class ConfigLoader:
             "cooldown_max_ms",
             "user_timezone",
             "tools",
+            "workspace",
         }
 
         kwargs = {k: v for k, v in data.items() if k in known_fields}
@@ -251,6 +274,7 @@ class ConfigLoader:
                 base_url=prov_data["base_url"],
                 rpm_limit=float(prov_data.get("rpm_limit", 100)),
                 tpm_limit=float(prov_data.get("tpm_limit", 100000)),
+                max_concurrent_requests=int(prov_data.get("max_concurrent_requests", 0)),
                 models=models_raw,
             )
 

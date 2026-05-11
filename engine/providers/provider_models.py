@@ -21,6 +21,7 @@ class LLMResponse:
     """Response from an LLM provider."""
 
     content: Optional[str] = None
+    thinking: Optional[str] = None
     tool_calls: List[ToolCall] = field(default_factory=list)
 
     def has_tool_calls(self) -> bool:
@@ -39,7 +40,6 @@ class PaceLevel(Enum):
 class Lane(Enum):
     """Traffic lane for request routing."""
 
-    MAIN = "main"
     SUBAGENT = "subagent"
 
 
@@ -60,6 +60,7 @@ class ProviderConfig:
     base_url: str
     rpm_limit: float = 100
     tpm_limit: float = 100000
+    max_concurrent_requests: int = 0
     models: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
@@ -87,17 +88,6 @@ def resolve_model_ref(ref: str) -> Tuple[str, str]:
 
 
 @dataclass
-class RateLimitSnapshot:
-    """Snapshot of rate limit headers from a provider response."""
-
-    remaining_rpm: Optional[int] = None
-    remaining_tpm: Optional[int] = None
-    limit_rpm: Optional[int] = None
-    limit_tpm: Optional[int] = None
-    retry_after_ms: Optional[float] = None
-
-
-@dataclass
 class ProviderHealth:
     """Health state for a provider instance."""
 
@@ -105,7 +95,6 @@ class ProviderHealth:
     consecutive_errors: int = 0
     last_error_time: Optional[float] = None
     cooldown_until: Optional[float] = None
-    pace_level: PaceLevel = field(default=PaceLevel.HEALTHY)
 
 
 __all__ = [
@@ -117,6 +106,5 @@ __all__ = [
     "ProviderConfig",
     "ProviderParams",
     "resolve_model_ref",
-    "RateLimitSnapshot",
     "ProviderHealth",
 ]

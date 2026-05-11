@@ -115,7 +115,7 @@ class WebFetchTool(Tool):
     DEFAULT_FORMAT: str = "markdown"
 
     name = "web_fetch"
-
+    short_description = "Fetch and convert web pages to markdown or text"
     description = (
         "Fetches content from a specified URL and returns it in the requested format. "
         "Use this tool when you need to retrieve and analyze web page content, read "
@@ -124,7 +124,7 @@ class WebFetchTool(Tool):
         "- The URL must be a fully-formed valid URL starting with http:// or https://.\n"
         "- Content format is determined by developer configuration (default: Markdown).\n"
         "- This tool is read-only and does not modify any files.\n"
-        "- Results may be summarized if the content is very large (truncated to ~50,000 characters).\n"
+        "- Results may be summarized if the content is very large (truncated to ~15,000 characters).\n"
         "- Response size limit: 5 MB.\n"
         "- Default timeout: 30 seconds (configurable, max 120 seconds).\n"
         "- If the URL points to an image (e.g. PNG, JPEG, GIF, WebP), returns a description "
@@ -160,7 +160,7 @@ class WebFetchTool(Tool):
     _MAX_RESPONSE_SIZE: int = 5 * 1024 * 1024
     _DEFAULT_TIMEOUT: int = 30
     _MAX_TIMEOUT: int = 120
-    _MAX_CONTENT_LENGTH: int = 50000
+    _MAX_CONTENT_LENGTH: int = 15000
     _MAX_RETRIES: int = 1
     _RETRY_DELAY: float = 2.0
 
@@ -177,10 +177,12 @@ class WebFetchTool(Tool):
         if fmt not in ("markdown", "text", "html"):
             fmt = "markdown"
 
-        timeout_seconds = min(
-            arguments.get("timeout", self._DEFAULT_TIMEOUT) or self._DEFAULT_TIMEOUT,
-            self._MAX_TIMEOUT,
-        )
+        raw_timeout = arguments.get("timeout", self._DEFAULT_TIMEOUT)
+        try:
+            timeout_val = int(raw_timeout) if raw_timeout is not None else self._DEFAULT_TIMEOUT
+        except (ValueError, TypeError):
+            timeout_val = self._DEFAULT_TIMEOUT
+        timeout_seconds = min(timeout_val, self._MAX_TIMEOUT)
         timeout = httpx.Timeout(timeout_seconds)
 
         headers = {

@@ -1,7 +1,7 @@
 """engine - AI Agent automation package."""
 
 # Core API — extracted to runner.py
-from engine.runner import delegate, _discover_custom_tools, _refresh_custom_tools
+from engine.runner import Engine, _discover_custom_tools, _refresh_custom_tools
 from engine.prompts import DEFAULT_SYSTEM_PROMPT
 
 # Public API re-exports
@@ -10,4 +10,4 @@ from engine.runtime.agent_models import AgentResult
 from engine.runtime.task_registry import AgentTaskRegistry
 from engine.logging import init_logger, get_logger, stop_logger
 
-__all__ = ["delegate", "Tool", "FunctionTool", "AgentResult", "AgentTaskRegistry", "init_logger", "get_logger", "stop_logger"]
+__all__ = ["Engine", "Tool", "FunctionTool", "AgentResult", "AgentTaskRegistry", "init_logger", "get_logger", "stop_logger"]

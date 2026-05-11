@@ -33,6 +33,7 @@ class WebSearchTool(Tool):
     """
 
     name = "web_search"
+    short_description = "Search the web using multiple search engines with auto-failover"
     description = (
         "Search the web for up-to-date information. Use this tool when you need "
         "to find current facts, news, recent events, or any topic that requires "

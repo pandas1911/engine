@@ -8,10 +8,10 @@ removed — that responsibility moves to SubAgentManager.
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Set
+from typing import TYPE_CHECKING, Callable, Dict, Optional, Set
 
 from engine.logging import get_logger
-from engine.subagent.subagent_models import CollectedChildResult, AgentTask
+from engine.subagent.subagent_models import AgentTask
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -45,7 +45,6 @@ class AgentTaskRegistry:
         task_id: str,
         session_id: str,
         description: str,
-        parent_agent: "Agent",  # deprecated
         agent: Optional["Agent"] = None,
         parent_task_id: Optional[str] = None,
         depth: int = 0,
@@ -56,7 +55,6 @@ class AgentTaskRegistry:
             task_id: Unique identifier for this task
             session_id: Session identifier
             description: Task description
-            parent_agent: Which agent spawned this task (deprecated, kept for backward compat)
             agent: Self-reference of the agent running this task (used by complete() to push events)
             parent_task_id: Optional parent task ID for nested subagents
             depth: Nesting depth level
@@ -67,6 +65,7 @@ class AgentTaskRegistry:
         Raises:
             ValueError: If registering would create a cycle in the task hierarchy
         """
+        # [==================== LOG: registry ====================]
         logger = get_logger()
         logger.info(
             "Registry",
@@ -77,6 +76,7 @@ class AgentTaskRegistry:
             event_type="registry_register",
             data={"session_id": session_id, "parent_task_id": parent_task_id, "depth": depth, "description": description}
         )
+        # [======================= END LOG =======================]
 
         # Check for cycles before registering
         if parent_task_id and self._would_create_cycle(task_id, parent_task_id):
@@ -88,7 +88,6 @@ class AgentTaskRegistry:
             task_id=task_id,
             session_id=session_id,
             task_description=description,
-            parent_agent=parent_agent,
             agent=agent,
             parent_task_id=parent_task_id,
             depth=depth,
@@ -191,22 +190,6 @@ class AgentTaskRegistry:
         if handler:
             await handler(task_id, info)
 
-    def has_pending(self) -> bool:
-        """Check if there are any pending tasks.
-
-        Returns:
-            True if there are pending tasks, False otherwise
-        """
-        return len(self._pending) > 0
-
-    def get_pending_count(self) -> int:
-        """Get the count of pending tasks.
-
-        Returns:
-            Number of pending tasks
-        """
-        return len(self._pending)
-
     def _count_pending_for_parent(self, parent_task_id: str) -> int:
         if parent_task_id not in self._tasks:
             return 0
@@ -227,61 +210,6 @@ class AgentTaskRegistry:
         """
         return self._tasks.get(task_id)
 
-    def collect_child_results(self, parent_task_id: str) -> Dict[str, CollectedChildResult]:
-        """Collect all direct child results with task_description.
-
-        Args:
-            parent_task_id: The parent task ID to collect results for
-
-        Returns:
-            Dictionary mapping child task IDs to their CollectedChildResult
-        """
-        parent = self._tasks.get(parent_task_id)
-        if not parent:
-            return {}
-        results = {}
-        for child_id in parent.child_task_ids:
-            child_task = self._tasks.get(child_id)
-            if child_task and child_task.result is not None:
-                results[child_id] = CollectedChildResult(
-                    task_description=child_task.task_description,
-                    result=child_task.result,
-                )
-        return results
-
-    def get_task_depth(self, task_id: str) -> int:
-        """Get the depth of a task.
-
-        Args:
-            task_id: The task ID to look up.
-
-        Returns:
-            The task's depth, or 0 if the task is not found.
-        """
-        task = self._tasks.get(task_id)
-        return task.depth if task else 0
-
-    async def collect_and_cleanup(
-        self, parent_task_id: str
-    ) -> Dict[str, CollectedChildResult]:
-        """Atomically collect child results, clear parent's child list, and remove child tasks.
-
-        All operations are performed inside the registry lock for consistency.
-
-        Args:
-            parent_task_id: The parent task whose children should be collected and cleaned.
-
-        Returns:
-            Mapping from child task ID to CollectedChildResult.
-        """
-        async with self._lock:
-            results = self.collect_child_results(parent_task_id)
-            parent = self._tasks.get(parent_task_id)
-            if parent:
-                parent.child_task_ids.clear()
-                for child_id in results:
-                    self._tasks.pop(child_id, None)
-            return results
 
 
 __all__ = ["CompleteInfo", "AgentTaskRegistry"]

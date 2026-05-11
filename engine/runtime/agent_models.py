@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
-if TYPE_CHECKING:
-    from engine.subagent.subagent_models import CollectedChildResult
+
 
 
 class AgentState(Enum):
@@ -67,10 +66,21 @@ class Session:
     depth: int = 0
     parent_id: Optional[str] = None
     messages: List[Message] = field(default_factory=list)
+    _on_message_added: Any = field(default=None, repr=False)
 
     def add_message(self, role: str, content: str, **metadata):
         """Add a message to the session."""
-        self.messages.append(Message(role, content, metadata))
+        msg = Message(role, content, metadata)
+        self.messages.append(msg)
+        if self._on_message_added is not None:
+            try:
+                self._on_message_added(msg)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(
+                    "Session callback failed | session_id=%s, role=%s, error=%s: %s",
+                    self.id, role, type(e).__name__, e,
+                )
 
     def get_messages(self) -> List[Dict]:
         """Get all messages as dictionaries."""
@@ -79,8 +89,8 @@ class Session:
 
 @dataclass
 class QueueEvent:
-    trigger_task_id: str  # Trigger child task_id (debug/log)
-    child_results: Dict[str, CollectedChildResult]  # All child task_id → enriched result
+    trigger_task_id: str
+    child_summary: str
     error: bool
 
 

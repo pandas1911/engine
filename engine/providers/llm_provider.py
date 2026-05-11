@@ -4,8 +4,10 @@ This module provides abstract and concrete LLM provider implementations.
 """
 
 import asyncio
+import re
+import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from openai import AsyncOpenAI
 
@@ -59,19 +61,11 @@ class BaseLLMProvider(ABC):
         tools: List[Dict],
         agent_label: str = "Root",
         task_id: str = "unknown",
-    ) -> None:
-        """Stream a chat request to the LLM.
-
-        Args:
-            messages: List of message dictionaries with 'role' and 'content'
-            tools: List of tool definitions available to the LLM
-            agent_label: Label for the agent making the request
-            task_id: ID of the task being executed
-
-        Raises:
-            NotImplementedError: Streaming is not yet implemented
-        """
+        depth: int = 0,
+    ) -> AsyncGenerator[Any, None]:
+        """Stream a chat request to the LLM, yielding StreamChunk objects."""
         pass
+        yield  # make it a generator
 
 
 class LLMProvider(BaseLLMProvider):
@@ -94,6 +88,7 @@ class LLMProvider(BaseLLMProvider):
             api_key=provider_params.api_key,
             base_url=provider_params.base_url,
             max_retries=0,
+            timeout=120.0,
         )
         self.model = provider_params.model
         self._model_params = model_params or {}
@@ -102,7 +97,6 @@ class LLMProvider(BaseLLMProvider):
             max_attempts=runtime_config.llm_retry_max_attempts,
             base_delay=runtime_config.llm_retry_base_delay,
         )
-        self._last_snapshot = None
         self._last_usage = None
 
     async def chat(
@@ -124,6 +118,7 @@ class LLMProvider(BaseLLMProvider):
 
         logger = get_logger()
         msg_roles = [m.get("role", "?") for m in messages]
+        # [==================== LOG: llm ====================]
         logger.info(
             agent_label,
             "Sending LLM API request | model={}, message_count={}, has_tools={}, tool_count={}".format(
@@ -135,14 +130,38 @@ class LLMProvider(BaseLLMProvider):
                   "message_roles": msg_roles, "has_tools": bool(tools),
                   "tool_count": len(tools) if tools else 0}
         )
+        # [==================== END LOG ============================]
 
         last_error: Optional[Exception] = None
+        _CUMULATIVE_TIMEOUT = 300.0
+        _retry_start = time.monotonic()
 
         for attempt in range(1, self._retry_engine.max_attempts + 1):
+            # Cumulative timeout guard
+            if time.monotonic() - _retry_start > _CUMULATIVE_TIMEOUT:
+                # [==================== LOG: error ====================]
+                logger.error(
+                    agent_label,
+                    "LLM retry abandoned (cumulative timeout) | elapsed={:.1f}s, limit={}s, attempts={}".format(
+                        time.monotonic() - _retry_start, _CUMULATIVE_TIMEOUT, attempt - 1
+                    ),
+                    task_id=task_id, state="error", depth=depth,
+                    event_type="llm_cumulative_timeout",
+                    data={
+                        "elapsed_seconds": time.monotonic() - _retry_start,
+                        "limit_seconds": _CUMULATIVE_TIMEOUT,
+                        "attempts_made": attempt - 1,
+                        "model": self.model,
+                    },
+                )
+                # [==================== END LOG ============================]
+                raise LLMProviderError(
+                    TimeoutError("Cumulative retry timeout ({:.1f}s) exceeded".format(_CUMULATIVE_TIMEOUT))
+                ) from last_error
+
             try:
                 response = await self.client.chat.completions.create(**params)
 
-                self._extract_rate_limit_headers(response)
                 self._extract_usage(response)
 
                 # --- Success path ---
@@ -165,10 +184,18 @@ class LLMProvider(BaseLLMProvider):
                         )
 
                 content = message.content or ""
+
+                # Extract thinking BEFORE stripping (for persistence)
+                thinking_match = re.search(
+                    r"<think[^>]*>(.*?)</think\s*>", content, re.DOTALL | re.IGNORECASE
+                )
+                thinking_text = thinking_match.group(1).strip() if thinking_match else None
+
                 content = self._strip_thinking(content)
 
                 if tool_calls:
                     for tc in tool_calls:
+                        # [==================== LOG: llm ====================]
                         logger.tool(
                             agent_label,
                             "LLM returned tool call | tool=\"{}\", call_id={}".format(tc.name, tc.call_id),
@@ -176,7 +203,9 @@ class LLMProvider(BaseLLMProvider):
                             tool_name=tc.name,
                             data={"call_id": tc.call_id, "arguments": tc.arguments}
                         )
+                        # [==================== END LOG ============================]
                 elif content.strip():
+                    # [==================== LOG: llm ====================]
                     logger.info(
                         agent_label,
                         "LLM returned text response | content_length={}, thinking_stripped={}".format(
@@ -188,8 +217,9 @@ class LLMProvider(BaseLLMProvider):
                               "thinking_stripped": self.strip_thinking,
                               "content": content}
                     )
+                    # [==================== END LOG ============================]
 
-                return LLMResponse(content=content, tool_calls=tool_calls)
+                return LLMResponse(content=content, tool_calls=tool_calls, thinking=thinking_text)
 
             except Exception as e:
                 last_error = e
@@ -206,6 +236,7 @@ class LLMProvider(BaseLLMProvider):
                     retry_after = self._retry_engine.extract_retry_after(e)
                     delay = self._retry_engine.compute_delay(attempt, retry_after)
 
+                    # [==================== LOG: error ====================]
                     logger.warning(
                         agent_label,
                         "LLM API call failed, retrying | attempt={}/{}, wait={:.2f}s, error_type={}, error=\"{}\"".format(
@@ -222,11 +253,13 @@ class LLMProvider(BaseLLMProvider):
                             "error_message": str(e)[:500],
                         }
                     )
+                    # [==================== END LOG ============================]
 
                     await asyncio.sleep(delay)
                     continue
 
         # All retries exhausted
+        # [==================== LOG: error ====================]
         logger.error(
             agent_label,
             "LLM API call failed after {} attempts | error_type={}, error=\"{}\"".format(
@@ -241,49 +274,8 @@ class LLMProvider(BaseLLMProvider):
                 "attempts": self._retry_engine.max_attempts,
             }
         )
+        # [==================== END LOG ============================]
         raise LLMProviderError(last_error) from last_error
-
-    def _extract_rate_limit_headers(self, response) -> None:
-        """Extract rate limit info from response headers (best-effort, provider-agnostic)."""
-        try:
-            headers = {}
-            if hasattr(response, 'headers'):
-                headers = response.headers
-            elif hasattr(response, 'raw_response') and hasattr(response.raw_response, 'headers'):
-                headers = response.raw_response.headers
-
-            if not headers:
-                self._last_snapshot = None
-                return
-
-            def _safe_int(val, default=None):
-                try:
-                    return int(val)
-                except (TypeError, ValueError):
-                    return default
-
-            remaining_rpm = _safe_int(headers.get('x-ratelimit-remaining-requests'))
-            remaining_tpm = _safe_int(headers.get('x-ratelimit-remaining-tokens'))
-            limit_rpm = _safe_int(headers.get('x-ratelimit-limit-requests'))
-            limit_tpm = _safe_int(headers.get('x-ratelimit-limit-tokens'))
-
-            if remaining_rpm is None:
-                remaining_rpm = _safe_int(headers.get('ratelimit-remaining'))
-            if limit_rpm is None:
-                limit_rpm = _safe_int(headers.get('ratelimit-limit'))
-
-            if remaining_rpm is not None or remaining_tpm is not None:
-                from engine.providers.provider_models import RateLimitSnapshot
-                self._last_snapshot = RateLimitSnapshot(
-                    remaining_rpm=remaining_rpm,
-                    remaining_tpm=remaining_tpm,
-                    limit_rpm=limit_rpm,
-                    limit_tpm=limit_tpm,
-                )
-            else:
-                self._last_snapshot = None
-        except Exception:
-            self._last_snapshot = None
 
     def _extract_usage(self, response) -> None:
         """Extract token usage from response."""
@@ -296,10 +288,6 @@ class LLMProvider(BaseLLMProvider):
                 )
         except Exception:
             self._last_usage = None
-
-    def get_rate_limit_snapshot(self):
-        """Return last known rate limit snapshot from response headers."""
-        return self._last_snapshot
 
     def get_last_usage(self):
         """Return (prompt_tokens, completion_tokens) from last response."""
@@ -331,19 +319,72 @@ class LLMProvider(BaseLLMProvider):
         tools: List[Dict],
         agent_label: str = "Root",
         task_id: str = "unknown",
-    ) -> None:
-        """Stream a chat request to the LLM.
+        depth: int = 0,
+    ) -> AsyncGenerator[Any, None]:
+        """Stream a chat request, yielding StreamChunk objects."""
+        from engine.providers.thinking_strategy import get_thinking_extractor
+        from engine.providers.chunk_types import StreamChunk
 
-        Args:
-            messages: List of message dictionaries with 'role' and 'content'
-            tools: List of tool definitions available to the LLM
-            agent_label: Label for the agent making the request
-            task_id: ID of the task being executed
+        params: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+        }
+        if tools:
+            params["tools"] = tools
+        params.update(self._model_params)
 
-        Raises:
-            NotImplementedError: Streaming is not yet implemented
-        """
-        raise NotImplementedError("Streaming not yet implemented")
+        logger = get_logger()
+        # [==================== LOG: llm ====================]
+        logger.info(
+            agent_label,
+            "Streaming LLM API request | model={}, message_count={}, has_tools={}".format(
+                self.model, len(messages), bool(tools)
+            ),
+            task_id=task_id, state="running", depth=depth,
+            event_type="llm_stream_request",
+            data={"model": self.model, "message_count": len(messages),
+                  "has_tools": bool(tools)},
+        )
+        # [==================== END LOG ============================]
+
+        # One extractor per stream — stateful, matched to provider
+        extractor = get_thinking_extractor(str(self.client.base_url), self._model_params)
+
+        try:
+            response = await self.client.chat.completions.create(**params)
+
+            async for chunk in response:
+                if not chunk.choices:
+                    continue
+
+                delta = chunk.choices[0].delta
+
+                # Thinking + text extraction (one call)
+                result = extractor.extract(delta)
+
+                # Tool call deltas
+                tool_call_deltas = None
+                if hasattr(delta, "tool_calls") and delta.tool_calls:
+                    tool_call_deltas = delta.tool_calls
+
+                yield StreamChunk(
+                    delta_text=result.response_text,
+                    thinking_text=result.thinking_text,
+                    tool_calls=tool_call_deltas,
+                    finish_reason=chunk.choices[0].finish_reason,
+                    thinking_source=result.source,
+                )
+
+            flush_result = extractor.flush()
+            if flush_result.thinking_text or flush_result.response_text:
+                yield StreamChunk(
+                    delta_text=flush_result.response_text,
+                    thinking_text=flush_result.thinking_text,
+                )
+
+        except Exception as e:
+            raise LLMProviderError(e) from e
 
 
 __all__ = ["BaseLLMProvider", "LLMProvider", "LLMProviderError"]

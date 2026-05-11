@@ -7,8 +7,6 @@ This module consolidates logic from:
 """
 
 import asyncio
-import json
-import re
 import uuid
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -16,22 +14,24 @@ from engine.runtime.agent_models import AgentState, Session
 from engine.config import Config, get_config
 from engine.logging import get_logger
 from engine.providers.provider_models import Lane
-from engine.safety import LaneConcurrencyQueue, ResultTruncator
+from engine.safety import LaneConcurrencyQueue
+from engine.safety.token_estimator import ResultTruncator
 from .events import AgentEvent, ChildCompletionEvent
-from .subagent_models import CollectedChildResult
 from engine.prompts import (
-    DEPTH_LIMIT_REJECTION,
     get_subagent_system_prompt,
     get_spawn_confirmation,
     get_concurrency_timeout_rejection,
-    get_child_results_prompt,
-    get_child_results_empty_warning,
 )
+from engine.prompts.builder import build_subagent_prompt
+from engine.prompts.env_builder import build_env_context
 from engine.runtime.task_registry import CompleteInfo, AgentTaskRegistry
 from engine.time import TimeProvider
 
 if TYPE_CHECKING:
     from .protocol import Drainable
+    from .subagent_models import ChildCompletionNotification
+
+_SUMMARY_MAX_LENGTH = 6000
 
 
 class SubAgentManager:
@@ -56,6 +56,8 @@ class SubAgentManager:
         lane_queue: Optional["LaneConcurrencyQueue"] = None,
         llm_provider=None,
         tool_pack=None,
+        root_streaming_handler=None,
+        session_store=None,
     ):
         """
         Args:
@@ -68,6 +70,8 @@ class SubAgentManager:
             lane_queue: Optional lane-based concurrency queue
             llm_provider: Shared LLM provider for child agent construction
             tool_pack: Shared ToolPack for child agent construction
+            root_streaming_handler: Optional SSEStreamingHandler from the root agent for sub-agent streaming
+            session_store: Optional SessionStore for persisting child sessions to disk
         """
         self._task_registry = task_registry
         self._event_queue = event_queue
@@ -78,6 +82,8 @@ class SubAgentManager:
         self._lane_queue = lane_queue
         self._llm_provider = llm_provider
         self._tool_pack = tool_pack
+        self._root_streaming_handler = root_streaming_handler
+        self._session_store = session_store
         self._time_provider = TimeProvider(
             timezone_override=config.user_timezone if config else None
         )
@@ -107,18 +113,20 @@ class SubAgentManager:
             Confirmation string on success, or error message on failure.
         """
         config = get_config()
-        if parent_session.depth >= config.max_depth:
+        if parent_session.depth >= 1:
+            # [===================== LOG: error ======================]
             logger = get_logger()
             logger.error(
                 self._parent_label,
-                "Spawn rejected: maximum nesting depth reached | current_depth={}, max_depth={}".format(
-                    parent_session.depth, config.max_depth
+                "Spawn rejected: sub-agents cannot spawn further children | current_depth={}".format(
+                    parent_session.depth
                 ),
                 task_id=self._agent_task_id, state="running", depth=parent_session.depth,
                 event_type="spawn_depth_limit",
-                data={"current_depth": parent_session.depth, "max_depth": config.max_depth}
+                data={"current_depth": parent_session.depth}
             )
-            return DEPTH_LIMIT_REJECTION.format(depth=parent_session.depth, max_depth=config.max_depth)
+            # [====================== END LOG =======================]
+            return "Sub-agents cannot spawn further children. Please complete your current task."
 
         # Global concurrency gate — acquire BEFORE register
         lane_slot = None
@@ -132,6 +140,7 @@ class SubAgentManager:
                 status = self._lane_queue.get_status().get(Lane.SUBAGENT)
                 active = status.active if status else "?"
                 max_conc = status.max_concurrent if status else "?"
+                # [===================== LOG: error ======================]
                 logger = get_logger()
                 logger.error(
                     self._parent_label,
@@ -148,6 +157,7 @@ class SubAgentManager:
                         "label": label,
                     }
                 )
+                # [====================== END LOG =======================]
                 return get_concurrency_timeout_rejection(
                     task_desc=task_desc,
                     label=label,
@@ -165,15 +175,15 @@ class SubAgentManager:
         )
 
         parent_label = self._parent_label
-        can_spawn = child_session.depth < config.max_depth and config.is_tool_enabled("spawn")
+        can_spawn = False
 
         self._child_counter += 1
         child_index = self._child_counter
         child_depth = child_session.depth
-        path_index = self._build_path_index(parent_label, child_index)
-        display_name = "Sub-{}(d:{})".format(path_index, child_depth)
+        display_name = "Sub-{}".format(child_index)
         llm_label = label
 
+        # [=================== LOG: lifecycle ====================]
         logger = get_logger()
         logger.info(
             self._parent_label,
@@ -185,34 +195,60 @@ class SubAgentManager:
             data={
                 "child_task_id": task_id, "child_label": display_name,
                 "child_session_id": child_session.id, "child_depth": child_depth,
-                "max_depth": config.max_depth, "can_spawn_further": can_spawn,
+                "can_spawn_further": can_spawn,
                 "task_description": task_desc, "llm_label": llm_label,
             }
         )
+        # [==================== END LOG ==========================]
 
-        system_prompt = get_subagent_system_prompt(
+        env_context = build_env_context(
+            time_provider=self._time_provider,
+            workspace_dir=str(self._config.get_workspace_path()) if self._config else "/tmp",
+            model_name=self._config.primary if self._config else "unknown",
+        )
+        system_prompt = build_subagent_prompt(
             parent_label=parent_label,
             task_desc=task_desc,
             depth=child_session.depth,
-            max_depth=config.max_depth,
             can_spawn=can_spawn,
             task_id=task_id,
             label=display_name,
+            env_context=env_context,
         )
 
-        env_block = self._time_provider.format_system_env_block()
-        system_prompt = f"{system_prompt}\n\n{env_block}"
-
         child_session.add_message("system", system_prompt)
+
+        if self._session_store is not None:
+            self._session_store.create_file(task_id, child_session)
+            child_session._on_message_added = lambda msg, tid=task_id: self._session_store.append_line(tid, msg)
 
         await self._task_registry.register(
             task_id=task_id,
             session_id=child_session.id,
             description=task_desc,
-            parent_agent=None,
             parent_task_id=self._agent_task_id,
             depth=child_session.depth,
         )
+
+        # Create SubAgentStreamingWrapper for depth-1 children (root agent's direct children)
+        child_streaming_handler = None
+        if self._root_streaming_handler is not None and parent_session.depth == 0:
+            from engine.streaming_handler import SubAgentStreamingWrapper
+            child_streaming_handler = SubAgentStreamingWrapper(
+                parent=self._root_streaming_handler,
+                task_id=task_id,
+            )
+            # Emit subagent_start event
+            # [=================== EMIT: subagent ====================]
+            start_part_id = self._root_streaming_handler._next_part_id()
+            self._root_streaming_handler.emit("subagent_start", {
+                "part_id": start_part_id,
+                "task_id": task_id,
+                "label": label,
+                "description": task_desc,
+                "parent_task_id": self._agent_task_id,
+            })
+            # [====================== END EMIT =======================]
 
         from engine.runtime.agent import Agent
 
@@ -225,7 +261,7 @@ class SubAgentManager:
             task_id=task_id,
             parent_task_id=self._agent_task_id,
             label=display_name,
-            lane_queue=self._lane_queue,
+            streaming_handler=child_streaming_handler,
         )
 
         await self._task_registry.set_agent(task_id, child_agent)
@@ -235,31 +271,6 @@ class SubAgentManager:
         )
 
         return get_spawn_confirmation(task_id=task_id, label=label)
-
-    # ------------------------------------------------------------------
-    # _build_path_index() — generates dotted path index for child labels
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _build_path_index(parent_label: str, child_index: int) -> str:
-        """Build a dotted path index from parent label and child counter.
-
-        Root → "1", "2" ...
-        Sub-1(d:1) → "1.1", "1.2" ...
-        Sub-2.1(d:2) → "2.1.1", "2.1.2" ...
-
-        Args:
-            parent_label: Parent agent's display label (e.g. "Root", "Sub-1(d:1)").
-            child_index: This child's sequential index within the parent.
-
-        Returns:
-            Dotted path index string.
-        """
-        match = re.match(r"Sub-(.+?)\(d:\d+\)", parent_label)
-        if match:
-            return "{}.{}".format(match.group(1), child_index)
-        # Root or unrecognized label — start fresh
-        return str(child_index)
 
     # ------------------------------------------------------------------
     # _run_child() — migrated from SpawnTool._run_child_agent() (spawn.py lines 154-244)
@@ -308,6 +319,7 @@ class SubAgentManager:
             display_name: Display name for the child agent.
         """
         try:
+            # [=================== LOG: lifecycle ====================]
             logger = get_logger()
             logger.info(
                 display_name or "Sub",
@@ -316,11 +328,13 @@ class SubAgentManager:
                 event_type="child_run_start",
                 data={"task_description": task_desc}
             )
+            # [==================== END LOG ==========================]
             await agent.run(task_desc)
         except Exception as e:
             # Safety net — agent.run() should catch all exceptions internally via _abort()
             # If we reach here, _abort() or run() has a bug
             await agent.abort(e)
+            # [===================== LOG: error ======================]
             logger = get_logger()
             logger.error(
                 display_name or "Sub",
@@ -330,11 +344,20 @@ class SubAgentManager:
                 event_type="child_run_unhandled",
                 data={"error_type": type(e).__name__, "error_message": str(e)},
             )
+            # [====================== END LOG =======================]
+            # [=================== EMIT: subagent ====================]
+            if self._root_streaming_handler is not None:
+                self._root_streaming_handler.emit("subagent_error", {
+                    "task_id": task_id,
+                    "message": str(agent._final_result or "Unknown error"),
+                })
+            # [====================== END EMIT =======================]
             return
 
         # Log based on final state (registry.complete handled internally by agent)
         state = agent.state
         if state == AgentState.COMPLETED:
+            # [=================== LOG: lifecycle ====================]
             logger = get_logger()
             logger.info(
                 display_name or "Sub",
@@ -345,7 +368,9 @@ class SubAgentManager:
                 data={"result_length": len(agent.result) if agent.result else 0,
                       "result": agent.result or ""},
             )
+            # [==================== END LOG ==========================]
         elif state == AgentState.ERROR:
+            # [===================== LOG: error ======================]
             logger = get_logger()
             logger.error(
                 display_name or "Sub",
@@ -354,7 +379,9 @@ class SubAgentManager:
                 event_type="child_run_abort",
                 data={"error_result": agent._final_result},
             )
+            # [====================== END LOG =======================]
         elif state == AgentState.WAITING_FOR_CHILDREN:
+            # [=================== LOG: lifecycle ====================]
             logger = get_logger()
             logger.info(
                 display_name or "Sub",
@@ -362,7 +389,9 @@ class SubAgentManager:
                 task_id=task_id, state=state.value, depth=depth,
                 event_type="child_run_waiting",
             )
+            # [==================== END LOG ==========================]
         else:
+            # [=================== LOG: lifecycle ====================]
             logger = get_logger()
             logger.info(
                 display_name or "Sub",
@@ -371,169 +400,145 @@ class SubAgentManager:
                 event_type="child_run_unexpected_state",
                 data={"state": state.value},
             )
+            # [==================== END LOG ==========================]
+
+        # [=================== EMIT: subagent ====================]
+        if self._root_streaming_handler is not None:
+            if state == AgentState.COMPLETED:
+                self._root_streaming_handler.emit("subagent_done", {
+                    "task_id": task_id, "success": True,
+                })
+            elif state == AgentState.ERROR:
+                self._root_streaming_handler.emit("subagent_error", {
+                    "task_id": task_id,
+                    "message": str(agent._final_result or "Unknown error"),
+                })
+        # [====================== END EMIT =======================]
 
     # ------------------------------------------------------------------
     # _on_child_complete() — migrated from Registry.complete() (registry.py lines 167-243)
     # ------------------------------------------------------------------
 
     async def _on_child_complete(self, task_id: str, info: CompleteInfo) -> None:
-        """Handler called by task_registry when a child completes. Gate checks + notification.
+        """Handler called by task_registry when a child completes. Per-child immediate wake.
+
+        Each child independently triggers its own notification to the parent.
+        No sibling gates — the parent is woken immediately for every completing child.
 
         Args:
             task_id: The completing child's task ID.
             info: Completion info from the registry (pending counts, parent).
         """
-        _ct = self._task_registry.get_task(task_id)
-        _child_label = (
-            getattr(_ct.agent, "label", None)
-            if (_ct and _ct.agent)
-            else None
-        ) or "Child({})".format(task_id[:8])
-        _child_depth = _ct.depth if _ct else 0
-
-        # [Gate 1] Still have pending children → return
-        if info.pending_children > 0:
-            logger = get_logger()
-            logger.info(
-                _child_label,
-                "Task completed but has pending children | task_id={}, pending_children={}".format(
-                    task_id, info.pending_children
-                ),
-                task_id=task_id, state="running",
-                depth=_child_depth,
-                event_type="registry_complete_blocked_children",
-                data={"pending_children": info.pending_children, "result_length": 0}
-            )
-            return
-
-        # [Gate 2] Parent doesn't exist or not registered → return
+        # [Gate] Parent doesn't exist or not registered → return
         if not (info.parent_task_id and self._task_registry.get_task(info.parent_task_id)):
             return
 
-        # [Gate 3] Still have pending siblings → return
-        if info.pending_siblings > 0:
-            logger = get_logger()
-            logger.info(
-                _child_label,
-                "Task completed but has pending siblings | task_id={}, parent_task_id={}, pending_siblings={}".format(
-                    task_id, info.parent_task_id, info.pending_siblings
-                ),
-                task_id=task_id, state="running",
-                depth=_child_depth,
-                event_type="registry_complete_blocked_siblings",
-                data={"parent_task_id": info.parent_task_id, "pending_siblings": info.pending_siblings}
-            )
+        child_task = self._task_registry.get_task(task_id)
+        if not child_task:
             return
 
-        # All gates passed → collect results and notify parent
-        child_results = await self._task_registry.collect_and_cleanup(self._agent_task_id)
+        notification = self._build_child_notification(task_id, child_task)
 
         parent_state = self._drainable.state
-        branch = (
-            "A (direct resume)" if parent_state == AgentState.WAITING_FOR_CHILDREN
-            else "B (enqueue)" if parent_state == AgentState.RUNNING
-            else "C (re-propagate)" if parent_state == AgentState.COMPLETED
-            else "unknown"
-        )
-        child_ids = list(child_results.keys())
 
-        # Build per-child result summaries for logging
-        result_summaries = {}
-        if child_results:
-            for tid, info in child_results.items():
-                result_summaries[tid] = {
-                    "task_description": info.task_description,
-                    "result_length": len(info.result),
-                    "result": info.result,
-                }
-
-        logger = get_logger()
-        logger.info(
-            _child_label,
-            "All children completed, notifying parent | task_id={}, parent_task_id={}, branch={}, parent_state={}, child_count={}".format(
-                task_id, self._agent_task_id, branch, parent_state.value, len(child_results)
+        # [=================== LOG: lifecycle ====================]
+        get_logger().info(
+            getattr(child_task.agent, "label", None) or "Child",
+            "Child completed, notifying parent | task_id={}, parent_task_id={}, branch={}, parent_state={}".format(
+                task_id, self._agent_task_id,
+                "A" if parent_state == AgentState.WAITING_FOR_CHILDREN else "B" if parent_state == AgentState.RUNNING else "skip",
+                parent_state.value,
             ),
-            task_id=task_id, state="running", depth=_child_depth,
-            event_type="registry_notify_parent",
+            task_id=task_id, state="completed", depth=child_task.depth,
+            event_type="child_notify_parent",
             data={
                 "parent_task_id": self._agent_task_id,
                 "parent_state": parent_state.value,
-                "branch": branch,
-                "child_count": len(child_results),
-                "child_ids": child_ids,
-                "results_summary": result_summaries,
-            }
+                "child_status": notification.status,
+            },
         )
+        # [==================== END LOG ==========================]
 
-        formatted = self._format_child_results(child_results)
+        # Always enqueue the notification — guarantees no message loss even when
+        # multiple children complete in the same event loop tick (both see
+        # WAITING_FOR_CHILDREN and create resume tasks; the first task to acquire
+        # _run_lock drains ALL queued events, the second task finds COMPLETED and no-ops).
+        event = ChildCompletionEvent(notification=notification)
+        self._event_queue.append(event)
 
-        # [Branch A] Parent waiting for children → direct resume, bypass queue
+        # [Branch A] Parent waiting → also resume agent processing
         if parent_state == AgentState.WAITING_FOR_CHILDREN:
             asyncio.create_task(
-                self._drainable.run(formatted, trigger="children_settled")
+                self._drainable.run(trigger="children_settled")
             )
 
-        # [Branch B] Parent still running → enqueue for self-drain
-        elif parent_state == AgentState.RUNNING:
-            event = ChildCompletionEvent(child_results=child_results, formatted_prompt=formatted)
-            self._event_queue.append(event)
+        # [Branch B] Parent running → event already enqueued, will be drained by
+        # the active _execute_cycle() loop — nothing more to do.
 
-        # [Branch C] Parent already completed → its earlier notification was blocked
-        # by Gate 1 (pending_children > 0). Now that this last child is done,
-        # re-propagate the notification upward to the grandparent.
-        elif parent_state == AgentState.COMPLETED:
-            parent_task = self._task_registry.get_task(self._agent_task_id)
-            if parent_task and parent_task.result:
-                logger = get_logger()
-                logger.info(
-                    self._parent_label,
-                    "Parent already completed, re-propagating notification to grandparent | parent_task_id={}".format(
-                        self._agent_task_id),
-                    task_id=self._agent_task_id, state="completed",
-                    depth=self._task_registry.get_task_depth(self._agent_task_id),
-                    event_type="registry_repropagate_completed_parent",
-                    data={"parent_task_id": self._agent_task_id},
-                )
-                await self._task_registry.complete(self._agent_task_id, parent_task.result)
+        # Parent in COMPLETED/ERROR/IDLE → skip
 
     # ------------------------------------------------------------------
-    # _format_child_results() — formats child results into a JSON prompt
+    # _build_child_notification() — builds ChildCompletionNotification for one child
     # ------------------------------------------------------------------
 
-    def _format_child_results(self, child_results: Dict[str, CollectedChildResult]) -> str:
-        """Format child results into a JSON prompt for the parent agent.
+    def _build_child_notification(self, task_id: str, child_task) -> "ChildCompletionNotification":
+        """Build a ChildCompletionNotification for a single completing child.
 
         Args:
-            child_results: Mapping from child task ID to collected result.
+            task_id: The child's task ID.
+            child_task: The AgentTask instance for the child.
 
         Returns:
-            Formatted string ready to be injected as a user message.
+            A ChildCompletionNotification with extracted label, status, and summary.
         """
-        if not child_results:
-            return get_child_results_empty_warning()
+        from .subagent_models import ChildCompletionNotification
 
-        max_len = self._config.max_result_length if self._config else 4000
+        if child_task.result is not None:
+            status = "completed"
+        elif child_task.agent is not None and child_task.agent.state == AgentState.ERROR:
+            status = "error"
+        else:
+            status = "completed"
 
-        entries = []
-        for task_id, info in child_results.items():
-            truncated = ResultTruncator.truncate(info.result, max_len)
-            if len(info.result) > max_len:
-                logger = get_logger()
-                logger.warning(
-                    "SubAgentManager",
-                    "Child result truncated | task_id={}, original={} chars, limit={} chars".format(
-                        task_id, len(info.result), max_len
-                    ),
-                    event_type="truncation",
-                    task_id=task_id,
-                    data={"original_length": len(info.result), "max_length": max_len},
-                )
-            entries.append(json.dumps({
-                "task_id": task_id,
-                "task": info.task_description,
-                "result": truncated,
-            }, ensure_ascii=False))
+        label = (
+            getattr(child_task.agent, "label", None)
+            if child_task.agent
+            else None
+        ) or task_id
 
-        return get_child_results_prompt("\n".join(entries))
+        summary = ""
+        if child_task.agent is not None and child_task.agent.session is not None:
+            for msg in reversed(child_task.agent.session.messages):
+                if msg.role == "assistant" and msg.content:
+                    content = msg.content.strip()
+                    if not content.startswith("<think"):
+                        summary = content
+                        break
+
+        if not summary:
+            if status == "error" and child_task.agent is not None:
+                summary = getattr(child_task.agent, "_final_result", None) or "Unknown error"
+            elif child_task.result:
+                summary = child_task.result
+
+        summary = ResultTruncator.truncate(summary, _SUMMARY_MAX_LENGTH)
+
+        session_file = (
+            str(self._session_store.sessions_dir / f"{task_id}.jsonl")
+            if self._session_store is not None and self._session_store.sessions_dir is not None
+            else f"{task_id}.jsonl"
+        )
+
+        # Release agent reference — callback already persists all messages in real-time
+        child_task.agent = None
+
+        return ChildCompletionNotification(
+            task_id=task_id,
+            label=label,
+            task=child_task.task_description,
+            status=status,
+            summary=summary,
+            session_file=session_file,
+        )
 
 
