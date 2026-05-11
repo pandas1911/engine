@@ -220,12 +220,15 @@
                 await fetch('/api/chat/abort', { method: 'POST' });
             } catch (e) {}
         }
-
+        let _pendingNewSession = false;
 
         function handleSSEEvent(eventType, data) {
             switch (eventType) {
                 case 'agent_start': {
-                    if (data.session_id) setSessionId(data.session_id);
+                    if (data.session_id) {
+                        if (!getSessionId()) _pendingNewSession = true;
+                        setSessionId(data.session_id);
+                    }
                     break;
                 }
                 case 'part_new': {
@@ -296,6 +299,10 @@
                     agentState = 'idle';
                     updateInputState();
                     if (data.session_id) setSessionId(data.session_id);
+                    if (_pendingNewSession) {
+                        _pendingNewSession = false;
+                        fetchSessions();
+                    }
                     for (const part of parts) {
                         if (part.state === 'open') {
                             part.state = 'closed';
