@@ -8,6 +8,10 @@
         const inputEl = document.getElementById('chat-input');
         const sendBtn = document.getElementById('send-btn');
         const newChatBtn = document.getElementById('new-chat-btn');
+        const sidebarEl = document.getElementById('sidebar');
+        const sessionListEl = document.getElementById('session-list');
+        const sidebarToggleBtn = document.getElementById('sidebar-toggle-btn');
+        const sidebarCloseBtn = document.getElementById('sidebar-close-btn');
 
         inputEl.addEventListener('input', () => {
             inputEl.style.height = 'auto';
@@ -39,6 +43,10 @@
             }
             localStorage.removeItem(SESSION_KEY);
             messagesEl.innerHTML = '<div class="empty-state">Send a message to start</div>';
+            // Close sidebar if open
+            if (sidebarEl.classList.contains('open')) {
+                sidebarEl.classList.remove('open');
+            }
         });
 
         messagesEl.addEventListener('scroll', () => {
@@ -52,6 +60,13 @@
                 messagesEl.scrollTop = messagesEl.scrollHeight;
             }
         }
+
+        function toggleSidebar() {
+            sidebarEl.classList.toggle('open');
+        }
+
+        sidebarToggleBtn.addEventListener('click', toggleSidebar);
+        sidebarCloseBtn.addEventListener('click', toggleSidebar);
 
         function getSessionId() {
             return localStorage.getItem(SESSION_KEY);
@@ -80,6 +95,71 @@
             autoScroll();
         }
 
+        function resetChatState() {
+            messagesEl.innerHTML = '<div class="empty-state">Send a message to start</div>';
+            parts = [];
+            subagents = {};
+            activeContentStream = null;
+            agentState = 'idle';
+            updateInputState();
+        }
+
+        async function hydrateSessionMessages(sessionId) {
+            try {
+                const response = await fetch('/api/sessions/' + sessionId);
+                if (!response.ok) throw new Error('Failed to load session');
+                const data = await response.json();
+
+                parts = [];
+                subagents = {};
+                activeContentStream = null;
+                agentState = 'idle';
+                updateInputState();
+
+                messagesEl.innerHTML = '';
+
+                const messages = data.messages || [];
+                let hasMessages = false;
+                for (const msg of messages) {
+                    if (msg.role === 'system' || msg.role === 'tool') continue;
+                    hasMessages = true;
+                    if (msg.role === 'user') {
+                        appendUserMessage(msg.content);
+                    } else if (msg.role === 'assistant') {
+                        const wrapper = document.createElement('div');
+                        wrapper.className = 'message assistant';
+                        const textBlock = document.createElement('div');
+                        textBlock.className = 'text-block';
+                        textBlock.innerHTML = typeof marked !== 'undefined' ? marked.parse(msg.content || '') : (msg.content || '');
+                        wrapper.appendChild(textBlock);
+                        messagesEl.appendChild(wrapper);
+                    }
+                }
+
+                if (!hasMessages) {
+                    messagesEl.innerHTML = '<div class="empty-state">Send a message to start</div>';
+                }
+
+                setSessionId(sessionId);
+
+                updateActiveSessionHighlight(sessionId);
+
+            } catch (err) {
+                console.error('Failed to hydrate session:', err);
+                resetChatState();
+            }
+        }
+
+        function updateActiveSessionHighlight(sessionId) {
+            const items = document.querySelectorAll('.session-item');
+            items.forEach(item => {
+                if (item.dataset.sessionId === sessionId) {
+                    item.classList.add('active');
+                } else {
+                    item.classList.remove('active');
+                }
+            });
+        }
 
         function createAssistantMessage() {
             clearEmptyState();
@@ -353,6 +433,133 @@
             }
         }
 
+        function formatRelativeTime(isoString) {
+            try {
+                const date = new Date(isoString);
+                const now = new Date();
+                const diffMs = now - date;
+                const diffMins = Math.floor(diffMs / 60000);
+                const diffHours = Math.floor(diffMs / 3600000);
+                const diffDays = Math.floor(diffMs / 86400000);
+                if (diffMins < 1) return 'just now';
+                if (diffMins < 60) return diffMins + 'm ago';
+                if (diffHours < 24) return diffHours + 'h ago';
+                if (diffDays < 7) return diffDays + 'd ago';
+                return date.toLocaleDateString();
+            } catch (e) {
+                return '';
+            }
+        }
+
+        async function fetchSessions() {
+            sessionListEl.innerHTML = '<div class="sidebar-loading">Loading sessions...</div>';
+            try {
+                const response = await fetch('/api/sessions');
+                if (!response.ok) throw new Error('Failed to fetch');
+                const data = await response.json();
+                renderSessionList(data.sessions);
+            } catch (err) {
+                sessionListEl.innerHTML = '<div class="sidebar-error"><span>Failed to load sessions</span><button class="sidebar-error-retry" onclick="fetchSessions()">Retry</button></div>';
+            }
+        }
+
+        function renderSessionList(sessions) {
+            sessionListEl.innerHTML = '';
+            if (!sessions || sessions.length === 0) {
+                sessionListEl.innerHTML = '<div class="sidebar-empty">No sessions yet</div>';
+                return;
+            }
+            const activeId = localStorage.getItem(SESSION_KEY);
+            sessions.forEach(session => {
+                const item = document.createElement('div');
+                item.className = 'session-item' + (session.id === activeId ? ' active' : '');
+                item.dataset.sessionId = session.id;
+
+                const info = document.createElement('div');
+                info.className = 'session-item-info';
+
+                const title = document.createElement('div');
+                title.className = 'session-item-title';
+                title.textContent = session.title || 'New Session';
+
+                const meta = document.createElement('div');
+                meta.className = 'session-item-meta';
+                const count = session.message_count || 0;
+                const timeStr = session.last_active ? formatRelativeTime(session.last_active) : '';
+                meta.textContent = timeStr + (timeStr && count ? ' · ' : '') + count + ' msg' + (count !== 1 ? 's' : '');
+
+                info.appendChild(title);
+                info.appendChild(meta);
+
+                const deleteBtn = document.createElement('button');
+                deleteBtn.className = 'delete-btn';
+                deleteBtn.textContent = '×';
+                deleteBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    if (typeof deleteSession === 'function') {
+                        deleteSession(session.id);
+                    }
+                });
+
+                item.appendChild(info);
+                item.appendChild(deleteBtn);
+
+                item.addEventListener('click', () => {
+                    if (typeof switchToSession === 'function') {
+                        switchToSession(session.id);
+                    }
+                });
+
+                sessionListEl.appendChild(item);
+            });
+        }
+
+        let _lastSwitchTime = 0;
+
+        async function switchToSession(sessionId) {
+            const now = Date.now();
+            if (now - _lastSwitchTime < 300) return;
+            _lastSwitchTime = now;
+
+            const activeId = localStorage.getItem(SESSION_KEY);
+            if (sessionId === activeId) return;
+
+            if (agentState !== 'idle') {
+                await abortAgent();
+            }
+
+            await hydrateSessionMessages(sessionId);
+            fetchSessions();
+        }
+
+        async function deleteSession(sessionId) {
+            if (!confirm('Delete this session?')) return;
+
+            try {
+                const response = await fetch('/api/sessions/' + sessionId, { method: 'DELETE' });
+                if (!response.ok && response.status !== 404) {
+                    console.error('Failed to delete session:', response.status);
+                    return;
+                }
+            } catch (err) {
+                console.error('Failed to delete session:', err);
+                return;
+            }
+
+            const activeId = localStorage.getItem(SESSION_KEY);
+            if (sessionId === activeId) {
+                localStorage.removeItem(SESSION_KEY);
+                resetChatState();
+            }
+
+            const item = document.querySelector('.session-item[data-session-id="' + sessionId + '"]');
+            if (item) item.remove();
+
+            if (sessionListEl.children.length === 0) {
+                sessionListEl.innerHTML = '<div class="sidebar-empty">No sessions yet</div>';
+            }
+        }
+
         async function sendMessage() {
             const message = inputEl.value.trim();
             if (!message) return;
@@ -453,3 +660,4 @@
         }
 
         inputEl.focus();
+        fetchSessions();
