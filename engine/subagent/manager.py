@@ -22,6 +22,8 @@ from engine.prompts import (
     get_spawn_confirmation,
     get_concurrency_timeout_rejection,
 )
+from engine.prompts.builder import build_subagent_prompt
+from engine.prompts.env_builder import build_env_context
 from engine.runtime.task_registry import CompleteInfo, AgentTaskRegistry
 from engine.time import TimeProvider
 
@@ -199,17 +201,20 @@ class SubAgentManager:
         )
         # [==================== END LOG ==========================]
 
-        system_prompt = get_subagent_system_prompt(
+        env_context = build_env_context(
+            time_provider=self._time_provider,
+            workspace_dir=str(self._config.get_workspace_path()) if self._config else "/tmp",
+            model_name=self._config.primary if self._config else "unknown",
+        )
+        system_prompt = build_subagent_prompt(
             parent_label=parent_label,
             task_desc=task_desc,
             depth=child_session.depth,
             can_spawn=can_spawn,
             task_id=task_id,
             label=display_name,
+            env_context=env_context,
         )
-
-        env_block = self._time_provider.format_system_env_block()
-        system_prompt = f"{system_prompt}\n\n{env_block}"
 
         child_session.add_message("system", system_prompt)
 

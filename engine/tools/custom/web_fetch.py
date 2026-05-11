@@ -115,7 +115,7 @@ class WebFetchTool(Tool):
     DEFAULT_FORMAT: str = "markdown"
 
     name = "web_fetch"
-
+    short_description = "Fetch and convert web pages to markdown or text"
     description = (
         "Fetches content from a specified URL and returns it in the requested format. "
         "Use this tool when you need to retrieve and analyze web page content, read "

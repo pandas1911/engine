@@ -10,6 +10,7 @@ from engine.tools.builtin._utils.search import MAX_RESULTS, get_search_engine
 
 class GrepTool(Tool):
     name = "grep"
+    short_description = "Search file contents using regex patterns"
     description = (
         "Fast content search tool that works with any regex pattern. "
         "Supports file type filtering via include parameter. "

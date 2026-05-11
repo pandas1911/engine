@@ -12,7 +12,14 @@ engine/
 │   ├── __init__.py            # Thin re-export layer (re-exports from runner.py and submodules)
 │   ├── runner.py              # Engine (singleton), Infrastructure, SessionManager — main entry point for the agent system
 │   ├── config.py              # Configuration loading (engine.json)
-│   ├── prompts.py             # Centralized prompt definitions (pure leaf module, zero engine.* imports)
+│   ├── prompts/               # Layered prompt system (4-layer assembly)
+│   │   ├── __init__.py        # Backward-compatible re-exports
+│   │   ├── builder.py         # 4-layer prompt assembly (base → env → tools → custom instructions)
+│   │   ├── env_builder.py     # Environment context builder (Date, Timezone, Working Directory, Model, OS)
+│   │   ├── runtime.py         # Dynamic prompt functions (warnings, confirmations, rejections)
+│   │   ├── base.md            # Layer 1: Behavioral constraints (no role assignment)
+│   │   ├── spawn.md           # Layer 1: Sub-agent spawning strategy
+│   │   └── subagent.md        # Sub-agent system prompt template (.format() syntax)
 │   ├── session_store.py       # Unified SessionStore — JSONL append persistence for root & child sessions
 │   ├── time.py                # Timezone-aware time utilities
 │   ├── safety/                # Rate limiting, concurrency, retry, pacing
@@ -225,32 +232,42 @@ Loads runtime configuration from `engine.json`.
 
 ---
 
-### 4. `engine/prompts.py` — Centralized Prompt Definitions
+### 4. `engine/prompts/` — Layered Prompt System
 
-A pure leaf module (zero `engine.*` imports) serving as the single source of truth for all LLM prompt text.
+A package implementing 4-layer system prompt assembly with clear separation of concerns. Content lives in `.md` files; assembly logic in Python modules.
 
-**Static Constants:**
+**4-Layer Architecture:**
 
-| Constant | Description |
+| Layer | Section Header | Source | Description |
+|---|---|---|---|
+| 1 | (no header) | `base.md` + optional `spawn.md` | Behavioral constraints and execution strategy |
+| 2 | `## Environment` | `env_builder.py` | Date, Timezone, Working Directory, Model, OS |
+| 3 | `## Available Tools` | Tool `short_description` attributes | Enabled tools with brief descriptions |
+| 4 | `## Custom Instructions` | `FRIDAY.md` from workspace | User-defined behavioral instructions |
+
+**Package files:**
+
+| File | Description |
 |---|---|
-| `BASE_PROMPT` | Root agent base execution strategy |
-| `SPAWN_PROMPT` | Root agent sub-agent spawning rules |
+| `__init__.py` | Backward-compatible re-exports. All symbols from old flat `prompts.py` re-exported here so existing imports continue to work. Dead code (`get_child_results_prompt`, `get_child_results_empty_warning`) removed. |
+| `builder.py` | 4-layer assembly via `build_system_prompt()`. Module-level `BASE_PROMPT`, `SPAWN_PROMPT`, `DEFAULT_SYSTEM_PROMPT` constants. Backward-compatible `build_root_system_prompt()` alias. `build_subagent_prompt()` for sub-agent assembly. `get_subagent_system_prompt()` reads from `subagent.md` template. |
+| `env_builder.py` | `build_env_context(time_provider, workspace_dir, model_name)` returns `Dict[str, str]` with 5 fields: Date, Timezone, Working Directory, Model, OS. Accepts optional `platform_override` for testing. |
+| `runtime.py` | Pure functions with zero `engine.*` imports: `get_summary_warning()`, `get_emergency_summary_prompt()`, `get_spawn_confirmation()`, `get_concurrency_timeout_rejection()`. |
+| `base.md` | Layer 1 content: behavioral constraints (Execution Strategy, Output Format, Custom Instructions Priority). No role assignment. |
+| `spawn.md` | Layer 1 content: sub-agent spawning strategy (Decompose first, Parallel over sequential, Spawning Rules). |
+| `subagent.md` | Sub-agent system prompt template using `.format()` syntax with `{parent_label}`, `{task_desc}`, `{task_id}`, `{label}` placeholders. |
 
-**Dynamic Functions:**
+**Key functions:**
 
 | Function | Description |
 |---|---|
-| `build_root_system_prompt(include_spawn)` | Assemble root agent prompt (BASE + optional SPAWN) |
-| `get_subagent_system_prompt(parent_label, task_desc, depth, can_spawn, task_id, label)` | Build sub-agent system prompt. `can_spawn` is always `False` in depth=1 architecture. `depth` retained for logging. |
-| `get_summary_warning(remaining_iterations)` | Iteration limit warning message |
-| `get_emergency_summary_prompt()` | Emergency summary forcing final answer |
-| `get_child_results_prompt(child_results_json)` | Format child results for parent consumption |
-| `get_child_results_empty_warning()` | Warning when no child results collected |
-| `get_spawn_confirmation(task_id, label)` | Spawn success confirmation message |
-| `get_concurrency_timeout_rejection(task_desc, label, active, max_concurrent, timeout)` | Concurrency limit rejection (unified from two templates) |
+| `build_system_prompt(include_spawn, env_context, tool_descriptions, user_instructions)` | Primary entry point — assembles all 4 layers in order |
+| `build_root_system_prompt(include_spawn)` | Backward-compatible alias — returns Layer 1 only |
+| `build_subagent_prompt(parent_label, task_desc, depth, can_spawn, task_id, label, env_context)` | Sub-agent prompt assembly (template + env) |
+| `get_subagent_system_prompt(parent_label, task_desc, depth, can_spawn, task_id, label)` | Reads `subagent.md` template, applies `.format()` substitution |
 
 **Derived values:**
-- `DEFAULT_SYSTEM_PROMPT` = `build_root_system_prompt(include_spawn=True)` — backward-compatible alias
+- `DEFAULT_SYSTEM_PROMPT` = `build_root_system_prompt(include_spawn=True)` — backward-compatible alias (Layer 1 only, no runtime layers)
 
 ---
 
@@ -410,7 +427,6 @@ Timezone-aware time formatting for the agent framework.
 | Method | Description |
 |---|---|
 | `resolve_timezone()` | Returns timezone string with caching |
-| `format_system_env_block()` | Returns `<env>Today's date: ... Time zone: ...</env>` block |
 | `format_message_timestamp()` | Returns `[Wed 2026-04-23 14:30 CST]` format |
 | `inject_timestamp()` | Prepends timestamp to message unless one already exists |
 
@@ -663,7 +679,7 @@ Defines the unified chunk type yielded by `stream_chat()`.
 
 #### `manager.py` — SubAgentManager
 
-Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per agent (not owned by `Agent` directly). Receives `llm_provider`, `tool_pack`, and `session_store` at construction and builds child agents directly. Prompt templates for sub-agent system prompts are defined in `engine/prompts.py` (Section 4).
+Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per agent (not owned by `Agent` directly). Receives `llm_provider`, `tool_pack`, and `session_store` at construction and builds child agents directly. Sub-agent system prompt assembled via `build_subagent_prompt()` from `engine/prompts/builder.py` with env context from `engine/prompts/env_builder.py`.
 
 **Constructor parameters:**
 
@@ -736,8 +752,8 @@ Each child independently triggers notification to the parent. No sibling gates, 
 
 | Class | Description |
 |---|---|
-| `Tool` | Abstract base class with `name`, `description`, `parameters`, and async `execute()` |
-| `FunctionTool` | Wraps a plain function (sync or async) as a Tool |
+| `Tool` | Abstract base class with `name`, `description`, `parameters`, `short_description` (optional, for prompt injection), and async `execute()` |
+| `FunctionTool` | Wraps a plain function (sync or async) as a Tool. Accepts optional `short_description` in constructor. |
 | `ToolRegistry` | Pure storage: `register()`, `register_many()`, `unregister()`, `get()`, `get_schemas()`, `all_tools()`. No spawn special-casing. |
 | `ToolRegistrationError` | Raised on duplicate/empty tool names |
 

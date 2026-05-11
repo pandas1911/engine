@@ -9,6 +9,7 @@ from engine.tools.builtin._utils.binary import BinaryDetector
 
 class ReadTool(Tool):
     name = "read"
+    short_description = "Read file contents with line numbers, or list directory entries"
     description = (
         "Read a file or directory from the local filesystem. "
         "For files: returns content with line numbers, paginated by offset/limit. "

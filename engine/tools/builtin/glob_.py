@@ -10,6 +10,7 @@ from engine.tools.builtin._utils.search import get_search_engine, MAX_RESULTS
 
 class GlobTool(Tool):
     name = "glob"
+    short_description = "Find files matching glob patterns"
     description = (
         "Fast file pattern matching tool that returns file paths. "
         "Supports glob patterns like '**/*.py' or 'src/**/*.ts'.\n\n"

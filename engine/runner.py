@@ -22,7 +22,8 @@ from engine.safety import SlidingWindowRateLimiter, APIKeyPool, RetryEngine
 from engine.providers.fallback_provider import FallbackLLMProvider
 from engine.providers.provider_models import ProviderParams
 from engine.time import TimeProvider
-from engine.prompts import build_root_system_prompt
+from engine.prompts.builder import build_system_prompt
+from engine.prompts.env_builder import build_env_context
 from engine.streaming_handler import SSEStreamingHandler
 
 _custom_tools_cache: Optional[List] = None
@@ -76,8 +77,7 @@ def _refresh_custom_tools() -> None:
 _logger = logging.getLogger(__name__)
 
 _ENV_BLOCK_PATTERN = re.compile(
-    r"<env>\s*Today's date:.*?Time zone:.*?\n</env>",
-    re.DOTALL,
+    r"## Environment\n(?:- \*\*.*?\*\*: .*?\n)*",
 )
 
 _active_sessions: Dict[str, "SessionManager"] = {}
@@ -306,13 +306,39 @@ class SessionManager:
             self._refresh_env_block()
         else:
             if self._system_prompt:
-                base = self._system_prompt
+                full_prompt = self._system_prompt
             else:
-                base = build_root_system_prompt(
-                    include_spawn=self.infra.config.is_tool_enabled("spawn")
+                # Resolve workspace directory
+                workspace_dir = str(self.infra.config.get_workspace_path())
+
+                # Build env context
+                env_context = build_env_context(
+                    time_provider=self.infra.time_provider,
+                    workspace_dir=workspace_dir,
+                    model_name=self.infra.config.primary,
                 )
-            env_block = self.infra.time_provider.format_system_env_block()
-            self.session.add_message("system", f"{base}\n\n{env_block}")
+
+                # Collect tool short_descriptions
+                tool_descs = [
+                    (t.name, t.short_description)
+                    for t in self.infra.tool_pack._registry._tools.values()
+                    if hasattr(t, 'short_description') and t.short_description
+                ] if self.infra.tool_pack else []
+
+                # Scan FRIDAY.md from workspace directory
+                user_instructions = None
+                friday_path = self.infra.config.get_workspace_path() / "FRIDAY.md"
+                if friday_path.exists():
+                    user_instructions = friday_path.read_text(encoding="utf-8")
+
+                # Assemble full system prompt
+                full_prompt = build_system_prompt(
+                    include_spawn=self.infra.config.is_tool_enabled("spawn"),
+                    env_context=env_context,
+                    tool_descriptions=tool_descs if tool_descs else None,
+                    user_instructions=user_instructions,
+                )
+            self.session.add_message("system", full_prompt)
 
     def _refresh_env_block(self) -> None:
         system_msg = next(
@@ -320,7 +346,18 @@ class SessionManager:
         )
         if system_msg is None:
             return
-        fresh_block = self.infra.time_provider.format_system_env_block()
+
+        workspace_dir = str(self.infra.config.get_workspace_path())
+        env_context = build_env_context(
+            time_provider=self.infra.time_provider,
+            workspace_dir=workspace_dir,
+            model_name=self.infra.config.primary,
+        )
+        fresh_lines = ["## Environment"]
+        for key, value in env_context.items():
+            fresh_lines.append(f"- **{key}**: {value}")
+        fresh_block = "\n".join(fresh_lines)
+
         if _ENV_BLOCK_PATTERN.search(system_msg.content):
             system_msg.content = _ENV_BLOCK_PATTERN.sub(fresh_block, system_msg.content)
         else:

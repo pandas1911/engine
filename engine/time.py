@@ -56,26 +56,6 @@ class TimeProvider:
         self._timezone_str = "UTC"
         return self._timezone_str
 
-    def format_system_env_block(self) -> str:
-        """Return a formatted environment block with current date and timezone.
-
-        Example::
-
-            <env>
-              Today's date: Thu Apr 23 2026
-              Time zone: Asia/Shanghai
-            </env>
-        """
-        tz_name = self.resolve_timezone()
-        tz_obj = ZoneInfo(tz_name)
-        date_str = datetime.now(tz=tz_obj).strftime("%a %b %d %Y")
-        return (
-            f"<env>\n"
-            f"  Today's date: {date_str}\n"
-            f"  Time zone: {tz_name}\n"
-            f"</env>"
-        )
-
     def format_message_timestamp(self, now: Optional[datetime] = None) -> str:
         """Return a formatted timestamp string like ``[Wed 2026-04-23 14:30 CST]``.
 

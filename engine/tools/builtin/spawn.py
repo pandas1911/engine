@@ -21,6 +21,7 @@ class SpawnTool(Tool):
     """
 
     name = "spawn"
+    short_description = "Delegate subtasks to child agents for parallel execution"
     description = (
         "Spawn a child sub-agent to handle a specific task in parallel. "
         "The child agent runs asynchronously and results are automatically "

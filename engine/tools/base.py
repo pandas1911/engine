@@ -16,6 +16,7 @@ class Tool(ABC):
     name: str = ""
     description: str = ""
     parameters: Dict[str, Any] = {}
+    short_description: Optional[str] = None
 
     @abstractmethod
     async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> str:
@@ -39,12 +40,13 @@ class ToolRegistrationError(Exception):
 class FunctionTool(Tool):
     """Wrap a plain function as a Tool. Supports both sync and async functions."""
 
-    def __init__(self, name: str, description: str, parameters: Dict[str, Any], fn: Callable):
+    def __init__(self, name: str, description: str, parameters: Dict[str, Any], fn: Callable, short_description: Optional[str] = None):
         if not name or not name.strip():
             raise ToolRegistrationError("Tool name cannot be empty")
         self.name = name
         self.description = description
         self.parameters = parameters
+        self.short_description = short_description
         self._fn = fn
 
     async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> str:
