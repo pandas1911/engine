@@ -85,19 +85,19 @@ engine/
 │   ├── test_glob_tool.py          # GlobTool file pattern matching tests
 ├── app/                       # FastAPI web application
 │   ├── main.py                # FastAPI app factory, static file mount
-│   ├── _state.py              # Global streaming lock (single-request enforcement)
+│   ├── _state.py              # Global streaming lock (single-request enforcement) + delegate_task storage
 │   ├── models/
 │   │   ├── __init__.py
 │   │   └── sse_events.py      # Part-based SSE event dataclasses (StreamEvent + 8 root + 8 sub-agent event types)
 │   └── routers/
 │       ├── __init__.py
-│       ├── chat.py            # POST /chat SSE endpoint with Part-based event mapping (root + sub-agent events)
+│       ├── chat.py            # POST /chat SSE endpoint + POST /chat/abort endpoint (Part-based event mapping for root + sub-agent events)
 │       ├── sessions.py        # Session management endpoints
 │       └── health.py          # Health check endpoint
 ├── web/                       # Frontend static files
 │   ├── index.html             # Minimal HTML shell
 │   ├── styles.css             # CSS styles (extracted from monolithic index.html, includes sub-agent panel styles)
-│   ├── app.js                 # Main JS: SSE handling, Part data model, UI logic (root + sub-agent event handling); chat input always enabled, agent_running messages routed via interject
+│   ├── app.js                 # Main JS: SSE handling, Part data model, UI logic (root + sub-agent event handling); input disabled during agent execution, stop button with SSE abort + POST /api/chat/abort
 │   ├── parts.js               # Part rendering: create/update/close DOM elements (root + sub-agent parts)
 │   └── tests/
 │       └── subagent-streaming.test.js  # Frontend tests for sub-agent SSE event handling and rendering
@@ -176,7 +176,6 @@ Per-conversation manager that creates and owns the root Agent. `get_active()` an
 | Method | Description |
 |---|---|
 | `start(message)` | Register agent, run agent loop, wait for completion, return `AgentResult` |
-| `interject(message)` | Insert a user message. WAITING → direct run, RUNNING → enqueue, COMPLETED/ERROR → rejected |
 | `unregister()` | Remove session from the module-level `_active_sessions` dict |
 
 ---
@@ -437,10 +436,10 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
                [error] → ERROR
 ```
 
-**Core loop (`_execute_cycle()`):**
+**Execution flow (`run()` + `_execute_cycle()`):**
 
-1. Process tool calls iteratively (max 15 iterations)
-2. Drain queued `ChildCompletionEvent`s one at a time — for each, inject the child's `ChildCompletionNotification.to_prompt()` as a user message and re-enter tool call processing
+1. `run(message, trigger)` — if `message` is present, inject it as a user message and call `_process_tool_calls()` to process the initial user input (max 15 iterations)
+2. `_execute_cycle()` — drain queued `ChildCompletionEvent`s one at a time — for each, inject the child's `ChildCompletionNotification.to_prompt()` as a user message and call `_process_tool_calls()`
 3. If pending children remain → transition to `WAITING_FOR_CHILDREN`, emit `waiting_for_children` SSE event via `_emit()` with `{"session_id": self.session.id}`
 4. If no pending children → finalize and notify parent
 
@@ -856,7 +855,7 @@ Abstract base class and concrete implementations for file search operations. Use
 | `test_fallback_truncation.py` | Unit tests for fallback provider truncation |
 | `test_key_pool_sorting.py` | Unit tests for key pool sorting priority (insertion order vs errors) |
 | `test_rate_limiter.py` | Unit tests for `SlidingWindowRateLimiter` |
-| `test_runner_infrastructure.py` | Unit tests for `Engine` singleton, `SessionManager`, and `MessageEvent` |
+| `test_runner_infrastructure.py` | Unit tests for `Engine` singleton and `SessionManager` |
 | `test_concurrency_guard.py` | Unit tests for per-provider concurrency guard |
 | `test_file_security.py` | Unit tests for PathGuard deny-list access control |
 | `test_binary_detector.py` | Unit tests for BinaryDetector extension and content detection |
@@ -883,9 +882,9 @@ A FastAPI application providing a chat UI and SSE-based streaming API. Static fi
 
 Creates the FastAPI app, mounts static files from `web/`, and includes routers for chat, sessions, and health.
 
-#### `_state.py` — Global Streaming Lock
+#### `_state.py` — Global Streaming Lock & Delegate Task Storage
 
-Enforces single-request-at-a-time processing via a boolean flag (`set_streaming` / `is_streaming`). Returns HTTP 429 if a request arrives while another is streaming.
+Enforces single-request-at-a-time processing via a boolean flag (`set_streaming` / `is_streaming`). Returns HTTP 429 if a request arrives while another is streaming. Also stores a reference to the current `delegate_task` via `set_active_session()` / `get_active_session()`, enabling the `/chat/abort` endpoint to cancel the running agent.
 
 #### `session_store.py` — ~~Session Persistence~~ [DELETED]
 
@@ -917,9 +916,9 @@ Defines the wire-format SSE event types as dataclasses inheriting from `StreamEv
 
 17 dataclasses total (1 base `StreamEvent` + 8 root event types + 8 sub-agent event types). Additionally, the `waiting_for_children` event is emitted as a raw SSE event (not a dataclass) by `_execute_cycle()` when the agent enters the `WAITING_FOR_CHILDREN` state. The `DoneEvent` does not include a `content` field — text content is delivered incrementally via Part events. Sub-agent events carry an additional `task_id` field to identify which sub-agent they belong to.
 
-#### `routers/chat.py` — Chat SSE Endpoint
+#### `routers/chat.py` — Chat SSE & Abort Endpoints
 
-Exposes `POST /chat` which streams agent responses via Server-Sent Events.
+Exposes `POST /chat` which streams agent responses via Server-Sent Events, and `POST /chat/abort` which cancels a running agent session by closing the SSE connection and calling `agent.abort()` on the stored delegate task.
 
 **Event translation (`on_engine_event()`):**
 

@@ -65,7 +65,7 @@ class TestNoReawakenTransition:
             assert not sm.can_trigger("reawaken"), f"reawaken should be invalid from {state.value}"
 
     def test_transition_count(self):
-        assert len(AgentStateMachine.TRANSITIONS) == 7
+        assert len(AgentStateMachine.TRANSITIONS) == 6
 
 
 class TestBranchAStillWorks:
@@ -104,7 +104,8 @@ class TestBranchAStillWorks:
 
         assert len(drainable._run_calls) == 1
         assert drainable._run_calls[0]["trigger"] == "children_settled"
-        assert "child result" in drainable._run_calls[0]["message"]
+        assert drainable._run_calls[0]["message"] is None
+        assert len(event_queue) == 1
 
 
 class TestBranchBStillWorks:
@@ -182,7 +183,7 @@ class TestBranchCRemoved:
         await asyncio.sleep(0.05)
 
         assert len(drainable._run_calls) == 0
-        assert len(event_queue) == 0
+        assert len(event_queue) == 1  # event always enqueued, but no run() resume
 
 
 class TestToolContext:

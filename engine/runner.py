@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from engine.runtime.agent import Agent, MessageEvent
+from engine.runtime.agent import Agent
 from engine.config import Config, get_config
 from engine.providers.llm_provider import LLMProvider
 from engine.logging import init_logger
@@ -245,7 +245,6 @@ class SessionManager:
     """Per-conversation manager. Creates and owns the root Agent.
     Core logic is ~10 lines:
     - start(): run initial message, wait for completion
-    - interject(): check state -> direct run (WAITING) or queue (RUNNING)
     """
 
     def __init__(
@@ -346,24 +345,6 @@ class SessionManager:
             await self.agent._completion_event.wait()
 
         return self._build_result()
-
-    def interject(self, message: str) -> str:
-        """Insert a user message. Treated identically to child completions.
-        WAITING_FOR_CHILDREN -> direct wakeup via agent.run() (like Branch A)
-        RUNNING              -> append to _event_queue (like Branch B)
-        COMPLETED/ERROR      -> rejected
-        """
-        state = self.agent.state
-        if state in (AgentState.COMPLETED, AgentState.ERROR):
-            return "rejected"
-        if state == AgentState.WAITING_FOR_CHILDREN:
-            asyncio.create_task(
-                self.agent.run(message, trigger="user_message")
-            )
-            return "accepted"
-        else:
-            self._event_queue.append(MessageEvent(content=message))
-            return "queued"
 
     # --- Lifecycle ---
 

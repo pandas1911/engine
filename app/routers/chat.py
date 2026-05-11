@@ -27,9 +27,6 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
 
 
-class MidExecutionMessageRequest(BaseModel):
-    message: str
-
 
 def _find_turn_boundaries(messages):
     """Identify turn start indices. Each turn starts with a 'user' message."""
@@ -231,13 +228,6 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
         event_callback=on_engine_event,
     )
 
-    set_active_session(
-        session_id=mgr.session.id,
-        session_manager=mgr,
-        event_queue=mgr._event_queue,
-        done_event=done_event,
-    )
-
     async def run_delegate():
         try:
             await mgr.start(chat_req.message)
@@ -249,6 +239,14 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
             done_event.set()
 
     delegate_task = asyncio.create_task(run_delegate())
+
+    set_active_session(
+        session_id=mgr.session.id,
+        session_manager=mgr,
+        event_queue=mgr._event_queue,
+        done_event=done_event,
+        delegate_task=delegate_task,
+    )
 
     try:
         yield {
@@ -290,17 +288,19 @@ async def chat_endpoint(request: Request, chat_req: ChatRequest):
     )
 
 
-@router.post("/chat/message")
-async def mid_execution_message(req: MidExecutionMessageRequest):
+@router.post("/chat/abort")
+async def abort_endpoint():
     active = get_active_session()
     if active is None:
         return JSONResponse(status_code=404, content={"error": "No active session"})
 
-    mgr = active["session_manager"]
-    result = mgr.interject(req.message)
+    # Cancel the delegate asyncio task — triggers CancelledError at next await point.
+    # The _event_generator's finally block will handle cleanup:
+    #   - Save session via _get_session_store().save(session)
+    #   - Call clear_active_session()
+    #   - Call mgr.unregister()
+    delegate_task = active.get("delegate_task")
+    if delegate_task and not delegate_task.done():
+        delegate_task.cancel()
 
-    if result == "rejected":
-        return JSONResponse(status_code=409,
-            content={"error": "Agent is not accepting messages right now"})
-
-    return {"status": result}
+    return {"status": "aborted"}

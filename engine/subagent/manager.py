@@ -454,17 +454,21 @@ class SubAgentManager:
         )
         # [==================== END LOG ==========================]
 
-        # [Branch A] Parent waiting for children → direct resume
+        # Always enqueue the notification — guarantees no message loss even when
+        # multiple children complete in the same event loop tick (both see
+        # WAITING_FOR_CHILDREN and create resume tasks; the first task to acquire
+        # _run_lock drains ALL queued events, the second task finds COMPLETED and no-ops).
+        event = ChildCompletionEvent(notification=notification)
+        self._event_queue.append(event)
+
+        # [Branch A] Parent waiting → also resume agent processing
         if parent_state == AgentState.WAITING_FOR_CHILDREN:
-            formatted = notification.to_prompt()
             asyncio.create_task(
-                self._drainable.run(formatted, trigger="children_settled")
+                self._drainable.run(trigger="children_settled")
             )
 
-        # [Branch B] Parent still running → enqueue for self-drain
-        elif parent_state == AgentState.RUNNING:
-            event = ChildCompletionEvent(notification=notification)
-            self._event_queue.append(event)
+        # [Branch B] Parent running → event already enqueued, will be drained by
+        # the active _execute_cycle() loop — nothing more to do.
 
         # Parent in COMPLETED/ERROR/IDLE → skip
 

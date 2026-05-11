@@ -14,6 +14,7 @@ def set_active_session(
     session_manager: Any,
     event_queue: Any,
     done_event: Any,
+    delegate_task: Any = None,
 ) -> None:
     global _active_session
     _active_session = {
@@ -21,6 +22,7 @@ def set_active_session(
         "session_manager": session_manager,
         "event_queue": event_queue,
         "done_event": done_event,
+        "delegate_task": delegate_task,
     }
 
 

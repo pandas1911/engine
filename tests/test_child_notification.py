@@ -478,17 +478,17 @@ async def test_branch_a_notification_to_prompt_in_run_call(registry, config):
     assert len(drainable._run_calls) == 1
     call = drainable._run_calls[0]
     assert call["trigger"] == "children_settled"
+    assert call["message"] is None
 
-    # The message passed to run() is the to_prompt() output
-    message = call["message"]
-    assert "[Child Agent Report]" in message
-    assert "Sub-A" in message
-    assert "child_a" in message
-    assert "Status: completed" in message
-    assert "Branch A summary" in message
-    assert "Branch A task" in message
-    # No events enqueued (Branch A doesn't enqueue)
-    assert len(event_queue) == 0
+    # Event is always enqueued (even in Branch A)
+    assert len(event_queue) == 1
+    event = event_queue[0]
+    assert isinstance(event, ChildCompletionEvent)
+    notif = event.notification
+    assert notif.task_id == "child_a"
+    assert notif.label == "Sub-A"
+    assert notif.status == "completed"
+    assert notif.summary == "Branch A summary"
 
 
 # ===========================================================================

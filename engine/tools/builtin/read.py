@@ -111,7 +111,7 @@ class ReadTool(Tool):
                     if line_num < offset:
                         continue
                     if len(lines_out) >= limit:
-                        continue
+                        break
 
                     stripped = raw_line.rstrip("\n\r")
                     if len(stripped) > self.MAX_LINE_LENGTH:

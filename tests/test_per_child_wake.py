@@ -146,9 +146,8 @@ async def test_branch_a_waiting_parent_resumes_with_single_notification(registry
     assert len(drainable._run_calls) == 1
     call = drainable._run_calls[0]
     assert call["trigger"] == "children_settled"
-    assert "child_1" in call["message"]
-    assert "I am done" in call["message"]
-    assert len(event_queue) == 0
+    assert call["message"] is None
+    assert len(event_queue) == 1  # always enqueued
 
 
 @pytest.mark.asyncio
@@ -314,7 +313,7 @@ async def test_gate_returns_when_parent_task_not_found(registry, config):
 
 @pytest.mark.asyncio
 async def test_skip_when_parent_completed(registry, config):
-    """Parent in COMPLETED state → neither branch fires."""
+    """Parent in COMPLETED state → no run() resume, but event still enqueued."""
     drainable = MockDrainable(state=AgentState.COMPLETED)
     manager, event_queue = make_manager(registry, drainable, config)
 
@@ -325,4 +324,4 @@ async def test_skip_when_parent_completed(registry, config):
     await manager._on_child_complete("child_late", info)
 
     assert len(drainable._run_calls) == 0
-    assert len(event_queue) == 0
+    assert len(event_queue) == 1  # event always enqueued regardless of parent state
