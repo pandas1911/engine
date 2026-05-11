@@ -177,10 +177,12 @@ class WebFetchTool(Tool):
         if fmt not in ("markdown", "text", "html"):
             fmt = "markdown"
 
-        timeout_seconds = min(
-            arguments.get("timeout", self._DEFAULT_TIMEOUT) or self._DEFAULT_TIMEOUT,
-            self._MAX_TIMEOUT,
-        )
+        raw_timeout = arguments.get("timeout", self._DEFAULT_TIMEOUT)
+        try:
+            timeout_val = int(raw_timeout) if raw_timeout is not None else self._DEFAULT_TIMEOUT
+        except (ValueError, TypeError):
+            timeout_val = self._DEFAULT_TIMEOUT
+        timeout_seconds = min(timeout_val, self._MAX_TIMEOUT)
         timeout = httpx.Timeout(timeout_seconds)
 
         headers = {
