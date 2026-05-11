@@ -92,15 +92,16 @@ engine/
 │   └── routers/
 │       ├── __init__.py
 │       ├── chat.py            # POST /chat SSE endpoint + POST /chat/abort endpoint (Part-based event mapping for root + sub-agent events)
-│       ├── sessions.py        # Session management endpoints
+│       ├── sessions.py        # Session management endpoints (GET /sessions list, GET /sessions/{id}, DELETE /sessions/{id})
 │       └── health.py          # Health check endpoint
 ├── web/                       # Frontend static files
-│   ├── index.html             # Minimal HTML shell
-│   ├── styles.css             # CSS styles (extracted from monolithic index.html, includes sub-agent panel styles)
-│   ├── app.js                 # Main JS: SSE handling, Part data model, UI logic (root + sub-agent event handling); input disabled during agent execution, stop button with SSE abort + POST /api/chat/abort
+│   ├── index.html             # HTML shell with sidebar (aside#sidebar) and main-content flex-row layout
+│   ├── styles.css             # CSS styles (extracted from monolithic index.html, includes sub-agent panel styles + session sidebar with slide-in/out transition)
+│   ├── app.js                 # Main JS: SSE handling, Part data model, UI logic (root + sub-agent event handling); session sidebar (toggle, fetch, render, switch, delete, hydration); input disabled during agent execution, stop button with SSE abort + POST /api/chat/abort
 │   ├── parts.js               # Part rendering: create/update/close DOM elements (root + sub-agent parts)
-│   └── tests/
-│       └── subagent-streaming.test.js  # Frontend tests for sub-agent SSE event handling and rendering
+│       └── tests/
+│           ├── subagent-streaming.test.js  # Frontend tests for sub-agent SSE event handling and rendering
+│           └── session-sidebar.test.js     # Frontend tests for session sidebar toggle, list rendering, hydration, and delete
 ├── docs/                      # Documentation
 │   └── codebase-structure.md  # This file
 ├── logs/                      # Runtime log output (JSONL)
