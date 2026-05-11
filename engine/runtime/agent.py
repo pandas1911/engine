@@ -25,12 +25,6 @@ if TYPE_CHECKING:
     from engine.providers.llm_provider import LLMProvider
 
 
-class MessageEvent:
-    """User-role message event for _event_queue. Treated identically to ChildCompletionEvent."""
-    def __init__(self, content: str):
-        self.content = content
-
-
 class Agent:
     """Core Agent class with single-level sub-agent support.
 
@@ -163,33 +157,15 @@ class Agent:
                         },
                     )
                     # [======================= END LOG ======================]
-                elif trigger == "user_message":
-                    # [=================== LOG: lifecycle ===================]
-                    get_logger().info(
-                        self.label,
-                        "Agent resuming from user message | incoming_message_length={}, session_message_count={}".format(
-                            len(message) if message else 0,
-                            len(self.session.messages),
-                        ),
-                        task_id=self.task_id, state=self.state.value, depth=self.session.depth,
-                        event_type="agent_user_resume",
-                        data={
-                            "message_length": len(message) if message else 0,
-                            "session_msg_count": len(self.session.messages),
-                        },
-                    )
-                    # [======================= END LOG ======================]
                 # [=================== LOG: lifecycle ===================]
                 get_logger().state_change(
                     self.label, prev_state.value, self.state.value, trigger,
                     task_id=self.task_id, state=self.state.value, depth=self.session.depth)
                 # [======================= END LOG ======================]
-                if trigger == "user_message":
-                    # [====================== EMIT: sse =====================]
-                    self._emit("turn_start", {"trigger": "user_message"})
-                    # [====================== END EMIT ======================]
 
             try:
+                if message:
+                    await self._process_tool_calls()
                 return await self._execute_cycle()
             except Exception as e:
                 await self._abort(e)
@@ -522,15 +498,14 @@ class Agent:
         return condensed
 
     async def _execute_cycle(self) -> str:
-        """Core execution: tool calls → drain events → decide next state.
+        """Drain queued events and decide next state.
 
         Linear flow (no recursion, no outer loop). Every path ends with return.
         Shared by run() for both start and children_settled triggers.
+        Called AFTER run() has already executed _process_tool_calls() when a message was present.
         """
         if self.state != AgentState.RUNNING:
             return self._final_result or ""
-
-        await self._process_tool_calls()
 
         # Drain ALL queued events iteratively (replaces recursive drain_events chain)
         while True:
@@ -562,13 +537,6 @@ class Agent:
                 self.session.add_message("user", formatted)
                 await self._process_tool_calls()
                 # Loop continues — processes any events queued during _process_tool_calls
-            elif isinstance(event, MessageEvent):
-                # [====================== EMIT: sse =====================]
-                self._emit("turn_start", {"trigger": "user_message"})
-                # [====================== END EMIT ======================]
-                formatted = self._time_provider.inject_timestamp(event.content)
-                self.session.add_message("user", formatted)
-                await self._process_tool_calls()
 
         # All events drained — decide next state using registry as single source of truth
         if self._has_pending_children():
@@ -816,5 +784,4 @@ class Agent:
 
 __all__ = [
     "Agent",
-    "MessageEvent",
 ]

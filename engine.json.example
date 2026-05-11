@@ -5,6 +5,7 @@
       "base_url": "https://your-primary-base-url/v1",
       "rpm_limit": 300,
       "tpm_limit": 100000,
+      "max_concurrent_requests": 3,
       "models": {
         "your-primary-model": {}
       }
@@ -43,5 +44,20 @@
   "tools": {
     "tool_1": false,
     "tool_2": true
-  }
+  },
+  "file_permissions": {
+    "denied_patterns": [
+      "**/.env",
+      "**/.env.*",
+      "**/.git/**",
+      "**/credentials*",
+      "**/id_rsa*",
+      "**/id_ed25519*",
+      "**/id_ecdsa*",
+      "**/.ssh/**",
+      "**/shadow",
+      "**/passwd"
+    ]
+  },
+  "workspace": "~/Desktop/Friday"
 }

@@ -34,6 +34,7 @@ class FallbackLLMProvider(BaseLLMProvider):
         rate_limiters: Dict[str, SlidingWindowRateLimiter],
         retry_engine: RetryEngine,
         max_profile_rotations: int = 3,
+        concurrency_guards: Optional[Dict[str, asyncio.Semaphore]] = None,
     ):
         self._providers = providers
         self._key_pool = key_pool
@@ -44,6 +45,7 @@ class FallbackLLMProvider(BaseLLMProvider):
         self._rotation_count = 0
         self._logger = get_logger()
         self._token_estimator = EmaTokenEstimator()
+        self._concurrency_guards = concurrency_guards or {}
 
     def _estimate_tokens(self, messages: List[Dict], tools: Optional[List[Dict]]) -> int:
         return self._token_estimator.estimate(messages, tools)
@@ -282,14 +284,34 @@ class FallbackLLMProvider(BaseLLMProvider):
             if limiter is not None:
                 reservation_id = await limiter.acquire(estimated_tokens=local_estimated_tokens)
 
+            guard = self._concurrency_guards.get(provider_name)
+
             try:
-                result = await provider.chat(
-                    messages=local_messages,
-                    tools=tools,
-                    agent_label=agent_label,
-                    task_id=task_id,
-                    depth=depth,
-                )
+                if guard is not None:
+                    # [==================== LOG: control ====================]
+                    self._logger.info(
+                        "RateControl",
+                        "concurrency_wait | provider={}".format(provider_name),
+                        event_type="concurrency_wait",
+                        data={"provider": provider_name},
+                    )
+                    # [==================== END LOG ============================]
+                    async with guard:
+                        result = await provider.chat(
+                            messages=local_messages,
+                            tools=tools,
+                            agent_label=agent_label,
+                            task_id=task_id,
+                            depth=depth,
+                        )
+                else:
+                    result = await provider.chat(
+                        messages=local_messages,
+                        tools=tools,
+                        agent_label=agent_label,
+                        task_id=task_id,
+                        depth=depth,
+                    )
 
                 await self._record_success(
                     profile_name, provider, limiter, reservation_id,
@@ -362,15 +384,36 @@ class FallbackLLMProvider(BaseLLMProvider):
             if limiter is not None:
                 reservation_id = await limiter.acquire(estimated_tokens=local_estimated_tokens)
 
+            guard = self._concurrency_guards.get(provider_name)
+
             try:
-                async for chunk in provider.stream_chat(
-                    messages=local_messages,
-                    tools=tools,
-                    agent_label=agent_label,
-                    task_id=task_id,
-                    depth=depth,
-                ):
-                    yield chunk
+                if guard is not None:
+                    # [==================== LOG: control ====================]
+                    self._logger.info(
+                        "RateControl",
+                        "concurrency_wait | provider={}".format(provider_name),
+                        event_type="concurrency_wait",
+                        data={"provider": provider_name},
+                    )
+                    # [==================== END LOG ============================]
+                    async with guard:
+                        async for chunk in provider.stream_chat(
+                            messages=local_messages,
+                            tools=tools,
+                            agent_label=agent_label,
+                            task_id=task_id,
+                            depth=depth,
+                        ):
+                            yield chunk
+                else:
+                    async for chunk in provider.stream_chat(
+                        messages=local_messages,
+                        tools=tools,
+                        agent_label=agent_label,
+                        task_id=task_id,
+                        depth=depth,
+                    ):
+                        yield chunk
 
                 await self._record_success(
                     profile_name, provider, limiter, reservation_id,

@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from engine.runtime.agent import Agent, MessageEvent
+from engine.runtime.agent import Agent
 from engine.config import Config, get_config
 from engine.providers.llm_provider import LLMProvider
 from engine.logging import init_logger
@@ -135,16 +135,30 @@ class Infrastructure:
             max_attempts=config.llm_retry_max_attempts,
             base_delay=config.llm_retry_base_delay,
         )
+        # Build concurrency guards per provider
+        concurrency_guards: Dict[str, asyncio.Semaphore] = {}
+        for prov_name, prov_config in config.providers.items():
+            if prov_config.max_concurrent_requests > 0:
+                concurrency_guards[prov_name] = asyncio.Semaphore(
+                    prov_config.max_concurrent_requests
+                )
+
         ordered_providers = {k: self.providers[k] for k in ordered_keys}
         self.llm_provider = FallbackLLMProvider(
             providers=ordered_providers,
             key_pool=self.key_pool,
             rate_limiters=self.rate_limiters,
             retry_engine=self.retry_engine,
+            concurrency_guards=concurrency_guards,
         )
 
         # --- Build tools ---
         self.tool_pack = self._build_tool_pack(config)
+
+        # --- Build session store (workspace-based) ---
+        from engine.session_store import SessionStore
+        session_root = str(config.get_workspace_path() / "sessions")
+        self.session_store = SessionStore(root_dir=session_root)
 
     def _build_tool_pack(self, config: Config) -> ToolPack:
         custom_tools = _discover_custom_tools()
@@ -231,7 +245,6 @@ class SessionManager:
     """Per-conversation manager. Creates and owns the root Agent.
     Core logic is ~10 lines:
     - start(): run initial message, wait for completion
-    - interject(): check state -> direct run (WAITING) or queue (RUNNING)
     """
 
     def __init__(
@@ -279,8 +292,7 @@ class SessionManager:
         )
 
         # --- Session persistence ---
-        from engine.session_store import SessionStore
-        self.session_store = SessionStore(root_dir="sessions")
+        self.session_store = infra.session_store
         self.session_store.create_root(self.session.id)
         self.agent.session_store = self.session_store
         self.session_store.create_file("main", self.session)
@@ -333,24 +345,6 @@ class SessionManager:
             await self.agent._completion_event.wait()
 
         return self._build_result()
-
-    def interject(self, message: str) -> str:
-        """Insert a user message. Treated identically to child completions.
-        WAITING_FOR_CHILDREN -> direct wakeup via agent.run() (like Branch A)
-        RUNNING              -> append to _event_queue (like Branch B)
-        COMPLETED/ERROR      -> rejected
-        """
-        state = self.agent.state
-        if state in (AgentState.COMPLETED, AgentState.ERROR):
-            return "rejected"
-        if state == AgentState.WAITING_FOR_CHILDREN:
-            asyncio.create_task(
-                self.agent.run(message, trigger="user_message")
-            )
-            return "accepted"
-        else:
-            self._event_queue.append(MessageEvent(content=message))
-            return "queued"
 
     # --- Lifecycle ---
 

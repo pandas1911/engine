@@ -183,14 +183,15 @@ async def _register_child(
         assert len(drainable._run_calls) == 2
         assert drainable._run_calls[0]["trigger"] == "children_settled"
         assert drainable._run_calls[1]["trigger"] == "children_settled"
+        assert drainable._run_calls[0]["message"] is None
+        assert drainable._run_calls[1]["message"] is None
 
-        # Verify notification content
-        msg_a = drainable._run_calls[0]["message"]
-        msg_b = drainable._run_calls[1]["message"]
-        assert "child_a" in msg_a
-        assert "Alpha complete" in msg_a
-        assert "child_b" in msg_b
-        assert "Beta complete" in msg_b
+        # Both events enqueued
+        assert len(event_queue) == 2
+        assert event_queue[0].notification.task_id == "child_a"
+        assert event_queue[0].notification.summary == "Alpha complete"
+        assert event_queue[1].notification.task_id == "child_b"
+        assert event_queue[1].notification.summary == "Beta complete"
 
     @pytest.mark.asyncio
     async def test_child_depth_is_1(self, registry, config):
@@ -436,11 +437,11 @@ class TestPerChildWake:
 
         await asyncio.sleep(0)
 
-        # Branch B: 1 event; Branch A: 1 run call
-        assert len(event_queue) == 1  # only child_b1
+        # Branch B: 1 event for child_b1; Branch A: 1 run call + 1 event for child_b2
+        assert len(event_queue) == 2  # events always enqueued for both branches
         assert len(drainable._run_calls) == 1  # child_b2 triggered resume
         assert drainable._run_calls[0]["trigger"] == "children_settled"
-        assert "child_b2" in drainable._run_calls[0]["message"]
+        assert drainable._run_calls[0]["message"] is None
 
     @pytest.mark.asyncio
     async def test_notification_has_all_required_fields(self, registry, config):

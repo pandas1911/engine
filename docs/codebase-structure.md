@@ -50,7 +50,15 @@ engine/
 │   │   ├── pack.py            # ToolPack — immutable view over ToolRegistry with depth-aware schema filtering
 │   │   ├── builtin/           # Built-in tools
 │   │   │   ├── __init__.py    # BUILTIN_TOOLS list, re-exports
-│   │   │   └── spawn.py       # SpawnTool — lazy-caches SubAgentManager per agent, passes root_streaming_handler through
+│   │   │   ├── spawn.py       # SpawnTool — lazy-caches SubAgentManager per agent, passes root_streaming_handler through
+│   │   │   ├── read.py        # ReadTool — file/directory reading with pagination and binary detection
+│   │   │   ├── grep.py        # GrepTool — regex content search with ripgrep/Python fallback
+│   │   │   ├── glob_.py       # GlobTool — file pattern matching with ripgrep/Python fallback
+│   │   │   └── _utils/        # Helper modules shared by builtin tools
+│   │   │       ├── __init__.py
+│   │   │       ├── security.py    # PathGuard — deny-list based file path security guard
+│   │   │       ├── binary.py      # BinaryDetector — extension and content-based binary file detection
+│   │   │       └── search.py      # SearchEngine ABC + RipgrepEngine + PythonEngine + get_search_engine()
 │   │   └── custom/            # Auto-discovered custom tools (web search, web fetch)
 │   │       ├── __init__.py
 │   │       └── web_fetch.py   # URL content fetching with HTML→Markdown/Text conversion
@@ -68,22 +76,28 @@ engine/
 │   ├── test_context_truncation.py  # TPM-based context truncation tests
 │   ├── test_fallback_truncation.py  # Fallback provider truncation tests
 │   ├── test_key_pool_sorting.py  # Key pool sorting priority tests
-│   └── test_rate_limiter.py  # Rate limiter unit tests
+│   ├── test_rate_limiter.py  # Rate limiter unit tests
+│   ├── test_file_security.py      # PathGuard deny-list unit tests
+│   ├── test_binary_detector.py    # BinaryDetector extension/content detection tests
+│   ├── test_search_engine.py      # SearchEngine abstraction layer tests
+│   ├── test_read_tool.py          # ReadTool file/directory reading tests
+│   ├── test_grep_tool.py          # GrepTool content search tests
+│   ├── test_glob_tool.py          # GlobTool file pattern matching tests
 ├── app/                       # FastAPI web application
 │   ├── main.py                # FastAPI app factory, static file mount
-│   ├── _state.py              # Global streaming lock (single-request enforcement)
+│   ├── _state.py              # Global streaming lock (single-request enforcement) + delegate_task storage
 │   ├── models/
 │   │   ├── __init__.py
 │   │   └── sse_events.py      # Part-based SSE event dataclasses (StreamEvent + 8 root + 8 sub-agent event types)
 │   └── routers/
 │       ├── __init__.py
-│       ├── chat.py            # POST /chat SSE endpoint with Part-based event mapping (root + sub-agent events)
+│       ├── chat.py            # POST /chat SSE endpoint + POST /chat/abort endpoint (Part-based event mapping for root + sub-agent events)
 │       ├── sessions.py        # Session management endpoints
 │       └── health.py          # Health check endpoint
 ├── web/                       # Frontend static files
 │   ├── index.html             # Minimal HTML shell
 │   ├── styles.css             # CSS styles (extracted from monolithic index.html, includes sub-agent panel styles)
-│   ├── app.js                 # Main JS: SSE handling, Part data model, UI logic (root + sub-agent event handling); chat input always enabled, agent_running messages routed via interject
+│   ├── app.js                 # Main JS: SSE handling, Part data model, UI logic (root + sub-agent event handling); input disabled during agent execution, stop button with SSE abort + POST /api/chat/abort
 │   ├── parts.js               # Part rendering: create/update/close DOM elements (root + sub-agent parts)
 │   └── tests/
 │       └── subagent-streaming.test.js  # Frontend tests for sub-agent SSE event handling and rendering
@@ -162,7 +176,6 @@ Per-conversation manager that creates and owns the root Agent. `get_active()` an
 | Method | Description |
 |---|---|
 | `start(message)` | Register agent, run agent loop, wait for completion, return `AgentResult` |
-| `interject(message)` | Insert a user message. WAITING → direct run, RUNNING → enqueue, COMPLETED/ERROR → rejected |
 | `unregister()` | Remove session from the module-level `_active_sessions` dict |
 
 ---
@@ -202,6 +215,7 @@ Loads runtime configuration from `engine.json`.
 | `cooldown_max_ms` | `300000.0` | Maximum key cooldown |
 | `user_timezone` | `None` | Timezone override (env var `USER_TIMEZONE` takes precedence) |
 | `tools` | `{}` | `Dict[str, bool]` — tool enable/disable mapping. Unlisted tools default to `True` (enabled). Use `config.is_tool_enabled(name)` to check. |
+| `file_permissions` | `{}` | `Dict[str, Any]` — file tool security configuration. Contains `denied_patterns` list for PathGuard. |
 
 **Note:** Sub-agent nesting depth is fixed at depth=1 (leaf workers only). Enforced at architecture level in `SpawnTool` and `SubAgentManager.spawn()`, not via config.
 
@@ -305,6 +319,8 @@ Re-exports all classes from sub-modules so that `from engine.safety import ...` 
 | `LaneSlot` | Async context manager representing a concurrency slot |
 | `LaneStatus` | Data class for lane status queries |
 | `_LaneState` | Internal state per lane |
+
+Per-provider concurrency limiting adds a second safety dimension: when `max_concurrent_requests > 0` in a provider's config, an `asyncio.Semaphore` caps simultaneous in-flight LLM requests to that provider. This complements the lane-based concurrency (which limits sub-agent parallelism) with provider-level throttling.
 
 #### `rate_limit.py` — Sliding Window Rate Limiter (with Adaptive Pacing)
 
@@ -420,10 +436,10 @@ IDLE → [start] → RUNNING → [finish] → COMPLETED
                [error] → ERROR
 ```
 
-**Core loop (`_execute_cycle()`):**
+**Execution flow (`run()` + `_execute_cycle()`):**
 
-1. Process tool calls iteratively (max 15 iterations)
-2. Drain queued `ChildCompletionEvent`s one at a time — for each, inject the child's `ChildCompletionNotification.to_prompt()` as a user message and re-enter tool call processing
+1. `run(message, trigger)` — if `message` is present, inject it as a user message and call `_process_tool_calls()` to process the initial user input (max 15 iterations)
+2. `_execute_cycle()` — drain queued `ChildCompletionEvent`s one at a time — for each, inject the child's `ChildCompletionNotification.to_prompt()` as a user message and call `_process_tool_calls()`
 3. If pending children remain → transition to `WAITING_FOR_CHILDREN`, emit `waiting_for_children` SSE event via `_emit()` with `{"session_id": self.session.id}`
 4. If no pending children → finalize and notify parent
 
@@ -539,7 +555,7 @@ Defines `BaseStreamingHandler` and two concrete implementations for handling str
 | `PaceLevel` | Enum: `HEALTHY`, `PRESSING`, `CRITICAL` |
 | `Lane` | Enum: `SUBAGENT` |
 | `ErrorClass` | Enum: `RETRYABLE`, `NON_RETRYABLE`, `RATE_LIMITED` |
-| `ProviderConfig` | Provider entry: name, api_key, base_url, rpm_limit (default 100), tpm_limit (default 100000), models dict (model_name → model_params dict) |
+| `ProviderConfig` | Provider entry: name, api_key, base_url, rpm_limit (default 100), tpm_limit (default 100000), max_concurrent_requests (default 0, 0=no limit), models dict (model_name → model_params dict) |
 | `ProviderParams` | Resolved call params: api_key, base_url, model |
 | `resolve_model_ref()` | Splits `"provider/model"` string on first `/` into `(provider, model)` tuple |
 | `ProviderHealth` | Per-key health: consecutive errors, cooldown |
@@ -548,7 +564,7 @@ Defines `BaseStreamingHandler` and two concrete implementations for handling str
 
 `FallbackLLMProvider` wraps multiple `LLMProvider` instances with automatic key rotation and sequential provider fallback.
 
-**Constructor:** `FallbackLLMProvider(providers: Dict[str, LLMProvider], key_pool: APIKeyPool, rate_limiters: Dict[str, SlidingWindowRateLimiter], retry_engine: RetryEngine)`
+**Constructor:** `FallbackLLMProvider(providers: Dict[str, LLMProvider], key_pool: APIKeyPool, rate_limiters: Dict[str, SlidingWindowRateLimiter], retry_engine: RetryEngine, concurrency_guards: Optional[Dict[str, asyncio.Semaphore]] = None)`
 
 Providers are ordered by the insertion order of the `providers` dict (primary first, then fallbacks). No weight-based selection — ordering is deterministic from config.
 
@@ -558,6 +574,7 @@ Providers are ordered by the insertion order of the `providers` dict (primary fi
 
 1. Acquire key from `APIKeyPool`
 2. Apply rate limiting with adaptive pacing (sliding window) — estimated_tokens is capped to prevent deadlock
+2.5. Apply per-provider concurrency guard (if configured) — limits simultaneous in-flight requests per provider via `asyncio.Semaphore`
 3. Execute chat request
 4. On success → record usage, report success, feed actual tokens back to estimator
 5. On rate limit → report rate limited, rotate key, retry
@@ -760,8 +777,43 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 | Class | Name | Description |
 |---|---|---|
 | `SpawnTool` | `spawn` | Creates child agents via `SubAgentManager`. Lazy-creates manager per agent on first `execute()` call using `asyncio.Lock`. Owns the `LaneConcurrencyQueue` for SUBAGENT concurrency. Parameters: `task` (required), `label` (optional). |
+| `ReadTool` | `read` | Reads file contents with line numbers and pagination, or lists directory entries. Uses `PathGuard` for security and `BinaryDetector` for binary rejection. Parameters: `path` (required), `offset`/`limit` (optional pagination). |
+| `GrepTool` | `grep` | Searches file contents for regex patterns. Uses `SearchEngine` with ripgrep auto-fallback. Supports include glob filtering. Parameters: `pattern` (required), `include` (optional glob), `output_mode` (optional). |
+| `GlobTool` | `glob` | Finds files matching glob patterns. Uses `SearchEngine` with ripgrep auto-fallback. Parameters: `pattern` (required). |
 
-**Root-only tools:** `spawn` is the only built-in tool. It is filtered out for sub-agents by `ToolPack.get_schemas()` based on session depth.
+**Root-only tools:** `spawn` is filtered out for sub-agents by `ToolPack.get_schemas()` based on session depth. The other tools (`read`, `grep`, `glob`) are available to all agents.
+
+#### Supporting modules (`_utils/`)
+
+##### `_utils/security.py` — PathGuard
+
+Deny-list based file path security guard. Used by `ReadTool`, `GrepTool`, and `GlobTool` to prevent access to sensitive files.
+
+| Component | Description |
+|---|---|
+| `PathGuard` | Takes a `denied_patterns` list of glob patterns. Provides `is_path_allowed(path)` (returns bool) and `check_path(path)` (raises `PermissionError` on denied paths). |
+| `DEFAULT_DENIED_PATTERNS` | Module-level list of default deny patterns (e.g. `.env`, `.git/`, `*.key`, `*.pem`). |
+
+##### `_utils/binary.py` — BinaryDetector
+
+Extension and content-based binary file detection. Used by `ReadTool` to reject binary files.
+
+| Component | Description |
+|---|---|
+| `BinaryDetector` | Static utility class with `is_binary(path)`, `is_binary_extension(path)`, and `is_binary_content(data)` methods. |
+| `BINARY_EXTENSIONS` | Module-level `frozenset` of file extensions considered binary (e.g. `.pyc`, `.so`, `.png`, `.zip`). |
+
+##### `_utils/search.py` — SearchEngine Abstraction
+
+Abstract base class and concrete implementations for file search operations. Used by `GrepTool` and `GlobTool` with automatic ripgrep detection and fallback.
+
+| Component | Description |
+|---|---|
+| `SearchEngine` | ABC with abstract `search()` method. Defines the interface for file search backends. |
+| `RipgrepEngine` | Concrete implementation using `ripgrep` (`rg`) subprocess. Requires `rg` on PATH. |
+| `PythonEngine` | Pure-Python fallback using `pathlib` + `re`. Used when ripgrep is not available. |
+| `SearchResult` | Dataclass for individual search results (file path, line number, matched text). |
+| `get_search_engine()` | Factory function that returns `RipgrepEngine` if `rg` is available, otherwise `PythonEngine`. |
 
 ---
 
@@ -803,7 +855,14 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 | `test_fallback_truncation.py` | Unit tests for fallback provider truncation |
 | `test_key_pool_sorting.py` | Unit tests for key pool sorting priority (insertion order vs errors) |
 | `test_rate_limiter.py` | Unit tests for `SlidingWindowRateLimiter` |
-| `test_runner_infrastructure.py` | Unit tests for `Engine` singleton, `SessionManager`, and `MessageEvent` |
+| `test_runner_infrastructure.py` | Unit tests for `Engine` singleton and `SessionManager` |
+| `test_concurrency_guard.py` | Unit tests for per-provider concurrency guard |
+| `test_file_security.py` | Unit tests for PathGuard deny-list access control |
+| `test_binary_detector.py` | Unit tests for BinaryDetector extension and content detection |
+| `test_search_engine.py` | Unit tests for SearchEngine abstraction layer (PythonEngine + RipgrepEngine) |
+| `test_read_tool.py` | Unit tests for ReadTool (file/directory reading, pagination, truncation, binary/security rejection) |
+| `test_grep_tool.py` | Unit tests for GrepTool (regex search, include filter, XML output) |
+| `test_glob_tool.py` | Unit tests for GlobTool (file pattern matching, XML output; imports from `glob_` module) |
 
 All tests use `pytest-asyncio` and are pure unit tests (mocked, no live LLM calls).
 
@@ -823,9 +882,9 @@ A FastAPI application providing a chat UI and SSE-based streaming API. Static fi
 
 Creates the FastAPI app, mounts static files from `web/`, and includes routers for chat, sessions, and health.
 
-#### `_state.py` — Global Streaming Lock
+#### `_state.py` — Global Streaming Lock & Delegate Task Storage
 
-Enforces single-request-at-a-time processing via a boolean flag (`set_streaming` / `is_streaming`). Returns HTTP 429 if a request arrives while another is streaming.
+Enforces single-request-at-a-time processing via a boolean flag (`set_streaming` / `is_streaming`). Returns HTTP 429 if a request arrives while another is streaming. Also stores a reference to the current `delegate_task` via `set_active_session()` / `get_active_session()`, enabling the `/chat/abort` endpoint to cancel the running agent.
 
 #### `session_store.py` — ~~Session Persistence~~ [DELETED]
 
@@ -857,9 +916,9 @@ Defines the wire-format SSE event types as dataclasses inheriting from `StreamEv
 
 17 dataclasses total (1 base `StreamEvent` + 8 root event types + 8 sub-agent event types). Additionally, the `waiting_for_children` event is emitted as a raw SSE event (not a dataclass) by `_execute_cycle()` when the agent enters the `WAITING_FOR_CHILDREN` state. The `DoneEvent` does not include a `content` field — text content is delivered incrementally via Part events. Sub-agent events carry an additional `task_id` field to identify which sub-agent they belong to.
 
-#### `routers/chat.py` — Chat SSE Endpoint
+#### `routers/chat.py` — Chat SSE & Abort Endpoints
 
-Exposes `POST /chat` which streams agent responses via Server-Sent Events.
+Exposes `POST /chat` which streams agent responses via Server-Sent Events, and `POST /chat/abort` which cancels a running agent session by closing the SSE connection and calling `agent.abort()` on the stored delegate task.
 
 **Event translation (`on_engine_event()`):**
 
