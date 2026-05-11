@@ -31,15 +31,20 @@ class ChildCompletionNotification:
 
     def to_prompt(self) -> str:
         """Format this notification as a user message for the parent agent."""
-        return (
-            "[Child Agent Report] {label} ({task_id}) has completed:\n"
-            "- Status: {status}\n"
-            "- Task: {task}\n"
-            "- Summary: {summary}\n"
-        ).format(
+        lines = [
+            "[Child Agent Report] {label} ({task_id}) has completed:",
+            "- Status: {status}",
+            "- Task: {task}",
+            "- Summary: {summary}",
+        ]
+        text = "\n".join(lines).format(
             label=self.label,
             task_id=self.task_id,
             status=self.status,
             task=self.task,
             summary=self.summary,
         )
+        if self.session_file:
+            text += f"\n- Session File: {self.session_file}"
+            text += "\nTip: You can use the read tool to inspect the session file above for detailed execution logs of this child agent."
+        return text

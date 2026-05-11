@@ -6,7 +6,6 @@ from typing import Any, Dict
 from engine.config import get_config
 from engine.tools.base import Tool
 from engine.tools.builtin._utils.search import MAX_RESULTS, get_search_engine
-from engine.tools.builtin._utils.security import PathGuard
 
 
 class GrepTool(Tool):
@@ -40,9 +39,6 @@ class GrepTool(Tool):
         "required": ["pattern"],
     }
 
-    def __init__(self, path_guard: PathGuard | None = None):
-        self._guard = path_guard or PathGuard()
-
     async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> str:
         pattern = arguments.get("pattern", "")
         if not pattern:
@@ -51,11 +47,6 @@ class GrepTool(Tool):
         path = arguments.get("path") or str(get_config().get_workspace_path())
         path = os.path.abspath(path)
         include = arguments.get("include")
-
-        # Security check
-        denial = self._guard.check_path(path)
-        if denial:
-            return f"Error: {denial}"
 
         searcher = get_search_engine()
         try:

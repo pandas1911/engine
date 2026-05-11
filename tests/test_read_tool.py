@@ -1,4 +1,4 @@
-"""Tests for ReadTool — file and directory reading with pagination, security, and binary detection."""
+"""Tests for ReadTool — file and directory reading with pagination and binary detection."""
 
 import asyncio
 import os
@@ -7,7 +7,6 @@ import stat
 import pytest
 
 from engine.tools.builtin.read import ReadTool
-from engine.tools.builtin._utils.security import PathGuard
 
 
 def _run(tool, args, context=None):
@@ -145,26 +144,6 @@ class TestReadToolTruncation:
         f.write_text(long_line)
         result = _run(ReadTool(), {"filePath": str(f)})
         assert "[truncated]" in result
-
-
-class TestReadToolSecurity:
-    """Tests for path security deny-list."""
-
-    def test_env_file_denied(self, tmp_path):
-        # Use a PathGuard with custom pattern to ensure test reliability
-        f = tmp_path / ".env"
-        f.write_text("SECRET=123")
-        guard = PathGuard(denied_patterns=["**/.env"])
-        result = _run(ReadTool(path_guard=guard), {"filePath": str(f)})
-        assert "denied pattern" in result
-        assert "Error" in result
-
-    def test_credentials_denied(self, tmp_path):
-        f = tmp_path / "credentials.json"
-        f.write_text('{"key": "secret"}')
-        guard = PathGuard(denied_patterns=["**/credentials*"])
-        result = _run(ReadTool(path_guard=guard), {"filePath": str(f)})
-        assert "denied pattern" in result
 
 
 class TestReadToolEmptyFile:

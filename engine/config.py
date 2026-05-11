@@ -65,9 +65,6 @@ class Config:
     # Tool enable/disable configuration
     tools: Dict[str, bool] = field(default_factory=dict)
 
-    # File tool security configuration
-    file_permissions: Dict[str, Any] = field(default_factory=dict)
-
     # Workspace directory for file operations
     workspace: Optional[str] = None
 
@@ -192,7 +189,6 @@ class ConfigLoader:
             "cooldown_max_ms",
             "user_timezone",
             "tools",
-            "file_permissions",
             "workspace",
         }
 

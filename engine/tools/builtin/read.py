@@ -5,7 +5,6 @@ from typing import Any, Dict
 
 from engine.tools.base import Tool
 from engine.tools.builtin._utils.binary import BinaryDetector
-from engine.tools.builtin._utils.security import PathGuard
 
 
 class ReadTool(Tool):
@@ -34,28 +33,21 @@ class ReadTool(Tool):
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum number of lines to read. Default: 2000.",
+                "description": "Maximum number of lines to read. Default: 5000.",
             },
         },
         "required": ["filePath"],
     }
 
-    DEFAULT_READ_LIMIT = 2000
-    MAX_LINE_LENGTH = 2000
-    MAX_BYTES = 50 * 1024
-
-    def __init__(self, path_guard: PathGuard | None = None):
-        self._guard = path_guard or PathGuard()
+    DEFAULT_READ_LIMIT = 5000
+    MAX_LINE_LENGTH = 5000
+    MAX_BYTES = 70 * 1024
 
     async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> str:
         file_path = arguments.get("filePath", "")
         if not file_path or not isinstance(file_path, str):
             return "Error: filePath is required"
         file_path = os.path.abspath(file_path)
-
-        denial = self._guard.check_path(file_path)
-        if denial:
-            return f"Error: {denial}"
 
         if not os.path.exists(file_path):
             return self._format_not_found(file_path)

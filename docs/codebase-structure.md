@@ -56,7 +56,6 @@ engine/
 │   │   │   ├── glob_.py       # GlobTool — file pattern matching with ripgrep/Python fallback
 │   │   │   └── _utils/        # Helper modules shared by builtin tools
 │   │   │       ├── __init__.py
-│   │   │       ├── security.py    # PathGuard — deny-list based file path security guard
 │   │   │       ├── binary.py      # BinaryDetector — extension and content-based binary file detection
 │   │   │       └── search.py      # SearchEngine ABC + RipgrepEngine + PythonEngine + get_search_engine()
 │   │   └── custom/            # Auto-discovered custom tools (web search, web fetch)
@@ -77,7 +76,6 @@ engine/
 │   ├── test_fallback_truncation.py  # Fallback provider truncation tests
 │   ├── test_key_pool_sorting.py  # Key pool sorting priority tests
 │   ├── test_rate_limiter.py  # Rate limiter unit tests
-│   ├── test_file_security.py      # PathGuard deny-list unit tests
 │   ├── test_binary_detector.py    # BinaryDetector extension/content detection tests
 │   ├── test_search_engine.py      # SearchEngine abstraction layer tests
 │   ├── test_read_tool.py          # ReadTool file/directory reading tests
@@ -216,7 +214,6 @@ Loads runtime configuration from `engine.json`.
 | `cooldown_max_ms` | `300000.0` | Maximum key cooldown |
 | `user_timezone` | `None` | Timezone override (env var `USER_TIMEZONE` takes precedence) |
 | `tools` | `{}` | `Dict[str, bool]` — tool enable/disable mapping. Unlisted tools default to `True` (enabled). Use `config.is_tool_enabled(name)` to check. |
-| `file_permissions` | `{}` | `Dict[str, Any]` — file tool security configuration. Contains `denied_patterns` list for PathGuard. |
 
 **Note:** Sub-agent nesting depth is fixed at depth=1 (leaf workers only). Enforced at architecture level in `SpawnTool` and `SubAgentManager.spawn()`, not via config.
 
@@ -685,7 +682,7 @@ Orchestrates the full child agent lifecycle. Created lazily by `SpawnTool` per a
 | `_run_child()` | Background execution with lane slot management |
 | `_execute_child()` | Wraps `_run_child()`: emits `subagent_done`/`subagent_error` lifecycle events after child completes |
 | `_on_child_complete()` | Per-child immediate wake handler: build `ChildCompletionNotification`, resume or enqueue parent |
-| `_build_child_notification()` | Extract label, status, summary from child task; set `child_task.agent = None` for memory cleanup; persist session via `rewrite_file()`; return `ChildCompletionNotification` |
+| `_build_child_notification()` | Extract label, status, summary from child task; construct full session file path using `session_store.sessions_dir`; set `child_task.agent = None` for memory cleanup; persist session via `rewrite_file()`; return `ChildCompletionNotification` |
 
 **Sub-agent streaming logic:**
 
@@ -729,7 +726,7 @@ Each child independently triggers notification to the parent. No sibling gates, 
 | Model | Description |
 |---|---|
 | `AgentTask` | Task entry: task_id, session_id, description, parent references, child_task_ids, result, agent reference |
-| `ChildCompletionNotification` | Per-child notification: task_id, label, task description, status (completed/error), summary, session_file. Has `to_prompt()` method that formats a user message for the parent agent |
+| `ChildCompletionNotification` | Per-child notification: task_id, label, task description, status (completed/error), summary, session_file. `session_file` contains the full relative path to the child's session file (e.g. `sessions/root_id/task_id.jsonl`). `to_prompt()` method formats a user message for the parent agent, including the session file path and a tip to use the read tool for detailed execution logs. |
 
 ---
 
@@ -778,22 +775,13 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 | Class | Name | Description |
 |---|---|---|
 | `SpawnTool` | `spawn` | Creates child agents via `SubAgentManager`. Lazy-creates manager per agent on first `execute()` call using `asyncio.Lock`. Owns the `LaneConcurrencyQueue` for SUBAGENT concurrency. Parameters: `task` (required), `label` (optional). |
-| `ReadTool` | `read` | Reads file contents with line numbers and pagination, or lists directory entries. Uses `PathGuard` for security and `BinaryDetector` for binary rejection. Parameters: `path` (required), `offset`/`limit` (optional pagination). |
+| `ReadTool` | `read` | Reads file contents with line numbers and pagination, or lists directory entries. Uses `BinaryDetector` for binary rejection. Parameters: `filePath` (required), `offset`/`limit` (optional pagination). |
 | `GrepTool` | `grep` | Searches file contents for regex patterns. Uses `SearchEngine` with ripgrep auto-fallback. Supports include glob filtering. Parameters: `pattern` (required), `include` (optional glob), `output_mode` (optional). |
 | `GlobTool` | `glob` | Finds files matching glob patterns. Uses `SearchEngine` with ripgrep auto-fallback. Parameters: `pattern` (required). |
 
 **Root-only tools:** `spawn` is filtered out for sub-agents by `ToolPack.get_schemas()` based on session depth. The other tools (`read`, `grep`, `glob`) are available to all agents.
 
 #### Supporting modules (`_utils/`)
-
-##### `_utils/security.py` — PathGuard
-
-Deny-list based file path security guard. Used by `ReadTool`, `GrepTool`, and `GlobTool` to prevent access to sensitive files.
-
-| Component | Description |
-|---|---|
-| `PathGuard` | Takes a `denied_patterns` list of glob patterns. Provides `is_path_allowed(path)` (returns bool) and `check_path(path)` (raises `PermissionError` on denied paths). |
-| `DEFAULT_DENIED_PATTERNS` | Module-level list of default deny patterns (e.g. `.env`, `.git/`, `*.key`, `*.pem`). |
 
 ##### `_utils/binary.py` — BinaryDetector
 
@@ -858,10 +846,9 @@ Abstract base class and concrete implementations for file search operations. Use
 | `test_rate_limiter.py` | Unit tests for `SlidingWindowRateLimiter` |
 | `test_runner_infrastructure.py` | Unit tests for `Engine` singleton and `SessionManager` |
 | `test_concurrency_guard.py` | Unit tests for per-provider concurrency guard |
-| `test_file_security.py` | Unit tests for PathGuard deny-list access control |
 | `test_binary_detector.py` | Unit tests for BinaryDetector extension and content detection |
 | `test_search_engine.py` | Unit tests for SearchEngine abstraction layer (PythonEngine + RipgrepEngine) |
-| `test_read_tool.py` | Unit tests for ReadTool (file/directory reading, pagination, truncation, binary/security rejection) |
+| `test_read_tool.py` | Unit tests for ReadTool (file/directory reading, pagination, truncation, binary rejection) |
 | `test_grep_tool.py` | Unit tests for GrepTool (regex search, include filter, XML output) |
 | `test_glob_tool.py` | Unit tests for GlobTool (file pattern matching, XML output; imports from `glob_` module) |
 

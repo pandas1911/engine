@@ -518,7 +518,11 @@ class SubAgentManager:
 
         summary = ResultTruncator.truncate(summary, _SUMMARY_MAX_LENGTH)
 
-        session_file = "{}.jsonl".format(task_id)
+        session_file = (
+            str(self._session_store.sessions_dir / f"{task_id}.jsonl")
+            if self._session_store is not None and self._session_store.sessions_dir is not None
+            else f"{task_id}.jsonl"
+        )
 
         # Release agent reference — callback already persists all messages in real-time
         child_task.agent = None
