@@ -12,6 +12,8 @@ dependencies = [
     "httpx",
     "markdownify",
     "openai",
+    "tree-sitter",
+    "tree-sitter-bash",
 ]
 
 [project.optional-dependencies]
