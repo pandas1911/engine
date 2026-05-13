@@ -12,14 +12,15 @@ engine/
 │   ├── __init__.py            # Thin re-export layer (re-exports from runner.py and submodules)
 │   ├── runner.py              # Engine (singleton), Infrastructure, SessionManager — main entry point for the agent system
 │   ├── config.py              # Configuration loading (engine.json)
-│   ├── prompts/               # Layered prompt system (4-layer assembly)
+│   ├── prompts/               # Layered prompt system (XML-tagged assembly)
 │   │   ├── __init__.py        # Backward-compatible re-exports
-│   │   ├── builder.py         # 4-layer prompt assembly (base → env → tools → custom instructions)
+│   │   ├── builder.py         # XML-tagged prompt assembly (<core-rules>, <spawning-guideline>, <environment>, <available-tools>, <user-instructions>)
 │   │   ├── env_builder.py     # Environment context builder (Date, Timezone, Working Directory, Model, OS)
 │   │   ├── runtime.py         # Dynamic prompt functions (warnings, confirmations, rejections)
-│   │   ├── base.md            # Layer 1: Behavioral constraints (no role assignment)
-│   │   ├── spawn.md           # Layer 1: Sub-agent spawning strategy
-│   │   └── subagent.md        # Sub-agent system prompt template (.format() syntax)
+│   │   └── templates/         # Markdown prompt templates
+│   │       ├── base.md        # Layer 1: Behavioral constraints (wrapped in <core-rules>)
+│   │       ├── spawn.md       # Layer 1: Sub-agent spawning strategy (wrapped in <spawning-guideline>)
+│   │       └── subagent.md    # Sub-agent system prompt template (.format() syntax)
 │   ├── session_store.py       # Unified SessionStore — JSONL append persistence for root & child sessions
 │   ├── time.py                # Timezone-aware time utilities
 │   ├── safety/                # Rate limiting, concurrency, retry, pacing
@@ -88,6 +89,7 @@ engine/
 │   ├── test_read_tool.py          # ReadTool file/directory reading tests
 │   ├── test_grep_tool.py          # GrepTool content search tests
 │   ├── test_glob_tool.py          # GlobTool file pattern matching tests
+│   ├── test_prompt_assembly.py    # Prompt XML-tagged assembly unit tests
 ├── app/                       # FastAPI web application
 │   ├── main.py                # FastAPI app factory, static file mount
 │   ├── _state.py              # Global streaming lock (single-request enforcement) + delegate_task storage
@@ -151,7 +153,7 @@ The main entry point containing the `Engine` class (singleton), `Infrastructure`
 | `Engine.get(config?)` | Singleton access. Returns existing Engine instance or creates one with the given config. |
 | `Engine.reset()` | Clear singleton instance (for testing). |
 | `Engine.delegate(task_description, ...)` | Main async entry point. Calls `create_session()` then `mgr.start()`. Returns `AgentResult`. On exception, returns `AgentResult(success=False)`. Finally unregisters the session manager. |
-| `Engine.create_session(session?, event_callback?, system_prompt?)` | Factory method. Creates and returns a `SessionManager` for a conversation. |
+| `Engine.create_session(session?, event_callback?)` | Factory method. Creates and returns a `SessionManager` for a conversation. |
 
 **Infrastructure class (plain, owned by Engine):**
 
@@ -169,7 +171,7 @@ A plain class (no singleton methods) that holds all shared infrastructure: provi
 1. `Engine.get(config)` creates singleton on first call. `Engine.__init__()` creates `Infrastructure(config)`
 2. `Infrastructure.__init__()` loads config, builds providers, rate limiters, key pool, fallback provider, and tool pack
 3. `Engine.delegate()` calls `create_session()` which creates a `SessionManager` with the shared `Infrastructure`
-4. `SessionManager.__init__()` sets up session, system prompt (with env block), event queue, streaming handler, task registry, root `Agent`, and `SessionStore`
+4. `SessionManager.__init__()` sets up session, builds system prompt via `build_system_prompt()` with XML-tagged sections, event queue, streaming handler, task registry, root `Agent`, and `SessionStore`
 5. `mgr.start(task_description)` registers agent in `AgentTaskRegistry`, runs the agent, waits for completion, returns `AgentResult`
 6. Error handling: exception → `AgentResult(success=False)`, finally → `mgr.unregister()`
 
@@ -234,40 +236,41 @@ Loads runtime configuration from `engine.json`.
 
 ### 4. `engine/prompts/` — Layered Prompt System
 
-A package implementing 4-layer system prompt assembly with clear separation of concerns. Content lives in `.md` files; assembly logic in Python modules.
+A package implementing 4-layer system prompt assembly with XML-tagged sections. Content lives in `templates/` markdown files; assembly logic wraps each layer in XML tags for structured parsing.
 
 **4-Layer Architecture:**
 
-| Layer | Section Header | Source | Description |
+| Layer | XML Tag | Source | Description |
 |---|---|---|---|
-| 1 | (no header) | `base.md` + optional `spawn.md` | Behavioral constraints and execution strategy |
-| 2 | `## Environment` | `env_builder.py` | Date, Timezone, Working Directory, Model, OS |
-| 3 | `## Available Tools` | Tool `short_description` attributes | Enabled tools with brief descriptions |
-| 4 | `## Custom Instructions` | `FRIDAY.md` from workspace | User-defined behavioral instructions |
+| 1 | `<core-rules>` | `base.md` + optional `spawn.md` (in `<spawning-guideline>`) | Behavioral constraints and execution strategy |
+| 2 | `<environment>` | `env_builder.py` | Date, Timezone, Working Directory, Model, OS |
+| 3 | `<available-tools>` | Tool `short_description` attributes | Enabled tools with brief descriptions |
+| 4 | `<user-instructions>` | `FRIDAY.md` from workspace | User-defined behavioral instructions |
 
 **Package files:**
 
 | File | Description |
 |---|---|
 | `__init__.py` | Backward-compatible re-exports. All symbols from old flat `prompts.py` re-exported here so existing imports continue to work. Dead code (`get_child_results_prompt`, `get_child_results_empty_warning`) removed. |
-| `builder.py` | 4-layer assembly via `build_system_prompt()`. Module-level `BASE_PROMPT`, `SPAWN_PROMPT`, `DEFAULT_SYSTEM_PROMPT` constants. Backward-compatible `build_root_system_prompt()` alias. `build_subagent_prompt()` for sub-agent assembly. `get_subagent_system_prompt()` reads from `subagent.md` template. |
+| `builder.py` | XML-tagged assembly via `build_system_prompt()`. Reads templates from `templates/` subdirectory. Each layer wrapped in XML tags (`<core-rules>`, `<spawning-guideline>`, `<environment>`, `<available-tools>`, `<user-instructions>`). Module-level `BASE_PROMPT`, `SPAWN_PROMPT`, `DEFAULT_SYSTEM_PROMPT` constants. Backward-compatible `build_root_system_prompt()` alias. `build_subagent_prompt()` for sub-agent assembly. `get_subagent_system_prompt()` reads from `subagent.md` template. |
 | `env_builder.py` | `build_env_context(time_provider, workspace_dir, model_name)` returns `Dict[str, str]` with 5 fields: Date, Timezone, Working Directory, Model, OS. Accepts optional `platform_override` for testing. |
 | `runtime.py` | Pure functions with zero `engine.*` imports: `get_summary_warning()`, `get_emergency_summary_prompt()`, `get_spawn_confirmation()`, `get_concurrency_timeout_rejection()`. |
-| `base.md` | Layer 1 content: behavioral constraints (Execution Strategy, Output Format, Custom Instructions Priority). No role assignment. |
-| `spawn.md` | Layer 1 content: sub-agent spawning strategy (Decompose first, Parallel over sequential, Spawning Rules). |
-| `subagent.md` | Sub-agent system prompt template using `.format()` syntax with `{parent_label}`, `{task_desc}`, `{task_id}`, `{label}` placeholders. |
+| `templates/` | Subdirectory containing markdown prompt templates (`base.md`, `spawn.md`, `subagent.md`). |
+| `templates/base.md` | Layer 1 content: behavioral constraints. Wrapped in `<core-rules>` tag. |
+| `templates/spawn.md` | Layer 1 content: sub-agent spawning strategy. Wrapped in `<spawning-guideline>` tag. |
+| `templates/subagent.md` | Sub-agent system prompt template using `.format()` syntax with `{parent_label}`, `{task_desc}`, `{task_id}`, `{label}` placeholders. |
 
 **Key functions:**
 
 | Function | Description |
 |---|---|
-| `build_system_prompt(include_spawn, env_context, tool_descriptions, user_instructions)` | Primary entry point — assembles all 4 layers in order |
-| `build_root_system_prompt(include_spawn)` | Backward-compatible alias — returns Layer 1 only |
-| `build_subagent_prompt(parent_label, task_desc, depth, can_spawn, task_id, label, env_context)` | Sub-agent prompt assembly (template + env) |
+| `build_system_prompt(include_spawn, env_context, tool_descriptions, user_instructions)` | Primary entry point — assembles all 4 layers wrapped in XML tags (`<core-rules>`, `<spawning-guideline>`, `<environment>`, `<available-tools>`, `<user-instructions>`) |
+| `build_root_system_prompt(include_spawn)` | Backward-compatible alias — returns Layer 1 only (wrapped in `<core-rules>` and optionally `<spawning-guideline>`) |
+| `build_subagent_prompt(parent_label, task_desc, depth, can_spawn, task_id, label, env_context)` | Sub-agent prompt assembly (template + `<environment>` wrapped env layer) |
 | `get_subagent_system_prompt(parent_label, task_desc, depth, can_spawn, task_id, label)` | Reads `subagent.md` template, applies `.format()` substitution |
 
 **Derived values:**
-- `DEFAULT_SYSTEM_PROMPT` = `build_root_system_prompt(include_spawn=True)` — backward-compatible alias (Layer 1 only, no runtime layers)
+- `DEFAULT_SYSTEM_PROMPT` = `build_root_system_prompt(include_spawn=True)` — backward-compatible alias (Layer 1 only, wrapped in `<core-rules>` and `<spawning-guideline>` tags)
 
 ---
 
@@ -867,6 +870,7 @@ Abstract base class and concrete implementations for file search operations. Use
 | `test_read_tool.py` | Unit tests for ReadTool (file/directory reading, pagination, truncation, binary rejection) |
 | `test_grep_tool.py` | Unit tests for GrepTool (regex search, include filter, XML output) |
 | `test_glob_tool.py` | Unit tests for GlobTool (file pattern matching, XML output; imports from `glob_` module) |
+| `test_prompt_assembly.py` | Unit tests for XML-tagged prompt assembly (`build_system_prompt`, `build_subagent_prompt`, `DEFAULT_SYSTEM_PROMPT`, env block pattern) |
 
 All tests use `pytest-asyncio` and are pure unit tests (mocked, no live LLM calls).
 
