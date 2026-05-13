@@ -1,10 +1,11 @@
 """Prompt layer assembly for the engine framework.
 
-4-layer system prompt assembly:
-  Layer 1: base.md (+ optional spawn.md) — Identity/Rules
-  Layer 2: ## Environment (Markdown key-value) — Context
-  Layer 3: ## Available Tools (tool short_descriptions) — Tool Awareness
-  Layer 4: ## Custom Instructions (FRIDAY.md content) — User Instructions
+XML-tagged system prompt assembly:
+  <core-rules>: base.md — behavioral constraints
+  <spawning-guideline>: spawn.md — sub-agent spawning strategy
+  <environment>: env context — Date, Timezone, Working Directory, Model, OS
+  <available-tools>: tool short_descriptions — enabled tools with descriptions
+  <user-instructions>: FRIDAY.md — user-defined behavioral instructions
 """
 
 from pathlib import Path
@@ -15,7 +16,7 @@ _PROMPTS_DIR = Path(__file__).parent
 
 def _read_md(filename: str) -> str:
     """Read a markdown file from the prompts directory."""
-    return (_PROMPTS_DIR / filename).read_text(encoding="utf-8").strip()
+    return (_PROMPTS_DIR / "templates" / filename).read_text(encoding="utf-8").strip()
 
 
 # Module-level constants for backward-compatible re-exports
@@ -29,33 +30,27 @@ def build_system_prompt(
     tool_descriptions: Optional[List[Tuple[str, str]]] = None,
     user_instructions: Optional[str] = None,
 ) -> str:
-    """Assemble the full system prompt from all 4 layers.
-
-    Layer order:
-      1. base.md (+ optional spawn.md)
-      2. ## Environment (Markdown key-value)
-      3. ## Available Tools (tool short_descriptions)
-      4. ## Custom Instructions (FRIDAY.md content)
-    """
-    sections = [_read_md("base.md")]
+    sections = [f"<core-rules>\n{_read_md('base.md')}\n</core-rules>"]
 
     if include_spawn:
-        sections.append(_read_md("spawn.md"))
+        sections.append(f"<spawning-guideline>\n{_read_md('spawn.md')}\n</spawning-guideline>")
 
     if env_context:
-        lines = ["## Environment"]
+        lines = ["<environment>"]
         for key, value in env_context.items():
             lines.append(f"- **{key}**: {value}")
+        lines.append("</environment>")
         sections.append("\n".join(lines))
 
     if tool_descriptions:
-        lines = ["## Available Tools"]
+        lines = ["<available-tools>"]
         for name, desc in tool_descriptions:
             lines.append(f"- **{name}**: {desc}")
+        lines.append("</available-tools>")
         sections.append("\n".join(lines))
 
     if user_instructions:
-        sections.append(f"## Custom Instructions\n\n{user_instructions.strip()}")
+        sections.append(f"<user-instructions>\n{user_instructions.strip()}\n</user-instructions>")
 
     return "\n\n".join(sections)
 
@@ -109,7 +104,7 @@ def build_subagent_prompt(
 
     Layers:
       1. subagent.md template (.format substituted)
-      2. ## Environment (if env_context provided)
+      2. <environment> (if env_context provided)
     """
     sections = [get_subagent_system_prompt(
         parent_label=parent_label,
@@ -121,9 +116,10 @@ def build_subagent_prompt(
     )]
 
     if env_context:
-        lines = ["## Environment"]
+        lines = ["<environment>"]
         for key, value in env_context.items():
             lines.append(f"- **{key}**: {value}")
+        lines.append("</environment>")
         sections.append("\n".join(lines))
 
     return "\n\n".join(sections)

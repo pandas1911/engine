@@ -28,4 +28,4 @@ pythonpath = ["."]
 include = ["engine*"]
 
 [tool.setuptools.package-data]
-engine = ["prompts/*.md"]
+engine = ["prompts/templates/*.md"]
