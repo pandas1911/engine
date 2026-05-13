@@ -61,6 +61,7 @@ class SlidingWindowRateLimiter:
         self._lock = asyncio.Lock()
         self._scheduler_task = None  # background scheduler
         self._next_reservation_id: int = 1  # 0 is sentinel for "no reservation"
+        self._wake_event = asyncio.Event()  # Signal scheduler to re-check capacity
 
         # Pacing fields
         self._pacing_enabled = pacing_enabled
@@ -249,6 +250,9 @@ class SlidingWindowRateLimiter:
                 # [==================== LOG: control ====================]
                 self._log_usage_recorded(tokens)
                 # [==================== END LOG ============================]
+        # Wake scheduler - capacity may have been freed
+        self._wake_event.set()
+
     async def release_reserved(self, reservation_id: int) -> None:
         """Release a tentative TPM reservation.
 
@@ -256,8 +260,10 @@ class SlidingWindowRateLimiter:
         """
         if reservation_id <= 0:
             return
+        released = False
         async with self._lock:
             if self._remove_tpm_entry_by_rid(reservation_id):
+                released = True
                 # [==================== LOG: control ====================]
                 get_logger().info(
                     "RateControl",
@@ -272,7 +278,8 @@ class SlidingWindowRateLimiter:
                     },
                 )
                 # [==================== END LOG ============================]
-                return
+        if released:
+            self._wake_event.set()
 
     def _ensure_scheduler_locked(self) -> None:
         """Start scheduler if not already running (lock must be held)."""
@@ -354,8 +361,12 @@ class SlidingWindowRateLimiter:
                 else:
                     sleep_time = 0.05  # Fallback, shouldn't happen in practice
 
-            # Sleep OUTSIDE the lock
-            await asyncio.sleep(sleep_time)
+            # Sleep OUTSIDE the lock, but wakeable by release/usage
+            self._wake_event.clear()
+            try:
+                await asyncio.wait_for(self._wake_event.wait(), timeout=sleep_time)
+            except asyncio.TimeoutError:
+                pass
 
     def get_remaining_fraction(self) -> float:
         """Return the minimum of RPM and TPM remaining fractions."""
