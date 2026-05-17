@@ -77,7 +77,7 @@ def _refresh_custom_tools() -> None:
 _logger = logging.getLogger(__name__)
 
 _ENV_BLOCK_PATTERN = re.compile(
-    r"## Environment\n(?:- \*\*.*?\*\*: .*?\n)*",
+    r"<environment>\n(?:- \*\*.*?\*\*: .*?\n)*</environment>",
 )
 
 _active_sessions: Dict[str, "SessionManager"] = {}
@@ -196,7 +196,6 @@ class Engine:
     async def delegate(
         self,
         task_description: str,
-        system_prompt: Optional[str] = None,
         tools: Optional[List] = None,
         config: Optional[Config] = None,
         session: Optional[Session] = None,
@@ -208,7 +207,6 @@ class Engine:
             mgr = self.create_session(
                 session=session,
                 event_callback=event_callback,
-                system_prompt=system_prompt,
             )
             return await mgr.start(task_description)
         except Exception as e:
@@ -230,14 +228,12 @@ class Engine:
         self,
         session: Optional[Session] = None,
         event_callback: Optional[Callable[[str, Any], None]] = None,
-        system_prompt: Optional[str] = None,
     ) -> "SessionManager":
         """Create a SessionManager for a conversation."""
         return SessionManager(
             infra=self._infra,
             session=session,
             event_callback=event_callback,
-            system_prompt=system_prompt,
         )
 
 
@@ -252,24 +248,15 @@ class SessionManager:
         infra: "Infrastructure",
         session: Optional[Session] = None,
         event_callback: Optional[Callable[[str, Any], None]] = None,
-        system_prompt: Optional[str] = None,
     ):
         self.infra = infra
         self.event_callback = event_callback
 
         # --- Session setup ---
-        self._provided_session = session is not None
         if session is None:
             session = Session(id=f"root_{uuid.uuid4().hex[:8]}", depth=0)
         self.session = session
 
-        if self._provided_session and system_prompt is not None:
-            _logger.warning(
-                "Both 'session' and 'system_prompt' provided; "
-                "'system_prompt' is ignored when 'session' is provided."
-            )
-
-        self._system_prompt = system_prompt
         self._ensure_system_prompt()
 
         # --- Unified event queue (passed to Agent, shared with Branch B) ---
@@ -305,39 +292,36 @@ class SessionManager:
         if has_system:
             self._refresh_env_block()
         else:
-            if self._system_prompt:
-                full_prompt = self._system_prompt
-            else:
-                # Resolve workspace directory
-                workspace_dir = str(self.infra.config.get_workspace_path())
+            # Resolve workspace directory
+            workspace_dir = str(self.infra.config.get_workspace_path())
 
-                # Build env context
-                env_context = build_env_context(
-                    time_provider=self.infra.time_provider,
-                    workspace_dir=workspace_dir,
-                    model_name=self.infra.config.primary,
-                )
+            # Build env context
+            env_context = build_env_context(
+                time_provider=self.infra.time_provider,
+                workspace_dir=workspace_dir,
+                model_name=self.infra.config.primary,
+            )
 
-                # Collect tool short_descriptions
-                tool_descs = [
-                    (t.name, t.short_description)
-                    for t in self.infra.tool_pack._registry._tools.values()
-                    if hasattr(t, 'short_description') and t.short_description
-                ] if self.infra.tool_pack else []
+            # Collect tool short_descriptions
+            tool_descs = [
+                (t.name, t.short_description)
+                for t in self.infra.tool_pack._registry._tools.values()
+                if hasattr(t, 'short_description') and t.short_description
+            ] if self.infra.tool_pack else []
 
-                # Scan FRIDAY.md from workspace directory
-                user_instructions = None
-                friday_path = self.infra.config.get_workspace_path() / "FRIDAY.md"
-                if friday_path.exists():
-                    user_instructions = friday_path.read_text(encoding="utf-8")
+            # Scan FRIDAY.md from workspace directory
+            user_instructions = None
+            friday_path = self.infra.config.get_workspace_path() / "FRIDAY.md"
+            if friday_path.exists():
+                user_instructions = friday_path.read_text(encoding="utf-8")
 
-                # Assemble full system prompt
-                full_prompt = build_system_prompt(
-                    include_spawn=self.infra.config.is_tool_enabled("spawn"),
-                    env_context=env_context,
-                    tool_descriptions=tool_descs if tool_descs else None,
-                    user_instructions=user_instructions,
-                )
+            # Assemble full system prompt
+            full_prompt = build_system_prompt(
+                include_spawn=self.infra.config.is_tool_enabled("spawn"),
+                env_context=env_context,
+                tool_descriptions=tool_descs if tool_descs else None,
+                user_instructions=user_instructions,
+            )
             self.session.add_message("system", full_prompt)
 
     def _refresh_env_block(self) -> None:
@@ -353,9 +337,10 @@ class SessionManager:
             workspace_dir=workspace_dir,
             model_name=self.infra.config.primary,
         )
-        fresh_lines = ["## Environment"]
+        fresh_lines = ["<environment>"]
         for key, value in env_context.items():
             fresh_lines.append(f"- **{key}**: {value}")
+        fresh_lines.append("</environment>")
         fresh_block = "\n".join(fresh_lines)
 
         if _ENV_BLOCK_PATTERN.search(system_msg.content):

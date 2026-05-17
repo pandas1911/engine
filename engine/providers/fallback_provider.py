@@ -258,10 +258,7 @@ class FallbackLLMProvider(BaseLLMProvider):
         depth: int = 0,
     ) -> LLMResponse:
         estimated_tokens = self._estimate_tokens(messages, tools)
-        max_iterations = max(
-            50,
-            len(self._providers) * (self._max_profile_rotations + 1) * 2,
-        )
+        max_iterations = len(self._providers) * (self._max_profile_rotations + 1)
 
         for iteration in range(max_iterations):
             profile_name = self._key_pool.acquire_key()
@@ -358,10 +355,7 @@ class FallbackLLMProvider(BaseLLMProvider):
         On other errors: release reservation and raise.
         """
         estimated_tokens = self._estimate_tokens(messages, tools)
-        max_iterations = max(
-            50,
-            len(self._providers) * (self._max_profile_rotations + 1) * 2,
-        )
+        max_iterations = len(self._providers) * (self._max_profile_rotations + 1)
 
         for iteration in range(max_iterations):
             profile_name = self._key_pool.acquire_key()

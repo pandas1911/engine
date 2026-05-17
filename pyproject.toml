@@ -12,6 +12,8 @@ dependencies = [
     "httpx",
     "markdownify",
     "openai",
+    "tree-sitter",
+    "tree-sitter-bash",
 ]
 
 [project.optional-dependencies]
@@ -28,4 +30,4 @@ pythonpath = ["."]
 include = ["engine*"]
 
 [tool.setuptools.package-data]
-engine = ["prompts/*.md"]
+engine = ["prompts/templates/*.md"]

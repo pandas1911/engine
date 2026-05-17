@@ -12,14 +12,15 @@ engine/
 │   ├── __init__.py            # Thin re-export layer (re-exports from runner.py and submodules)
 │   ├── runner.py              # Engine (singleton), Infrastructure, SessionManager — main entry point for the agent system
 │   ├── config.py              # Configuration loading (engine.json)
-│   ├── prompts/               # Layered prompt system (4-layer assembly)
+│   ├── prompts/               # Layered prompt system (XML-tagged assembly)
 │   │   ├── __init__.py        # Backward-compatible re-exports
-│   │   ├── builder.py         # 4-layer prompt assembly (base → env → tools → custom instructions)
+│   │   ├── builder.py         # XML-tagged prompt assembly (<core-rules>, <spawning-guideline>, <environment>, <available-tools>, <user-instructions>)
 │   │   ├── env_builder.py     # Environment context builder (Date, Timezone, Working Directory, Model, OS)
 │   │   ├── runtime.py         # Dynamic prompt functions (warnings, confirmations, rejections)
-│   │   ├── base.md            # Layer 1: Behavioral constraints (no role assignment)
-│   │   ├── spawn.md           # Layer 1: Sub-agent spawning strategy
-│   │   └── subagent.md        # Sub-agent system prompt template (.format() syntax)
+│   │   └── templates/         # Markdown prompt templates
+│   │       ├── base.md        # Layer 1: Behavioral constraints (wrapped in <core-rules>)
+│   │       ├── spawn.md       # Layer 1: Sub-agent spawning strategy (wrapped in <spawning-guideline>)
+│   │       └── subagent.md    # Sub-agent system prompt template (.format() syntax)
 │   ├── session_store.py       # Unified SessionStore — JSONL append persistence for root & child sessions
 │   ├── time.py                # Timezone-aware time utilities
 │   ├── safety/                # Rate limiting, concurrency, retry, pacing
@@ -56,11 +57,22 @@ engine/
 │   │   ├── base.py            # Tool ABC, FunctionTool, ToolRegistry (pure storage)
 │   │   ├── pack.py            # ToolPack — immutable view over ToolRegistry with depth-aware schema filtering
 │   │   ├── builtin/           # Built-in tools
-│   │   │   ├── __init__.py    # BUILTIN_TOOLS list, re-exports
-│   │   │   ├── spawn.py       # SpawnTool — lazy-caches SubAgentManager per agent, passes root_streaming_handler through
-│   │   │   ├── read.py        # ReadTool — file/directory reading with pagination and binary detection
-│   │   │   ├── grep.py        # GrepTool — regex content search with ripgrep/Python fallback
-│   │   │   ├── glob_.py       # GlobTool — file pattern matching with ripgrep/Python fallback
+│   │   │   ├── __init__.py    # BUILTIN_TOOLS list (SpawnTool, ReadTool, GrepTool, GlobTool, BashTool, ProcessTool)
+│   │   │   ├── spawn.py       # SpawnTool — lazy-caches SubAgentManager per agent
+│   │   │   ├── read.py        # ReadTool — file/directory reading with pagination
+│   │   │   ├── grep.py        # GrepTool — regex content search
+│   │   │   ├── glob_.py       # GlobTool — file pattern matching
+│   │   │   ├── bash.py        # BashTool — shell command execution with AST safety analysis
+│   │   │   ├── process.py     # ProcessTool — background process management (list/poll/log/kill)
+│   │   │   ├── _bash/         # Internal bash tool implementation modules
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── schemas.py     # Parameter schemas and execution constants
+│   │   │   │   ├── ast_parser.py  # tree-sitter bash AST parser for security analysis
+│   │   │   │   ├── security.py    # Command blocklist/allowlist + env var sanitization
+│   │   │   │   ├── output.py      # Output truncation with file persistence + sliding window buffer
+│   │   │   │   ├── executor.py    # Async process executor (spawn, timeout, SIGTERM→SIGKILL)
+│   │   │   │   ├── background.py  # Background execution + in-memory process registry
+│   │   │   │   └── prompt.py      # LLM-facing tool description template
 │   │   │   └── _utils/        # Helper modules shared by builtin tools
 │   │   │       ├── __init__.py
 │   │   │       ├── binary.py      # BinaryDetector — extension and content-based binary file detection
@@ -88,6 +100,17 @@ engine/
 │   ├── test_read_tool.py          # ReadTool file/directory reading tests
 │   ├── test_grep_tool.py          # GrepTool content search tests
 │   ├── test_glob_tool.py          # GlobTool file pattern matching tests
+│   ├── test_prompt_assembly.py    # Prompt XML-tagged assembly unit tests
+│   ├── test_bash_tool.py          # BashTool integration tests
+│   ├── test_process_tool.py       # ProcessTool unit tests
+│   ├── tools/bash/                # Bash tool test suite
+│   │   ├── test_schemas.py        # Schema and constant tests
+│   │   ├── test_ast_parser.py     # tree-sitter AST parser tests
+│   │   ├── test_security.py       # Security module tests
+│   │   ├── test_output.py         # Output truncation tests
+│   │   ├── test_executor.py       # Process executor tests
+│   │   ├── test_background.py     # Background execution tests
+│   │   └── test_integration.py    # End-to-end integration tests
 ├── app/                       # FastAPI web application
 │   ├── main.py                # FastAPI app factory, static file mount
 │   ├── _state.py              # Global streaming lock (single-request enforcement) + delegate_task storage
@@ -110,7 +133,7 @@ engine/
 ├── docs/                      # Documentation
 │   └── codebase-structure.md  # This file
 ├── logs/                      # Runtime log output (JSONL)
-├── pyproject.toml             # Project metadata and dependencies
+├── pyproject.toml             # Project metadata and dependencies (includes tree-sitter, tree-sitter-bash for bash AST parsing)
 ├── engine.json.example        # Example configuration file
 ├── .env.example               # Example environment variables
 ├── AGENTS.md                  # Agent collaboration rules
@@ -151,7 +174,7 @@ The main entry point containing the `Engine` class (singleton), `Infrastructure`
 | `Engine.get(config?)` | Singleton access. Returns existing Engine instance or creates one with the given config. |
 | `Engine.reset()` | Clear singleton instance (for testing). |
 | `Engine.delegate(task_description, ...)` | Main async entry point. Calls `create_session()` then `mgr.start()`. Returns `AgentResult`. On exception, returns `AgentResult(success=False)`. Finally unregisters the session manager. |
-| `Engine.create_session(session?, event_callback?, system_prompt?)` | Factory method. Creates and returns a `SessionManager` for a conversation. |
+| `Engine.create_session(session?, event_callback?)` | Factory method. Creates and returns a `SessionManager` for a conversation. |
 
 **Infrastructure class (plain, owned by Engine):**
 
@@ -169,7 +192,7 @@ A plain class (no singleton methods) that holds all shared infrastructure: provi
 1. `Engine.get(config)` creates singleton on first call. `Engine.__init__()` creates `Infrastructure(config)`
 2. `Infrastructure.__init__()` loads config, builds providers, rate limiters, key pool, fallback provider, and tool pack
 3. `Engine.delegate()` calls `create_session()` which creates a `SessionManager` with the shared `Infrastructure`
-4. `SessionManager.__init__()` sets up session, system prompt (with env block), event queue, streaming handler, task registry, root `Agent`, and `SessionStore`
+4. `SessionManager.__init__()` sets up session, builds system prompt via `build_system_prompt()` with XML-tagged sections, event queue, streaming handler, task registry, root `Agent`, and `SessionStore`
 5. `mgr.start(task_description)` registers agent in `AgentTaskRegistry`, runs the agent, waits for completion, returns `AgentResult`
 6. Error handling: exception → `AgentResult(success=False)`, finally → `mgr.unregister()`
 
@@ -234,40 +257,41 @@ Loads runtime configuration from `engine.json`.
 
 ### 4. `engine/prompts/` — Layered Prompt System
 
-A package implementing 4-layer system prompt assembly with clear separation of concerns. Content lives in `.md` files; assembly logic in Python modules.
+A package implementing 4-layer system prompt assembly with XML-tagged sections. Content lives in `templates/` markdown files; assembly logic wraps each layer in XML tags for structured parsing.
 
 **4-Layer Architecture:**
 
-| Layer | Section Header | Source | Description |
+| Layer | XML Tag | Source | Description |
 |---|---|---|---|
-| 1 | (no header) | `base.md` + optional `spawn.md` | Behavioral constraints and execution strategy |
-| 2 | `## Environment` | `env_builder.py` | Date, Timezone, Working Directory, Model, OS |
-| 3 | `## Available Tools` | Tool `short_description` attributes | Enabled tools with brief descriptions |
-| 4 | `## Custom Instructions` | `FRIDAY.md` from workspace | User-defined behavioral instructions |
+| 1 | `<core-rules>` | `base.md` + optional `spawn.md` (in `<spawning-guideline>`) | Behavioral constraints and execution strategy |
+| 2 | `<environment>` | `env_builder.py` | Date, Timezone, Working Directory, Model, OS |
+| 3 | `<available-tools>` | Tool `short_description` attributes | Enabled tools with brief descriptions |
+| 4 | `<user-instructions>` | `FRIDAY.md` from workspace | User-defined behavioral instructions |
 
 **Package files:**
 
 | File | Description |
 |---|---|
 | `__init__.py` | Backward-compatible re-exports. All symbols from old flat `prompts.py` re-exported here so existing imports continue to work. Dead code (`get_child_results_prompt`, `get_child_results_empty_warning`) removed. |
-| `builder.py` | 4-layer assembly via `build_system_prompt()`. Module-level `BASE_PROMPT`, `SPAWN_PROMPT`, `DEFAULT_SYSTEM_PROMPT` constants. Backward-compatible `build_root_system_prompt()` alias. `build_subagent_prompt()` for sub-agent assembly. `get_subagent_system_prompt()` reads from `subagent.md` template. |
+| `builder.py` | XML-tagged assembly via `build_system_prompt()`. Reads templates from `templates/` subdirectory. Each layer wrapped in XML tags (`<core-rules>`, `<spawning-guideline>`, `<environment>`, `<available-tools>`, `<user-instructions>`). Module-level `BASE_PROMPT`, `SPAWN_PROMPT`, `DEFAULT_SYSTEM_PROMPT` constants. Backward-compatible `build_root_system_prompt()` alias. `build_subagent_prompt()` for sub-agent assembly. `get_subagent_system_prompt()` reads from `subagent.md` template. |
 | `env_builder.py` | `build_env_context(time_provider, workspace_dir, model_name)` returns `Dict[str, str]` with 5 fields: Date, Timezone, Working Directory, Model, OS. Accepts optional `platform_override` for testing. |
 | `runtime.py` | Pure functions with zero `engine.*` imports: `get_summary_warning()`, `get_emergency_summary_prompt()`, `get_spawn_confirmation()`, `get_concurrency_timeout_rejection()`. |
-| `base.md` | Layer 1 content: behavioral constraints (Execution Strategy, Output Format, Custom Instructions Priority). No role assignment. |
-| `spawn.md` | Layer 1 content: sub-agent spawning strategy (Decompose first, Parallel over sequential, Spawning Rules). |
-| `subagent.md` | Sub-agent system prompt template using `.format()` syntax with `{parent_label}`, `{task_desc}`, `{task_id}`, `{label}` placeholders. |
+| `templates/` | Subdirectory containing markdown prompt templates (`base.md`, `spawn.md`, `subagent.md`). |
+| `templates/base.md` | Layer 1 content: behavioral constraints. Wrapped in `<core-rules>` tag. |
+| `templates/spawn.md` | Layer 1 content: sub-agent spawning strategy. Wrapped in `<spawning-guideline>` tag. |
+| `templates/subagent.md` | Sub-agent system prompt template using `.format()` syntax with `{parent_label}`, `{task_desc}`, `{task_id}`, `{label}` placeholders. |
 
 **Key functions:**
 
 | Function | Description |
 |---|---|
-| `build_system_prompt(include_spawn, env_context, tool_descriptions, user_instructions)` | Primary entry point — assembles all 4 layers in order |
-| `build_root_system_prompt(include_spawn)` | Backward-compatible alias — returns Layer 1 only |
-| `build_subagent_prompt(parent_label, task_desc, depth, can_spawn, task_id, label, env_context)` | Sub-agent prompt assembly (template + env) |
+| `build_system_prompt(include_spawn, env_context, tool_descriptions, user_instructions)` | Primary entry point — assembles all 4 layers wrapped in XML tags (`<core-rules>`, `<spawning-guideline>`, `<environment>`, `<available-tools>`, `<user-instructions>`) |
+| `build_root_system_prompt(include_spawn)` | Backward-compatible alias — returns Layer 1 only (wrapped in `<core-rules>` and optionally `<spawning-guideline>`) |
+| `build_subagent_prompt(parent_label, task_desc, depth, can_spawn, task_id, label, env_context)` | Sub-agent prompt assembly (template + `<environment>` wrapped env layer) |
 | `get_subagent_system_prompt(parent_label, task_desc, depth, can_spawn, task_id, label)` | Reads `subagent.md` template, applies `.format()` substitution |
 
 **Derived values:**
-- `DEFAULT_SYSTEM_PROMPT` = `build_root_system_prompt(include_spawn=True)` — backward-compatible alias (Layer 1 only, no runtime layers)
+- `DEFAULT_SYSTEM_PROMPT` = `build_root_system_prompt(include_spawn=True)` — backward-compatible alias (Layer 1 only, wrapped in `<core-rules>` and `<spawning-guideline>` tags)
 
 ---
 
@@ -794,8 +818,10 @@ Built-in tools registered by the engine at startup. Exported via `BUILTIN_TOOLS`
 | `ReadTool` | `read` | Reads file contents with line numbers and pagination, or lists directory entries. Uses `BinaryDetector` for binary rejection. Parameters: `filePath` (required), `offset`/`limit` (optional pagination). |
 | `GrepTool` | `grep` | Searches file contents for regex patterns. Uses `SearchEngine` with ripgrep auto-fallback. Supports include glob filtering. Parameters: `pattern` (required), `include` (optional glob), `output_mode` (optional). |
 | `GlobTool` | `glob` | Finds files matching glob patterns. Uses `SearchEngine` with ripgrep auto-fallback. Parameters: `pattern` (required). |
+| `BashTool` | `bash` | Shell command execution with tree-sitter AST safety analysis, env sanitization, timeout, output truncation, and background support |
+| `ProcessTool` | `process` | Background process management: list, poll (status check), log (output retrieval), kill (terminate) |
 
-**Root-only tools:** `spawn` is filtered out for sub-agents by `ToolPack.get_schemas()` based on session depth. The other tools (`read`, `grep`, `glob`) are available to all agents.
+**Root-only tools:** `spawn` is filtered out for sub-agents by `ToolPack.get_schemas()` based on session depth. The other tools (`read`, `grep`, `glob`, `bash`, `process`) are available to all agents.
 
 #### Supporting modules (`_utils/`)
 
@@ -819,6 +845,63 @@ Abstract base class and concrete implementations for file search operations. Use
 | `PythonEngine` | Pure-Python fallback using `pathlib` + `re`. Used when ripgrep is not available. |
 | `SearchResult` | Dataclass for individual search results (file path, line number, matched text). |
 | `get_search_engine()` | Factory function that returns `RipgrepEngine` if `rg` is available, otherwise `PythonEngine`. |
+
+#### `_bash/` — Bash Tool Implementation Package
+
+Internal implementation modules for the bash tool system. Not directly exported. Tools are registered via `engine/tools/builtin/bash.py` and `engine/tools/builtin/process.py`.
+
+##### `schemas.py` — Parameter Schemas & Constants
+
+| Symbol | Description |
+|---|---|
+| `BASH_TOOL_SCHEMA` | OpenAI function calling parameter schema for BashTool |
+| `PROCESS_TOOL_SCHEMA` | OpenAI function calling parameter schema for ProcessTool |
+| `DEFAULT_TIMEOUT_MS` | Default command timeout (120000ms / 2 min) |
+| `MAX_OUTPUT_LINES` | Output truncation line limit (2000) |
+| `MAX_OUTPUT_BYTES` | Output truncation byte limit (50KB) |
+| `YIELD_THRESHOLD_MS` | Auto-background yield threshold (10000ms / 10s) |
+| `KILL_GRACE_PERIOD_MS` | SIGTERM to SIGKILL grace period (3000ms) |
+
+##### `ast_parser.py` — tree-sitter Bash Command Parser
+
+| Class | Description |
+|---|---|
+| `BashASTParser` | Parse bash commands via tree-sitter AST, extract command names, file paths, redirects, pipes, dynamic content |
+| `ParsedCommand` | Dataclass: command_names, file_paths, redirects, has_pipes, has_dynamic_parts, raw_command |
+| `RedirectInfo` | Dataclass: target_path, mode (write/append/read) |
+
+##### `security.py` — Security Analysis
+
+| Class/Function | Description |
+|---|---|
+| `SecurityChecker` | Layered command security: blocklist (hard block), allowlist (fast path), unknown (warn) |
+| `sanitize_env()` | Environment variable sanitization. Blocks 50+ dangerous keys (code injection, library injection, git manipulation, TLS bypass) |
+| `SecurityResult` | Dataclass: allowed, reason, warnings |
+
+##### `output.py` — Output Truncation
+
+| Class | Description |
+|---|---|
+| `OutputTruncator` | Truncate output at line/byte limits, persist full output to file |
+| `OutputBuffer` | Sliding window buffer for streaming output capture |
+| `TruncationResult` | Dataclass: output, truncated, full_output_path |
+
+##### `executor.py` — Process Executor
+
+| Class | Description |
+|---|---|
+| `ProcessExecutor` | Async subprocess execution via `asyncio.create_subprocess_shell` with timeout, abort signal, process group kill |
+| `ExecutionResult` | Dataclass: exit_code, stdout, stderr, timed_out, aborted, truncated, full_output_path |
+
+##### `background.py` — Background Execution & Registry
+
+| Class | Description |
+|---|---|
+| `BackgroundExecutor` | Execute commands with auto-background: races against yield threshold, backgrounds if not done |
+| `ProcessRegistry` | In-memory CRUD registry for background processes |
+| `BackgroundProcess` | Dataclass: session_id, pid, command, workdir, status, exit_code, stdout, stderr |
+| `BackgroundProcessInfo` | Dataclass: session_id, command, status, start_time, exit_code |
+| `BackgroundResult` | Dataclass: backgrounded, session_id, direct_result |
 
 ---
 
@@ -867,6 +950,21 @@ Abstract base class and concrete implementations for file search operations. Use
 | `test_read_tool.py` | Unit tests for ReadTool (file/directory reading, pagination, truncation, binary rejection) |
 | `test_grep_tool.py` | Unit tests for GrepTool (regex search, include filter, XML output) |
 | `test_glob_tool.py` | Unit tests for GlobTool (file pattern matching, XML output; imports from `glob_` module) |
+| `test_prompt_assembly.py` | Unit tests for XML-tagged prompt assembly (`build_system_prompt`, `build_subagent_prompt`, `DEFAULT_SYSTEM_PROMPT`, env block pattern) |
+| `test_bash_tool.py` | Integration tests for BashTool (command execution, timeout, output truncation) |
+| `test_process_tool.py` | Unit tests for ProcessTool (list, poll, log, kill operations) |
+
+#### Bash Tool Tests
+
+| File | Description |
+|---|---|
+| `tools/bash/test_schemas.py` | Schema and constant validation tests |
+| `tools/bash/test_ast_parser.py` | tree-sitter AST parser tests (command extraction, pipe detection, redirect parsing) |
+| `tools/bash/test_security.py` | Security module tests (blocklist, allowlist, env sanitization) |
+| `tools/bash/test_output.py` | Output truncation and buffer tests |
+| `tools/bash/test_executor.py` | Process executor tests (timeout, abort, SIGTERM/SIGKILL) |
+| `tools/bash/test_background.py` | Background execution and process registry tests |
+| `tools/bash/test_integration.py` | End-to-end integration tests across all modules |
 
 All tests use `pytest-asyncio` and are pure unit tests (mocked, no live LLM calls).
 
@@ -1042,6 +1140,8 @@ Engine.delegate() (engine/runner.py)
 | `httpx` | Async HTTP client (used by web fetch tool) |
 | `markdownify` | HTML-to-Markdown conversion (used by web fetch tool) |
 | `ddgs` | Metasearch library aggregating 9+ search engines with automatic failover (used by web search tool) |
+| `tree-sitter` | Incremental parsing library (used by BashTool for bash AST parsing) |
+| `tree-sitter-bash` | Bash grammar for tree-sitter (used by BashTool for command security analysis) |
 | `pytest` + `pytest-asyncio` | Test framework with async support |
 
 ---
