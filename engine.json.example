@@ -45,5 +45,9 @@
     "tool_1": false,
     "tool_2": true
   },
-  "workspace": "~/Desktop/Friday"
+  "workspace": "~/Desktop/Friday",
+  "aliyun_search": {
+    "access_key_id": "your-aliyun-access-key-id-here",
+    "access_key_secret": "your-aliyun-access-key-secret-here"
+  }
 }

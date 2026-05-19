@@ -44,6 +44,8 @@ ENV/
 
 # Chat sessions (local data)
 sessions/
+search_cache/
+workspace/
 
 # Tests
 dist/

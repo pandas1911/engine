@@ -68,6 +68,12 @@ class Config:
     # Workspace directory for file operations
     workspace: Optional[str] = None
 
+    # Internal: directory containing engine.json (set by ConfigLoader)
+    _config_dir: Optional[str] = None
+
+    # Alibaba Cloud IQS search configuration (access_key_id, access_key_secret)
+    aliyun_search: Optional[Dict[str, str]] = None
+
     def get_workspace_path(self) -> Path:
         """Resolve the workspace path with ~ expansion and cross-platform default.
 
@@ -79,8 +85,10 @@ class Config:
         """
         if self.workspace and self.workspace.strip():
             resolved_path = Path(os.path.expanduser(self.workspace))
+        elif self._config_dir:
+            resolved_path = Path(self._config_dir) / "workspace"
         else:
-            resolved_path = Path.home() / "Desktop" / "Friday"
+            resolved_path = Path.cwd() / "workspace"
 
         if not resolved_path.is_absolute():
             raise ValueError(
@@ -190,6 +198,7 @@ class ConfigLoader:
             "user_timezone",
             "tools",
             "workspace",
+            "aliyun_search",
         }
 
         kwargs = {k: v for k, v in data.items() if k in known_fields}
@@ -198,6 +207,7 @@ class ConfigLoader:
         kwargs["primary"] = primary
         kwargs["fallback"] = fallback
         config = Config(**kwargs)
+        config._config_dir = os.path.dirname(os.path.abspath(path))
 
         # Env var override for timezone (takes precedence over JSON)
         user_tz_env = os.environ.get("USER_TIMEZONE")
