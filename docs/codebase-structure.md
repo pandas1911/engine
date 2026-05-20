@@ -79,7 +79,8 @@ engine/
 │   │   │       └── search.py      # SearchEngine ABC + RipgrepEngine + PythonEngine + get_search_engine()
 │   │   └── custom/            # Auto-discovered custom tools (web search, web fetch)
 │   │       ├── __init__.py
-│   │       └── web_fetch.py   # URL content fetching with HTML→Markdown/Text conversion
+│   │       ├── web_fetch.py   # URL content fetching with HTML→Markdown/Text conversion
+│   │       └── web_search.py  # Web search via ddgs metasearch; caches results per-session
 │   └── logging/               # Structured logging
 │       ├── __init__.py
 │       └── sink.py            # Logger, formatters, async file handler
@@ -305,6 +306,7 @@ A unified session persistence layer using JSONL append format. Replaces both the
 sessions/{root_session_id}/
     main.jsonl           <- root agent session
     task_abc123.jsonl     <- child session (named by task_id)
+    search_cache/         <- per-session web search result cache (auto-cleaned with session)
 ```
 
 **Classes:**
@@ -805,7 +807,7 @@ Each child independently triggers notification to the parent. No sibling gates, 
 
 Auto-discovered custom tools directory. Place `Tool` subclasses here and they will be automatically loaded by `_discover_custom_tools()`. Currently contains:
 
-- **`web_search`** (`web_search.py`) — Web search tool using the `ddgs` metasearch library. Aggregates results from multiple search engines (DuckDuckGo, Bing, Brave, Google, etc.) with automatic failover via `backend="auto"`. Uses `asyncio.to_thread()` to wrap the synchronous `DDGS.text()` call. Lazy singleton DDGS instance for connection reuse.
+- **`web_search`** (`web_search.py`) — Web search tool using the `ddgs` metasearch library. Aggregates results from multiple search engines (DuckDuckGo, Bing, Brave, Google, etc.) with automatic failover via `backend="auto"`. Uses `asyncio.to_thread()` to wrap the synchronous `DDGS.text()` call. Lazy singleton DDGS instance for connection reuse. Caches full-text results per-session under `sessions/{session_id}/search_cache/` (falls back to workspace-level `search_cache/` when session context is unavailable).
 - **`web_fetch`** (`web_fetch.py`) — URL content fetching tool with configurable format (class variable `DEFAULT_FORMAT`, default: markdown), transient-error retry, Cloudflare handling, and response size limits. Content is truncated to 15,000 characters (`_MAX_CONTENT_LENGTH`) to prevent LLM context overflow.
 
 #### `builtin/` — Built-in Tools

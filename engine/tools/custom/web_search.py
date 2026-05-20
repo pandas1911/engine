@@ -140,19 +140,24 @@ class WebSearchTool(Tool):
         file_refs: List[Optional[str]] = []
         for i, result in enumerate(results):
             main_text = getattr(result, "main_text", None)
-            ref = self._save_maintext(main_text, query, i)
+            ref = self._save_maintext(main_text, query, i, context=context)
             file_refs.append(ref)
 
         return self._format_results(query, results, file_refs)
 
     def _save_maintext(
-        self, main_text: Optional[str], query: str, index: int
+        self, main_text: Optional[str], query: str, index: int,
+        context: Optional[dict] = None,
     ) -> Optional[str]:
-        """Save mainText to disk. Returns relative file path or None."""
+        """Save mainText to disk. Returns absolute file path or None."""
         if not main_text or not main_text.strip():
             return None
         config = get_config()
-        cache_dir = config.get_workspace_path() / "search_cache"
+        if context and context.get("session"):
+            session_id = context["session"].id
+            cache_dir = config.get_workspace_path() / "sessions" / session_id / "search_cache"
+        else:
+            cache_dir = config.get_workspace_path() / "search_cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
         query_hash = hashlib.md5(query.encode()).hexdigest()[:8]
         timestamp = int(time.time())
@@ -160,7 +165,7 @@ class WebSearchTool(Tool):
         filepath = cache_dir / filename
         content = ResultTruncator.truncate(main_text, self._MAX_MAINTEXT_LENGTH)
         filepath.write_text(content, encoding="utf-8")
-        return f"search_cache/{filename}"
+        return str(filepath)
 
     def _format_results(
         self,

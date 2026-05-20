@@ -70,9 +70,6 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
         _truncate_session(session)
     else:
         session = Session(id=f"chat_{uuid.uuid4().hex[:8]}", depth=0)
-        removed = _get_session_store().cleanup_old_sessions(max_sessions=3)
-        if removed:
-            logger.info("ChatRouter", "Session cleanup: removed {} old session(s)".format(removed))
 
     session_id = session.id
     event_queue: asyncio.Queue = asyncio.Queue()
@@ -273,6 +270,13 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
                     break
     finally:
         _get_session_store().save(session)
+        if not chat_req.session_id:
+            try:
+                removed = _get_session_store().cleanup_old_sessions(max_sessions=3)
+                if removed:
+                    logger.info("ChatRouter", "Session cleanup: removed {} old session(s)".format(removed))
+            except Exception:
+                pass  # Don't let cleanup failure mask save errors
         clear_active_session()
         mgr.unregister()
         if not delegate_task.done():
