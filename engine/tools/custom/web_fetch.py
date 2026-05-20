@@ -12,6 +12,7 @@ from typing import List
 from urllib.parse import urlparse
 
 import httpx
+from bs4 import BeautifulSoup
 from markdownify import markdownify as md
 
 from engine.logging import get_logger
@@ -94,6 +95,114 @@ def _convert_html_to_markdown(html: str) -> str:
     return md(html, heading_style="ATX", bullets="-")
 
 
+# ---------------------------------------------------------------------------
+# HTML noise filter — remove navigation, ads, cookie banners, etc.
+# ---------------------------------------------------------------------------
+
+_NOISE_TAGS = frozenset({"nav", "footer", "header", "aside"})
+
+_NOISE_CLASS_PATTERNS = (
+    "ad", "ads", "advert", "advertisement", "sponsor",
+    "cookie", "gdpr", "consent", "banner", "popup", "notice",
+    "share", "social", "twitter", "facebook", "linkedin",
+    "comment", "disqus", "respond",
+)
+
+_NOISE_ID_PATTERNS = (
+    "ad", "ads", "cookie", "gdpr", "consent", "banner", "popup",
+    "share", "social", "comment", "disqus",
+)
+
+
+def _has_noise_class(tag) -> bool:
+    """Check if a tag's class list contains any noise-related patterns."""
+    classes = tag.get("class", [])
+    if isinstance(classes, str):
+        classes = [classes]
+    combined = " ".join(classes).lower()
+    return any(pat in combined for pat in _NOISE_CLASS_PATTERNS)
+
+
+def _has_noise_id(tag) -> bool:
+    """Check if a tag's id contains any noise-related patterns."""
+    tag_id = (tag.get("id") or "").lower()
+    return any(pat in tag_id for pat in _NOISE_ID_PATTERNS)
+
+
+def _filter_html_noise(html: str) -> str:
+    """Remove noise elements from HTML (nav, ads, cookie banners, etc.).
+
+    Uses BeautifulSoup to parse and decompose noise elements before
+    format conversion. On any parsing failure, returns the original
+    HTML unchanged as a safe fallback.
+    """
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+
+        # 1. Remove structural noise tags entirely
+        for tag in soup.find_all(_NOISE_TAGS):
+            tag.decompose()
+
+        # 2. Remove elements with noise-related class or id patterns
+        for tag in soup.find_all(True):
+            if _has_noise_class(tag) or _has_noise_id(tag):
+                tag.decompose()
+
+        # 3. Remove script/style/noscript/iframe (supplementary to markdownify)
+        for tag in soup.find_all(["script", "style", "noscript", "iframe"]):
+            tag.decompose()
+
+        return str(soup)
+    except Exception:
+        return html
+
+
+# ---------------------------------------------------------------------------
+# Content pagination — offset/limit based, line-numbered output
+# ---------------------------------------------------------------------------
+
+
+def _paginate_content(
+    content: str, offset: int, limit: int
+) -> tuple[str, int]:
+    """Paginate content by lines with line-number prefixes.
+
+    Args:
+        content: The full text content to paginate.
+        offset: 1-indexed line number to start from.
+        limit: Maximum number of lines to return.
+
+    Returns:
+        Tuple of (paginated_output, total_lines).
+    """
+    lines = content.splitlines()
+    total_lines = len(lines)
+
+    if offset > total_lines:
+        return (
+            f"[Offset {offset} exceeds total lines ({total_lines}). "
+            f"Content ends at line {total_lines}.]",
+            total_lines,
+        )
+
+    end = min(offset + limit - 1, total_lines)
+    page_lines = []
+    for i in range(offset - 1, end):
+        page_lines.append(f"{i + 1}: {lines[i]}")
+
+    output = "\n".join(page_lines)
+
+    shown_end = offset + len(page_lines) - 1
+    if total_lines > shown_end:
+        footer = (
+            f"\n\n[Showing lines {offset}-{shown_end} of {total_lines}. "
+            f"Use offset={shown_end + 1} to continue.]"
+        )
+        output += footer
+
+    return output, total_lines
+
+
 # Format-dependent Accept headers
 
 _ACCEPT_HEADERS = {
@@ -124,7 +233,10 @@ class WebFetchTool(Tool):
         "- The URL must be a fully-formed valid URL starting with http:// or https://.\n"
         "- Content format is determined by developer configuration (default: Markdown).\n"
         "- This tool is read-only and does not modify any files.\n"
-        "- Results may be summarized if the content is very large (truncated to ~15,000 characters).\n"
+        "- HTML noise (navigation, ads, cookie banners, social sharing) is automatically "
+        "filtered out to return cleaner content.\n"
+        "- For large pages, use offset and limit to read in segments. A footer will "
+        "indicate how many lines remain and what offset to use next.\n"
         "- Response size limit: 5 MB.\n"
         "- Default timeout: 30 seconds (configurable, max 120 seconds).\n"
         "- If the URL points to an image (e.g. PNG, JPEG, GIF, WebP), returns a description "
@@ -153,6 +265,20 @@ class WebFetchTool(Tool):
                     "Increase this for slow or large pages."
                 ),
             },
+            "offset": {
+                "type": "integer",
+                "description": (
+                    "1-indexed line number to start reading from. "
+                    "Default: 1 (start from the beginning)."
+                ),
+            },
+            "limit": {
+                "type": "integer",
+                "description": (
+                    "Maximum number of lines to read. Default: 500. "
+                    "Use with offset to read large pages in segments."
+                ),
+            },
         },
         "required": ["url"],
     }
@@ -163,6 +289,7 @@ class WebFetchTool(Tool):
     _MAX_CONTENT_LENGTH: int = 15000
     _MAX_RETRIES: int = 1
     _RETRY_DELAY: float = 2.0
+    DEFAULT_PAGE_LIMIT: int = 500
 
     async def execute(self, arguments: dict, context: dict) -> str:
         url = arguments.get("url", "")
@@ -274,6 +401,15 @@ class WebFetchTool(Tool):
         content = response.text
         is_html = "text/html" in content_type
 
+        # Extract pagination parameters
+        offset = max(1, arguments.get("offset", 1) or 1)
+        limit = arguments.get("limit", self.DEFAULT_PAGE_LIMIT) or self.DEFAULT_PAGE_LIMIT
+
+        # Apply noise filtering for HTML content (before format conversion)
+        if is_html:
+            content = _filter_html_noise(content)
+
+        # Format conversion
         if fmt == "markdown" and is_html:
             output = _convert_html_to_markdown(content)
         elif fmt == "text" and is_html:
@@ -284,4 +420,8 @@ class WebFetchTool(Tool):
         if not output or not output.strip():
             return "[Empty page] The URL returned no extractable content — the page may require JavaScript rendering."
 
+        # Apply pagination
+        output, total_lines = _paginate_content(output, offset, limit)
+
+        # Final safety net truncation
         return ResultTruncator.truncate(output, self._MAX_CONTENT_LENGTH)
