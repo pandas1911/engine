@@ -357,13 +357,17 @@ def init_logger(
 ) -> None:
     global _logger
 
+    log_to_file = True
+    if config is not None:
+        log_to_file = getattr(config, "log_to_file", True)
+
     target_dir = log_dir
     if target_dir is None and config is not None:
         target_dir = getattr(config, "log_dir", None)
     if target_dir is None:
         target_dir = "logs"
 
-    file_handler = AsyncFileHandler(target_dir)
+    file_handler = AsyncFileHandler(target_dir) if log_to_file else None
     if _logger is None:
         _logger = Logger(terminal=True, file_handler=file_handler)
     else:

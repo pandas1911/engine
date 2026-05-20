@@ -31,6 +31,7 @@
   "emergency_summary_enabled": true,
   "emergency_summary_context_messages": 0,
   "log_dir": null,
+  "log_to_file": true,
   "llm_retry_max_attempts": 3,
   "llm_retry_base_delay": 1.0,
   "main_lane_concurrency": 4,

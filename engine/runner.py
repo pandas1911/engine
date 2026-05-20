@@ -95,7 +95,7 @@ class Infrastructure:
         self.config = config
         self.time_provider = TimeProvider(timezone_override=config.user_timezone)
 
-        init_logger(log_dir=config.log_dir)
+        init_logger(config=config)
 
         # --- Build providers ---
         self.providers: Dict[str, LLMProvider] = {}

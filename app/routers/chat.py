@@ -9,8 +9,11 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from engine.runner import Engine
+from engine import get_logger
 from app._state import is_streaming, set_active_session, get_active_session, clear_active_session
 from engine.runtime.agent_models import Session
+
+logger = get_logger()
 
 router = APIRouter()
 
@@ -67,6 +70,9 @@ async def _event_generator(request: Request, chat_req: ChatRequest):
         _truncate_session(session)
     else:
         session = Session(id=f"chat_{uuid.uuid4().hex[:8]}", depth=0)
+        removed = _get_session_store().cleanup_old_sessions(max_sessions=3)
+        if removed:
+            logger.info("ChatRouter", "Session cleanup: removed {} old session(s)".format(removed))
 
     session_id = session.id
     event_queue: asyncio.Queue = asyncio.Queue()

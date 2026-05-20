@@ -6,11 +6,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.routers import chat, sessions, health
+from app.routers import chat, health
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from engine import Engine, get_logger
+
+    engine = Engine.get()
+    removed = engine._infra.session_store.cleanup_old_sessions(max_sessions=3)
+    if removed:
+        get_logger().info("AppStartup", "Startup cleanup: removed {} old session(s)".format(removed))
+
     yield
 
 
@@ -26,7 +33,6 @@ app.add_middleware(
 
 app.include_router(health.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
-app.include_router(sessions.router, prefix="/api")
 
 # Serve frontend static files (must be last — catches all routes)
 web_dir = Path(__file__).parent.parent / "web"

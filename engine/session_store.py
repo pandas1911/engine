@@ -8,6 +8,7 @@ Directory layout:
 """
 
 import json
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -267,6 +268,40 @@ class SessionStore:
             if (d / "main.jsonl").exists() or (d / "main.json").exists():
                 result.append(d.name)
         return sorted(result)
+
+    def cleanup_old_sessions(self, max_sessions: int = 3) -> int:
+        """Remove oldest sessions, keeping only max_sessions most recently used.
+
+        Uses file modification time of main.jsonl as the last-activity indicator.
+        Returns the number of sessions deleted.
+        """
+        sessions = self.list_sessions()
+        if len(sessions) <= max_sessions:
+            return 0
+
+        session_times = []
+        for sid in sessions:
+            session_dir = self._root_dir / sid
+            jsonl_path = session_dir / "main.jsonl"
+            json_path = session_dir / "main.json"
+            if jsonl_path.exists():
+                mtime = os.path.getmtime(str(jsonl_path))
+            elif json_path.exists():
+                mtime = os.path.getmtime(str(json_path))
+            else:
+                mtime = 0  # Sessions without data files are oldest
+            session_times.append((mtime, sid))
+
+        session_times.sort()  # ascending = oldest first
+
+        # Delete oldest sessions until we have <= max_sessions
+        to_delete = len(sessions) - max_sessions
+        deleted = 0
+        for _, sid in session_times[:to_delete]:
+            if self.delete(sid):
+                deleted += 1
+
+        return deleted
 
     # ------------------------------------------------------------------
     # Serialization helpers

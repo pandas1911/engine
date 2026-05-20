@@ -39,6 +39,7 @@ class Config:
 
     # Logging
     log_dir: Optional[str] = None
+    log_to_file: bool = True
 
     # Retry
     llm_retry_max_attempts: int = 3
@@ -186,6 +187,7 @@ class ConfigLoader:
             "emergency_summary_enabled",
             "emergency_summary_context_messages",
             "log_dir",
+            "log_to_file",
             "llm_retry_max_attempts",
             "llm_retry_base_delay",
             "subagent_lane_concurrency",
