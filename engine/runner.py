@@ -282,7 +282,14 @@ class SessionManager:
         self.session_store = infra.session_store
         self.session_store.create_root(self.session.id)
         self.agent.session_store = self.session_store
-        self.session_store.create_file("main", self.session)
+
+        # Only create a new file for brand-new sessions.
+        # Restored sessions already have their file on disk — calling create_file
+        # would overwrite it with a header-only file, wiping conversation history.
+        existing = self.session_store._find_file("main")
+        if existing is None:
+            self.session_store.create_file("main", self.session)
+
         self.session._on_message_added = (
             lambda msg: self.session_store.append_line("main", msg)
         )
